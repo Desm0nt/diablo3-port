@@ -812,6 +812,11 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
 // gives the strong definition). This is an empty weak definition, not a weak declaration: Apple's linker requires even a weak reference
 // to resolve at link time, or the Mac host and the iOS app fail to link (_mtl_event_read undefined)
 __attribute__((weak)) void mtl_event_read(const volatile uint32_t *val) { (void)val; }
+// [D3] DM_GFX_IDLE_RETIRE hooks (strong in nvn_vk.c): nvnEventGetValue's read, which at mode 2 does not wait for the GPU, and the idle
+// translation thread's poll. Weak fallbacks: the read lands a pending value as before; no idle polling.
+__attribute__((weak)) void mtl_event_peek(const volatile uint32_t *val) { mtl_event_read(val); }
+__attribute__((weak)) int mtl_idle_mode(void) { return 0; }
+__attribute__((weak)) int mtl_idle_poll(uint64_t idle_ns) { (void)idle_ns; return 0; }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
 NVN(nvnEventBuilderSetStorage, void, NVNeventBuilder *b, const NVNmemoryPool *p, int64_t off) { *(ev_builder_t *)b = (ev_builder_t){(const pool_t *)p, off}; }
 NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
@@ -826,9 +831,9 @@ NVN(nvnEventFinalize, void, NVNevent *e) { if (mtl_event_read) mtl_event_read(((
 // If the backend defers publishing command-buffer SignalEvents (Android Vulkan, gfx-defer-events), let it land before the read; the Metal backend has no such hook
 // The event-read timing runs on HarmonyOS only (only HarmonyOS reports these counters); other platforms as before
 #ifdef __OHOS__
-NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { if (mtl_event_read) { uint64_t t0 = now_ns(); mtl_event_read(((const ev_t *)e)->val); atomic_fetch_add(&g_gw_ev_ns, now_ns() - t0); atomic_fetch_add(&g_gw_ev_n, 1); } return *((const ev_t *)e)->val; }
+NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { if (mtl_event_read) { uint64_t t0 = now_ns(); mtl_event_peek(((const ev_t *)e)->val); atomic_fetch_add(&g_gw_ev_ns, now_ns() - t0); atomic_fetch_add(&g_gw_ev_n, 1); } return *((const ev_t *)e)->val; }
 #else
-NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { if (mtl_event_read) mtl_event_read(((const ev_t *)e)->val); return *((const ev_t *)e)->val; }
+NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { mtl_event_peek(((const ev_t *)e)->val); return *((const ev_t *)e)->val; }
 #endif
 static void ev_signal(const ev_t *e, int mode, uint32_t v) { if (mtl_event_read) mtl_event_read(e->val); if (mode == NVN_EVENT_SIGNAL_MODE_ADD) *e->val += v; else *e->val = v; }
 NVN(nvnEventSignal, void, NVNevent *e, NVNeventSignalMode m, uint32_t v) { ev_signal((const ev_t *)e, m, v); }
@@ -1322,15 +1327,27 @@ static void *x_thread(void *a) {
 #endif
 #endif
     g_x_port = pthread_mach_thread_np(pthread_self());
+    // [D3] DM_GFX_IDLE_RETIRE >= 1 (the engine's mode, mtl_idle_mode): while GPU work is outstanding the idle thread wakes every
+    // DM_GFX_IDLE_POLL_US (default 1000) and lets the engine publish what the GPU finished (mtl_idle_poll), as the Switch GPU
+    // writes events and counter reports by itself; a game spinning on that memory without an NVN call is then released.
+    long poll_us = 1000; { const char *e = getenv("DM_GFX_IDLE_POLL_US"); if (e && atol(e) > 0) poll_us = atol(e); }
+    int busy = 0; uint64_t idle_t0 = now_ns();
     pthread_mutex_lock(&g_xmu);
     for (;;) {
-        while (g_xq_done == g_xq_in) pthread_cond_wait(&g_xcv, &g_xmu);
+        while (g_xq_done == g_xq_in) {
+            if (!busy) { pthread_cond_wait(&g_xcv, &g_xmu); continue; }
+            struct timespec d; clock_gettime(CLOCK_REALTIME, &d); uint64_t ns = (uint64_t)d.tv_nsec + (uint64_t)poll_us * 1000ull;
+            d.tv_sec += (time_t)(ns / 1000000000ull); d.tv_nsec = (long)(ns % 1000000000ull);
+            if (pthread_cond_timedwait(&g_xcv, &g_xmu, &d) && g_xq_done == g_xq_in) {
+                pthread_mutex_unlock(&g_xmu); busy = mtl_idle_poll(now_ns() - idle_t0); pthread_mutex_lock(&g_xmu); }
+        }
         uint64_t job = g_xq_done + 1; xjob j = g_xq[job % XQ];
         pthread_mutex_unlock(&g_xmu);
         x_run(&j, job);
         pthread_mutex_lock(&g_xmu);
         g_xq_done = job; XTRACE_COUNT("dm-x-done-job", job);
         if (j.kind == XJ_SUBMIT) { g_xsub_done = j.sub; XTRACE_COUNT("dm-x-sub-done", g_xsub_done); } pthread_cond_broadcast(&g_xcv);
+        busy = mtl_idle_mode() > 0; idle_t0 = now_ns();   // a job may have left GPU work or deferred results: poll once idle
     }
     return NULL;
 }

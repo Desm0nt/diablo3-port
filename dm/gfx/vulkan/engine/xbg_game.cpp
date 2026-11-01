@@ -501,6 +501,24 @@ std::vector<PendingReport> pending_reports;
 struct PendingEvent {uint64_t addr;uint32_t mode,v;const void *slot;};
 std::vector<PendingEvent> pending_events,recording_events;   // recording_events: mode 2, slot not yet submitted
 int defer_events=0;uint64_t events_deferred=0,event_reads=0;
+// [D3] Switch-like publication of deferred results (DM_GFX_IDLE_RETIRE, default 0; marker gfx-idle-retire = 0/1/2 wins).
+// On the Switch the GPU writes event values and counter reports by itself when it gets there; here they land when their slot
+// retires, which only an NVN call used to trigger, so D3 (which spins with nn::os::YieldThread on counter reports and makes no
+// NVN call meanwhile) froze with deferred events. 1: the translation thread, idle, calls xbg_game_idle_poll every
+// DM_GFX_IDLE_POLL_US (hle_nvn.c, default 1000): slots whose fence signalled retire in submission order, and a recording slot
+// that holds deferred events or reports is submitted once the thread has been idle DM_GFX_IDLE_FLUSH_US (default 2000) and
+// the other slot is free (as nvnQueueSubmitCommands would have started it on the GPU). 2: also nvnEventGetValue no longer
+// completes all GPU work when the event has a pending value; it retires signalled slots without blocking and the game reads
+// what the GPU has reached (a spinning game is released by these polls and by the idle poll). CPU EventSignal / Initialize /
+// Finalize keep landing the pending value first. NVN PERF idle: polls, slots retired, flushes, peeks, peeks that met a
+// pending value, and peeks that skipped because the engine was busy.
+int idle_retire=0;uint64_t idle_flush_ns=2000000,idle_polls=0,idle_retired=0,idle_flushes=0,event_peeks=0,event_peeks_pending=0;std::atomic<uint64_t> event_peeks_busy{0};
+// [D3] Mid-submit chunk (DM_GFX_MID_CHUNK_US=N, default 0 = off): D3 records a whole frame in one guest command buffer that
+// ends in a SignalEvent, so with DM_GFX_DEFER_EVENTS=0 the GPU starts only at that signal and the translation thread then waits
+// for all of it (frame = translation + GPU). With N > 0, once the recording slot has been recording N us, the work so far is
+// handed to the GPU at the next command boundary (checked every 64 commands, like the arena cut) when the other slot is idle
+// or signalled, so the GPU starts while translation continues. NVN PERF block_ms submit_by chunk.
+uint64_t mid_chunk_ns=0,slot_rec_begin=0;
 std::string last_writer;
 struct PendingWriteback {uint64_t addr,bytes;Buffer buffer;const void *slot;bool viewed=false;};   // viewed: a GPU read was handed out (storage chaining must not write over it)
 int storage_chain=-1;uint64_t storage_chained=0,storage_merges=0,barriers_avoided=0;int guest_barrier=-1;uint64_t guest_barriers_skipped=0;bool storage_image_draw=false;   // a draw bound a storage image since the last honoured guest barrier
@@ -654,7 +672,7 @@ void drain(){if(!worker)return;{std::lock_guard<std::mutex> l(mu);stop=true;}cv.
 }
 // Where the CPU blocks on a busy slot fence, and why slots are submitted (NVN PERF block_ms).
 // The outermost site wins, except that a ring wrap in recording_slot is always counted as ring.
-enum SyncSite{SITE_OTHER,SITE_RING,SITE_PRESENT,SITE_EVENT,SITE_ARENA,SITE_GPU_SYNC,SITE_COMPLETE,SITE_POLL,SITE_LEGACY_WAIT,SITE_COUNT};
+enum SyncSite{SITE_OTHER,SITE_RING,SITE_PRESENT,SITE_EVENT,SITE_ARENA,SITE_GPU_SYNC,SITE_COMPLETE,SITE_POLL,SITE_LEGACY_WAIT,SITE_IDLE,SITE_CHUNK,SITE_COUNT};
 int sync_site=SITE_OTHER;uint64_t block_ns[SITE_COUNT],block_calls[SITE_COUNT],submit_by[SITE_COUNT],legacy_wait_ns=0;
 void fold_completion_wait_stats(){
     // 调用者持 engine；ns/calls 在同一 completion 小锁下成对取清，快返路径不写普通统计。
@@ -871,7 +889,7 @@ Slot &recording_slot(){
         if(!s.timestamps && timestamp_bits){VkQueryPoolCreateInfo q{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};q.queryType=VK_QUERY_TYPE_TIMESTAMP;q.queryCount=2;VK(vkCreateQueryPool(cfg.device,&q,nullptr,&s.timestamps));}
         bind_cache_reset();if(s.pool){if(s.reset_queued){poolreset::finish(s);s.reset_queued=false;if(s.reset_result==VK_TIMEOUT)xbg_fatalf("The GPU did not finish this slot's work within %llu ms (fence wait timed out), so the device is hung",(unsigned long long)(std::max<uint64_t>(cfg.fence_timeout_ns,10000000000ull)/1000000ull));else VK(s.reset_result);}else VK(vkResetCommandPool(cfg.device,s.pool,0));}else{VK(vkResetCommandBuffer(s.cmd,0));if(s.pro)VK(vkResetCommandBuffer(s.pro,0));}VkCommandBufferBeginInfo b{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};b.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;VK(vkBeginCommandBuffer(s.cmd,&b));
         if(s.timestamps){vkCmdResetQueryPool(s.cmd,s.timestamps,0,2);vkCmdWriteTimestamp(s.cmd,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,s.timestamps,0);}
-        s.recording=true;s.ops=0;
+        s.recording=true;s.ops=0;if(mid_chunk_ns)slot_rec_begin=timing_clock();
         const uint64_t frame=stats.presents.load()+1;
         if(pass_prof_enabled && timestamp_bits){
             if(stats.presents.load()>=pass_prof_next && stats.presents.load()<pass_prof_until && pass_prof_frame!=frame){pass_prof_frame=frame;pass_prof_next=stats.presents.load()+pass_prof_period;pass_prof_queries=pass_prof_slots=pass_prof_skipped_slots=0;}
@@ -1009,13 +1027,13 @@ void perf_frame(){
      for(int r=0;r<4;r++){int best=-1;for(int k=0;k<32;k++)if(!used[k] && offset_changed_at[k] && (best<0 || offset_changed_at[k]>offset_changed_at[best]))best=k;if(best<0)break;used[best]=true;at+=snprintf(top+at,sizeof(top)-size_t(at),"%s%d:%.1f",r?",":"",best,offset_changed_at[best]/f);}
      xbg_logf("NVN PERF binds set_binds=%.1f offsets_per_bind=%.1f offsets_only=%.1f changed n1=%.1f n2=%.1f n3=%.1f n4+=%.1f at=%s",set_binds/f,set_binds?double(set_bind_offsets)/double(set_binds):0.0,set_binds_offsets_only/f,offset_changes[1]/f,offset_changes[2]/f,offset_changes[3]/f,(offset_changes[4]+offset_changes[5]+offset_changes[6]+offset_changes[7]+offset_changes[8]+offset_changes[9])/f,top);}
     set_binds=set_bind_offsets=set_binds_offsets_only=0;for(auto &x:offset_changes)x=0;for(auto &x:offset_changed_at)x=0;xmemo_hits=0;xbg_logf("NVN PERF noload_passes_per_frame=%.2f img_cache_hits=%.1f misses=%.1f why=%.1f/%.1f/%.1f/%.1f/%.1f/%.1f/%.1f/%.1f",noload_passes/f,img_cache_hits/f,img_cache_misses/f,noload_why[0]/f,noload_why[1]/f,noload_why[2]/f,noload_why[3]/f,noload_why[4]/f,noload_why[5]/f,noload_why[6]/f,noload_why[7]/f);for(auto &w:noload_why)w=0;noload_passes=0;img_cache_hits=img_cache_misses=0;xbg_logf("NVN PERF desc_ns_per_frame memo_key=%.2f tmpl_update=%.2f alloc=%.2f setkey=%.2f build=%.2f hit_total=%.2f",desc_ns[0]/1e6/tf,desc_ns[1]/1e6/tf,desc_ns[2]/1e6/tf,desc_ns[3]/1e6/tf,desc_ns[4]/1e6/tf,desc_ns[5]/1e6/tf);for(auto &x:desc_ns)x=0;template_updates=plain_updates=0;set_cache_hits=set_cache_misses=0;
-    xbg_logf("NVN PERF async=%d drains=%.2f drain_ms=%.2f pace_ms=%.2f waits=%.2f",int(gfx_async),gfx_drain_calls.exchange(0)/f,gfx_drain_ns.exchange(0)/1e6/f,gfx_pace_ns.exchange(0)/1e6/f,gfx_wait_calls.exchange(0)/f);xbg_logf("NVN PERF events defer=%d deferred=%.2f cpu_reads_pending=%llu epochs=%zu reports=%zu",int(defer_events),events_deferred/f,(unsigned long long)event_reads,epochs.size(),pending_reports.size());if(evguard::enabled){Dl_info di{};uintptr_t pc=evguard::last_pc.load();const char *mod=pc && dladdr(reinterpret_cast<void*>(pc),&di) && di.dli_fname?di.dli_fname:"?";xbg_logf("NVN PERF evguard guards=%llu exact=%llu other=%llu writes=%llu last_addr=%#llx last_pc=%#llx in %s",(unsigned long long)evguard::guards.load(),(unsigned long long)evguard::exact.load(),(unsigned long long)evguard::other.load(),(unsigned long long)evguard::writes.load(),(unsigned long long)evguard::last_addr.load(),(unsigned long long)pc,mod);
+    xbg_logf("NVN PERF async=%d drains=%.2f drain_ms=%.2f pace_ms=%.2f waits=%.2f",int(gfx_async),gfx_drain_calls.exchange(0)/f,gfx_drain_ns.exchange(0)/1e6/f,gfx_pace_ns.exchange(0)/1e6/f,gfx_wait_calls.exchange(0)/f);xbg_logf("NVN PERF events defer=%d deferred=%.2f cpu_reads_pending=%llu epochs=%zu reports=%zu",int(defer_events),events_deferred/f,(unsigned long long)event_reads,epochs.size(),pending_reports.size());if(idle_retire){xbg_logf("NVN PERF idle mode=%d polls=%.2f retired=%.2f flushes=%.2f peeks=%.2f peeks_pending=%.2f peeks_busy=%.2f",idle_retire,idle_polls/f,idle_retired/f,idle_flushes/f,event_peeks/f,event_peeks_pending/f,event_peeks_busy.exchange(0)/f);idle_polls=idle_retired=idle_flushes=event_peeks=event_peeks_pending=0;}if(evguard::enabled){Dl_info di{};uintptr_t pc=evguard::last_pc.load();const char *mod=pc && dladdr(reinterpret_cast<void*>(pc),&di) && di.dli_fname?di.dli_fname:"?";xbg_logf("NVN PERF evguard guards=%llu exact=%llu other=%llu writes=%llu last_addr=%#llx last_pc=%#llx in %s",(unsigned long long)evguard::guards.load(),(unsigned long long)evguard::exact.load(),(unsigned long long)evguard::other.load(),(unsigned long long)evguard::writes.load(),(unsigned long long)evguard::last_addr.load(),(unsigned long long)pc,mod);
      xbg_logf("NVN PERF evguard engine_opens=%llu recloses=%llu",(unsigned long long)evguard::engine_opens.load(),(unsigned long long)evguard::recloses.load());
      xbg_logf("NVN PERF evguard last word=%#llx x0=%#llx x1=%#llx x2=%#llx x3=%#llx x4=%#llx x5=%#llx",(unsigned long long)evguard::last_word.load(),(unsigned long long)evguard::last_x[0].load(),(unsigned long long)evguard::last_x[1].load(),(unsigned long long)evguard::last_x[2].load(),(unsigned long long)evguard::last_x[3].load(),(unsigned long long)evguard::last_x[4].load(),(unsigned long long)evguard::last_x[5].load());
      for(int i=0;i<8;i++){uintptr_t lr=evguard::callers[i].load();if(!lr)break;Dl_info li{};const char *lm="?",*ls="?";uintptr_t base=0,sym=0;
          if(dladdr(reinterpret_cast<void*>(lr),&li)){if(li.dli_fname)lm=li.dli_fname;if(li.dli_sname)ls=li.dli_sname;base=uintptr_t(li.dli_fbase);sym=uintptr_t(li.dli_saddr);}
          xbg_logf("NVN PERF evguard caller lr=%#llx %s+%#llx (%s+%#llx) hits=%llu",(unsigned long long)lr,lm,(unsigned long long)(lr-base),ls,(unsigned long long)(sym?lr-sym:0),(unsigned long long)evguard::caller_hits[i].load());}}events_deferred=0;
-    {static const char *site_names[SITE_COUNT]={"other","ring","present","event","arena","gpu_sync","complete","poll","legacy_wait"};
+    {static const char *site_names[SITE_COUNT]={"other","ring","present","event","arena","gpu_sync","complete","poll","legacy_wait","idle","chunk"};
      char line[768];int at=snprintf(line,sizeof(line),"NVN PERF block_ms");
      for(int i=0;i<SITE_COUNT && at<int(sizeof(line))-40;i++)if(block_calls[i])at+=snprintf(line+at,sizeof(line)-at," %s=%.2f/%.2f",site_names[i],block_ns[i]/1e6/f,block_calls[i]/f);
      at+=snprintf(line+at,sizeof(line)-at," legacy_wait_total=%.2f submit_by",legacy_wait_ns/1e6/f);
@@ -5515,12 +5533,37 @@ void poll_retire(){
     bool any=false;for(auto &s:slots)if(s.pending && !s.recording && vkGetFenceStatus(cfg.device,s.fence)==VK_SUCCESS){retire_slot(s);any=true;}
     if(any){{std::lock_guard<std::mutex> l(gfx_job_mutex);}gfx_idle_cv.notify_all();}
 }
+// [D3] DM_GFX_IDLE_RETIRE: retire, without blocking, the slots whose fence signalled, oldest submission first (writebacks,
+// reports and events land in order; poll_retire's index order could retire the newer slot first). Caller holds the engine.
+unsigned retire_signalled(){
+    unsigned n=0;
+    for(int i=0;i<2;i++){Slot &o=slots[slot_index].pending?slots[slot_index]:slots[slot_index^1];
+        if(!o.pending || o.recording || vkGetFenceStatus(cfg.device,o.fence)!=VK_SUCCESS)break;
+        SiteScope site(SITE_IDLE);retire_slot(o);++n;}
+    idle_retired+=n;return n;
+}
+// The recording slot holds deferred results (a SignalEvent kept by gfx-defer-events 2, or a counter report) that only its
+// submission and retirement will publish.
+bool recording_holds_results(){
+    const Slot &cur=slots[slot_index];if(!cur.recording || !cur.ops)return false;
+    if(!recording_events.empty())return true;
+    for(const auto &r:pending_reports)if(r.slot==&cur)return true;
+    return false;
+}
+// Mid-submit chunk (DM_GFX_MID_CHUNK_US): at a command boundary inside execute().
+void mid_chunk_check(){
+    Slot &cur=slots[slot_index];if(!cur.recording || !cur.ops || failed)return;
+    if(timing_clock()-slot_rec_begin<mid_chunk_ns)return;
+    const Slot &other=slots[slot_index^1];if(other.pending && vkGetFenceStatus(cfg.device,other.fence)!=VK_SUCCESS)return;
+    SiteScope site(SITE_CHUNK);submit_slots(false);
+}
 void execute(const uint8_t *pc,unsigned depth,uint64_t &budget){
     need(depth<64,"NVN command CALL nesting limit exceeded");
     for(;;){need(budget++<10000000,"NVN command count/cycle limit exceeded");
         if(gfx_async && (budget&63)==0)poll_retire();
         // Bound host arena use per frame slot; only at command boundaries.
         {Slot &cur=slots[slot_index];if(cur.recording && cur.stream.used_total+cur.readback.used_total>arena_flush_bytes){SiteScope site(SITE_ARENA);submit_slots(false);}}
+        if(mid_chunk_ns && (budget&63)==0)mid_chunk_check();
         size_t available=command_available(pc);need(available>=8,"Truncated command header");op_hdr h;memcpy(&h,pc,8);need(h.size>=8 && !(h.size&7) && h.size<=available,"NVN command size outside pool");const uint8_t *p=pc+8;size_t n=h.size-8;cur_op=h.op;
         switch(h.op){
         case OP_END:return;
@@ -5725,7 +5768,14 @@ extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t b
     timestamp_bits=queues[cfg.queue_family].timestampValidBits;
     {const auto &l=properties.limits;VkDeviceSize a=256;for(VkDeviceSize x:{l.minUniformBufferOffsetAlignment,l.minStorageBufferOffsetAlignment,l.minTexelBufferOffsetAlignment,l.optimalBufferCopyOffsetAlignment,l.nonCoherentAtomSize,VkDeviceSize(16)})while(a<x)a<<=1;arena_alignment=a;}
     {std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');std::string marker=(cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-sync-mode";FILE *m=fopen(marker.c_str(),"rb");sync_mode=false;if(m){sync_mode=fgetc(m)=='1';fclose(m);}}
-     {std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');FILE *m=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-defer-events").c_str(),"rb");defer_events=0;if(m){int c=fgetc(m);defer_events=c=='1'?1:c=='2'?2:0;fclose(m);}else if(const char *e=getenv("DM_GFX_DEFER_EVENTS")){int v=atoi(e);defer_events=v==1?1:v==2?2:0;}xbg_logf("NVN defer events=%d (marker gfx-defer-events)",int(defer_events));{FILE *eg=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-event-guard").c_str(),"rb");evguard::enabled=eg!=nullptr;if(eg)fclose(eg);if(evguard::enabled)xbg_logf("NVN event guard on (marker gfx-event-guard)");}{FILE *v=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-vcache").c_str(),"rb");vcache::enabled=false;if(v){vcache::enabled=fgetc(v)!='0';fclose(v);}else if(const char *e=getenv("DM_GFX_VCACHE"))vcache::enabled=atoi(e)!=0;xbg_logf("NVN vertex/index cross-frame cache=%d tracker=%d (marker gfx-vcache)",int(vcache::enabled),int(nvn_dirty_since!=nullptr));}
+     {std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');FILE *m=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-defer-events").c_str(),"rb");defer_events=0;if(m){int c=fgetc(m);defer_events=c=='1'?1:c=='2'?2:0;fclose(m);}else if(const char *e=getenv("DM_GFX_DEFER_EVENTS")){int v=atoi(e);defer_events=v==1?1:v==2?2:0;}xbg_logf("NVN defer events=%d (marker gfx-defer-events)",int(defer_events));
+#ifdef DM_GAME_D3
+     {FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-idle-retire").c_str(),"rb");idle_retire=0;if(w){int c=fgetc(w);idle_retire=c=='1'?1:c=='2'?2:0;fclose(w);}else if(const char *e=getenv("DM_GFX_IDLE_RETIRE")){int v=atoi(e);idle_retire=v>=2?2:v==1?1:0;}
+      if(const char *e=getenv("DM_GFX_IDLE_FLUSH_US"))idle_flush_ns=uint64_t(std::max(0ll,atoll(e)))*1000ull;
+      if(const char *e=getenv("DM_GFX_MID_CHUNK_US"))mid_chunk_ns=uint64_t(std::max(0ll,atoll(e)))*1000ull;
+      xbg_logf("NVN idle retire=%d flush_us=%llu mid_chunk_us=%llu (DM_GFX_IDLE_RETIRE / marker gfx-idle-retire, DM_GFX_IDLE_FLUSH_US, DM_GFX_MID_CHUNK_US)",idle_retire,(unsigned long long)(idle_flush_ns/1000),(unsigned long long)(mid_chunk_ns/1000));}
+#endif
+     {FILE *eg=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-event-guard").c_str(),"rb");evguard::enabled=eg!=nullptr;if(eg)fclose(eg);if(evguard::enabled)xbg_logf("NVN event guard on (marker gfx-event-guard)");}{FILE *v=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-vcache").c_str(),"rb");vcache::enabled=false;if(v){vcache::enabled=fgetc(v)!='0';fclose(v);}else if(const char *e=getenv("DM_GFX_VCACHE"))vcache::enabled=atoi(e)!=0;xbg_logf("NVN vertex/index cross-frame cache=%d tracker=%d (marker gfx-vcache)",int(vcache::enabled),int(nvn_dirty_since!=nullptr));}
      {FILE *v=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-tex-dirty").c_str(),"rb");tex_dirty=false;if(v){tex_dirty=fgetc(v)!='0';fclose(v);}else if(const char *e=getenv("DM_GFX_TEX_DIRTY"))tex_dirty=atoi(e)!=0;
       xbg_logf("NVN texture checks through the dirty tracker=%d (marker gfx-tex-dirty)",int(tex_dirty));}{FILE *b=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-native-bc").c_str(),"rb");native_bc=false;if(b){native_bc=fgetc(b)!='0';fclose(b);}else if(const char *e=getenv("DM_GFX_NATIVE_BC"))native_bc=atoi(e)!=0;xbg_logf("NVN native BC textures=%d (marker gfx-native-bc)",int(native_bc));}
      {FILE *b=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-noload").c_str(),"rb");noload_enabled=false;if(b){noload_enabled=fgetc(b)!='0';fclose(b);}else if(const char *e=getenv("DM_GFX_NOLOAD"))noload_enabled=atoi(e)!=0;xbg_logf("NVN proven full-overwrite first draws skip the color load=%d (marker gfx-noload; A/B target noload)",int(noload_enabled));}{FILE *q=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-bright").c_str(),"rb");bright::enabled=true;if(q){bright::enabled=fgetc(q)!='0';fclose(q);}else if(const char *e=getenv("DM_GFX_BRIGHT"))bright::enabled=atoi(e)!=0;xbg_logf("NVN 3D brightening=%d (marker gfx-bright; A/B target bright)",int(bright::enabled));}{FILE *m=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-perf-sample").c_str(),"rb");perf_sample=32;if(m){if(fscanf(m,"%u",&perf_sample)!=1)perf_sample=32;fclose(m);}else if(const char *e=getenv("DM_GFX_PERF_SAMPLE"))perf_sample=unsigned(atoi(e));perf_frame_timed=perf_sample!=0;perf_timed_frames=0;xbg_logf("NVN perf timing every %u frames (marker gfx-perf-sample; 0 = off)",perf_sample);}}
@@ -5796,6 +5846,31 @@ extern "C" void xbg_game_event_read(const void *addr){
     std::lock_guard<std::recursive_mutex> lock(mutex);if(!initialized || failed)return;
     for(auto *list:{&pending_events,&recording_events})for(auto &e:*list)if(e.addr==uint64_t(reinterpret_cast<uintptr_t>(addr))){++event_reads;complete_all();return;}
 }
+// [D3] nvnEventGetValue (DM_GFX_IDLE_RETIRE 2): as the Switch's plain memory read, never a wait. Slots whose fence signalled
+// retire (publishing their events), the rest stays in flight; a busy engine (translation holds it) is not waited for either.
+extern "C" void xbg_game_event_peek(const void *addr){
+    if(idle_retire<2){xbg_game_event_read(addr);return;}
+    std::unique_lock<std::recursive_mutex> lock(mutex,std::try_to_lock);
+    if(!lock.owns_lock()){++event_peeks_busy;return;}   // counters: plain, only ever written under the engine lock or racy diagnostics
+    if(!initialized || failed)return;
+    ++event_peeks;const uint64_t a=uint64_t(reinterpret_cast<uintptr_t>(addr));bool pending=false;
+    for(auto *list:{&pending_events,&recording_events})for(auto &e:*list)if(e.addr==a){pending=true;break;}
+    if(!pending)return;
+    ++event_peeks_pending;retire_signalled();
+}
+// [D3] Translation thread, idle for idle_ns (hle_nvn.c x_thread, DM_GFX_IDLE_RETIRE >= 1). Returns nonzero while slots are in
+// flight or the recording slot holds deferred results, so the caller keeps polling; 0 when nothing more can be published.
+extern "C" int xbg_game_idle_poll(uint64_t idle_ns){
+    if(idle_retire<1)return 0;
+    std::unique_lock<std::recursive_mutex> lock(mutex,std::try_to_lock);
+    if(!lock.owns_lock())return 1;   // another thread is in the engine: try again next tick
+    if(!initialized || failed)return 0;
+    ++idle_polls;retire_signalled();
+    if(idle_ns>=idle_flush_ns && recording_holds_results() && !slots[slot_index^1].pending){
+        SiteScope site(SITE_IDLE);submit_slots(false);++idle_flushes;}
+    return slots[0].pending || slots[1].pending || recording_holds_results();
+}
+extern "C" int xbg_game_idle_retire_mode(void){return idle_retire;}
 extern "C" int xbg_game_set_sampler_mirror_clamp_to_edge(VkBool32 enabled){
     if(enabled!=VK_FALSE && enabled!=VK_TRUE)return -1;
     std::lock_guard<std::recursive_mutex> lock(mutex);if(!initialized || failed || stats.submissions || stats.draws || stats.dispatches)return -1;

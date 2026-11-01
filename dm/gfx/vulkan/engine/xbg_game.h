@@ -46,6 +46,14 @@ int xbg_game_set_sampler_filter_minmax(VkBool32 enabled);
 /* CPU访问事件前解析覆盖该地址的延后SignalEvent。
  * Resolve deferred SignalEvents covering this address before CPU event access. */
 void xbg_game_event_read(const void *addr);
+/* [D3] DM_GFX_IDLE_RETIRE (default 0). event_peek: nvnEventGetValue's hook; at 2 it retires signalled slots without
+ * blocking and returns whatever the GPU has reached (Switch semantics), below 2 it is xbg_game_event_read. idle_poll: the
+ * translation thread calls it when it has had no job for a while (idle_ns); it retires signalled slots (publishing their
+ * events, counter reports and writebacks) and submits a recording slot that holds deferred events or reports; returns
+ * nonzero while GPU work is outstanding, so the caller keeps polling. */
+void xbg_game_event_peek(const void *addr);
+int xbg_game_idle_poll(uint64_t idle_ns);
+int xbg_game_idle_retire_mode(void);
 /* 宿主管SIGSEGV时先注册use_host_hooks；fault返回是否命中跟踪页，宿主写客体前调用prepare。
  * With host-owned SIGSEGV, register use_host_hooks first; fault reports tracked-page hits and prepare precedes host writes into guest memory. */
 void xbg_wtrack_use_host_hooks(void);
