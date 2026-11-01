@@ -1317,7 +1317,9 @@ uint64_t hits=0,sticky_misses=0,align_misses=0,pending_misses=0,mapped_bytes=0;
 PFN_vkGetAndroidHardwareBufferPropertiesANDROID get_props=nullptr;
 bool on(){
     if(enabled<0){const char *e=getenv("DM_GFX_ZEROCOPY");
-#if defined(DM_GAME_XC2) || defined(DM_GAME_D3)
+#if defined(DM_GAME_D3)
+        enabled=e?atoi(e)!=0:1;   // [D3] on by default: gameplay 34 -> 45 fps on the Mi 14 Ultra (12.5 -> 2.4 MB of buffer snapshots per frame), menus and the first map look the same; uniform blocks still snapshotted (DM_GFX_ZC_UBO_MIN); DM_GFX_ZEROCOPY=0 for A/B
+#elif defined(DM_GAME_XC2)
         enabled=e?atoi(e)!=0:0;   // [XC2] off by default: per-frame data the game rewrites while our GPU still reads it in place (title clouds / fog flicker on the phone); DM_GFX_ZEROCOPY=1 for A/B
 #elif defined(DM_GAME_DOOM)
         enabled=e?atoi(e)!=0:1;   // [DOOM] on by default (zc_test: AHB pages coherent both ways on Adreno 750)
