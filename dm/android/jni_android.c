@@ -252,7 +252,15 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     // Frame overlap on by default: command-buffer SignalEvents do not submit and are published when their slot retires (the
     // engine's gfx-defer-events = 2; a marker file still wins). With the presenter's gfx-present-overlap the Redmi K50 Ultra
     // camp went from 7.7 to 19.5 fps.
+#ifdef DM_GAME_D3
+    // [D3] No deferred events: D3's game thread spins (nn::os::YieldThread) on NVN counter reports of the frame three back
+    // (main 0xe72b0) and makes no NVN call while it waits, so a report published only when its slot retires (which the next
+    // NVN call triggers) is never written; on the Switch the GPU writes it by itself. With 2 the AUTOSAVE screen froze ~4 s
+    // after the first present in 3 of 5 runs, with 0 in none of 6, same 60 fps (Mi 14 Ultra, 02.11.2026).
+    setenv("DM_GFX_DEFER_EVENTS", "0", 0);
+#else
     setenv("DM_GFX_DEFER_EVENTS", "2", 0);
+#endif
     // 不在每个绘制、计算和拷贝前先完成全部待写回与报告（引擎的 gfx-read-preflight；标记文件仍优先）。延后事件下几乎总有报告待写，
     // 开着就等于每个绘制前同步一次 GPU；营地与 Den of Evil 战斗里 CPU 读从未碰到待写结果（NVN PERF why=a0）。
     // CPU reads are not all resolved before every draw, dispatch and copy (the engine's gfx-read-preflight; a marker file still
