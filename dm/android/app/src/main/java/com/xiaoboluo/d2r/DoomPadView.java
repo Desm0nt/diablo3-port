@@ -21,7 +21,15 @@ import android.view.View;
 // It feeds the same native controller channel as a physical gamepad (DmActivity.nativePadKey / nativePadAxes, device PAD_DEVICE)
 // with the keycodes front_android.c maps to Switch buttons (Enter=A, Esc=B, R=X, F=Y, Q=L, E=R, Shift=ZL, Ctrl=ZR, Tab=+, M=-,
 // BUTTON_THUMBL / THUMBR = L3 / R3).
+// [D3] Diablo III has no camera to turn: a Switch pad laid out like the two Joy-Cons, no FIRE / MELEE, no look-by-dragging.
+//   left:  move stick, the d-pad below it toward the middle, L / ZL in the top corner, "-" toward the middle;
+//   right: A / B / X / Y, the right stick below them toward the middle (D3: evade roll toward the tilt), R / ZR in the top corner, "+".
+//   A short tap on a stick's knob clicks it (L3 / R3), so they need no buttons of their own. Both sticks are plain sticks (tilt =
+//   finger offset from the base); the gear dialog's dead-zone compensation applies to both. The move stick floats: a touch anywhere
+//   in the lower left that hits no button puts its base under the finger. D3 (Switch) reads no touch screen, mouse or keyboard
+//   (main imports only npad / six-axis / vibration), so free taps are not forwarded to the game.
 public class DoomPadView extends View {
+    static final boolean D3 = DmActivity.D3;
     static final int PAD_DEVICE = 0x7d00;
     static final int SETTINGS = -1;   // not a key: opens the graphics options
 
@@ -32,8 +40,9 @@ public class DoomPadView extends View {
         Btn(String l, int k, float fx, float fy, float ox, float oy, float r, boolean look) { label = l; key = k; this.fx = fx; this.fy = fy; this.ox = ox; this.oy = oy; this.r = r; this.look = look; }
     }
     private static final class Stick {
-        final float fx, fy; int pointer = -1; float x, y, travel; long down; boolean onKnob; final int clickKey;
-        Stick(float fx, float fy, int clickKey) { this.fx = fx; this.fy = fy; this.clickKey = clickKey; }
+        final float fx, fy, r, grab; int pointer = -1; float x, y, travel, baseX = Float.NaN, baseY; long down; boolean onKnob; final int clickKey;   // baseX/Y: [D3] floating base while held (NaN = home)
+        // r: base radius in px (full tilt at the rim); grab: touches within grab x r of the base take the stick
+        Stick(float fx, float fy, int clickKey, float r, float grab) { this.fx = fx; this.fy = fy; this.clickKey = clickKey; this.r = r; this.grab = grab; }
     }
     // One finger turning the view: its last position.
     private static final class Look { int pointer = -1; float x, y; }
@@ -42,8 +51,10 @@ public class DoomPadView extends View {
     // is played out (short, but longer than a game frame so DOOM's per-frame stick sample integrates it evenly).
     private static final float DP_PER_TILT_SECOND = 500, PLAYOUT_S = 0.05f;
     private static final float ABXY_FX = 0.885f, ABXY_FY = 0.36f, DPAD_FX = 0.21f, DPAD_FY = 0.74f, GAP = 50;
+    // [D3] Joy-Con-like: stick above / d-pad below on the left, A B X Y above / right stick below on the right (2400x1080 ~ 914x411 dp)
+    private static final float D3_ABXY_FX = 0.875f, D3_ABXY_FY = 0.48f, D3_DPAD_FX = 0.265f, D3_DPAD_FY = 0.82f, D3_DGAP = 40;
     private final Btn[] btns;
-    private final Stick left = new Stick(0.12f, 0.42f, KeyEvent.KEYCODE_BUTTON_THUMBL);
+    private final Stick left, right;   // right: [D3] only (DOOM turns the view by dragging on free screen instead)
     private final Look look = new Look(), fireLook = new Look();
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), line = new Paint(Paint.ANTI_ALIAS_FLAG), text = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final float dp, stickR;
@@ -55,6 +66,24 @@ public class DoomPadView extends View {
         dp = c.getResources().getDisplayMetrics().density;
         stickR = 64 * dp;
         reloadSettings();
+        if (D3) {
+            left = new Stick(0.125f, 0.52f, KeyEvent.KEYCODE_BUTTON_THUMBL, stickR, 1.6f);
+            right = new Stick(0.735f, 0.80f, KeyEvent.KEYCODE_BUTTON_THUMBR, 50 * dp, 1.5f);
+            btns = new Btn[] {
+                // right Joy-Con: diamond X top, A right (primary skill / interact: largest), B bottom, Y left; R / ZR above, "+" inward
+                new Btn("X", KeyEvent.KEYCODE_R, D3_ABXY_FX, D3_ABXY_FY, 0, -GAP, 27), new Btn("A", KeyEvent.KEYCODE_ENTER, D3_ABXY_FX, D3_ABXY_FY, GAP, 0, 30),
+                new Btn("B", KeyEvent.KEYCODE_ESCAPE, D3_ABXY_FX, D3_ABXY_FY, 0, GAP, 27), new Btn("Y", KeyEvent.KEYCODE_F, D3_ABXY_FX, D3_ABXY_FY, -GAP, 0, 27),
+                new Btn("R", KeyEvent.KEYCODE_E, 0.81f, 0.09f, 0, 0, 26), new Btn("ZR", KeyEvent.KEYCODE_CTRL_LEFT, 0.935f, 0.09f, 0, 0, 28),
+                new Btn("+", KeyEvent.KEYCODE_TAB, 0.62f, 0.09f, 0, 0, 22),
+                // left Joy-Con: d-pad below the stick, L / ZL above, "-" inward
+                new Btn("↑", KeyEvent.KEYCODE_DPAD_UP, D3_DPAD_FX, D3_DPAD_FY, 0, -D3_DGAP, 21), new Btn("→", KeyEvent.KEYCODE_DPAD_RIGHT, D3_DPAD_FX, D3_DPAD_FY, D3_DGAP, 0, 21),
+                new Btn("↓", KeyEvent.KEYCODE_DPAD_DOWN, D3_DPAD_FX, D3_DPAD_FY, 0, D3_DGAP, 21), new Btn("←", KeyEvent.KEYCODE_DPAD_LEFT, D3_DPAD_FX, D3_DPAD_FY, -D3_DGAP, 0, 21),
+                new Btn("L", KeyEvent.KEYCODE_Q, 0.19f, 0.09f, 0, 0, 26), new Btn("ZL", KeyEvent.KEYCODE_SHIFT_LEFT, 0.065f, 0.09f, 0, 0, 28),
+                new Btn("-", KeyEvent.KEYCODE_M, 0.38f, 0.09f, 0, 0, 22),
+                new Btn("⚙", SETTINGS, 0.50f, 0.09f, 0, 0, 20),   // options (DmActivity.showDoomSettings)
+            };
+        } else {
+        left = new Stick(0.12f, 0.42f, KeyEvent.KEYCODE_BUTTON_THUMBL, stickR, 1.6f); right = null;
         btns = new Btn[] {
             // right cluster: diamond X top, A right, B bottom, Y left
             new Btn("X", KeyEvent.KEYCODE_R, ABXY_FX, ABXY_FY, 0, -GAP, 26), new Btn("A", KeyEvent.KEYCODE_ENTER, ABXY_FX, ABXY_FY, GAP, 0, 28),
@@ -71,6 +100,7 @@ public class DoomPadView extends View {
             new Btn("-", KeyEvent.KEYCODE_M, 0.38f, 0.09f, 0, 0, 22),
             new Btn("⚙", SETTINGS, 0.50f, 0.09f, 0, 0, 20),   // options (DmActivity.showDoomSettings)
         };
+        }
         fill.setColor(0x30ffffff);
         line.setColor(0x90ffffff); line.setStyle(Paint.Style.STROKE); line.setStrokeWidth(2 * dp);
         text.setColor(0xd0ffffff); text.setTextAlign(Paint.Align.CENTER); text.setTextSize(15 * dp);
@@ -96,7 +126,7 @@ public class DoomPadView extends View {
         controllerMode = on;
         if (on) {
             for (Btn b : btns) if (b.pointer >= 0) { DmActivity.nativePadKey(PAD_DEVICE, b.key, false); b.pointer = -1; }
-            left.pointer = -1; left.x = left.y = 0; look.pointer = fireLook.pointer = -1; pendX = pendY = lookX = lookY = 0;
+            left.pointer = -1; left.x = left.y = 0; left.baseX = Float.NaN; if (right != null) { right.pointer = -1; right.x = right.y = 0; } look.pointer = fireLook.pointer = -1; pendX = pendY = lookX = lookY = 0;
         }
         invalidate();
     }
@@ -108,8 +138,8 @@ public class DoomPadView extends View {
 
     private float bx(Btn b) { return b.fx * getWidth() + b.ox * dp; }
     private float by(Btn b) { return b.fy * getHeight() + b.oy * dp; }
-    private float sx(Stick s) { return s.fx * getWidth(); }
-    private float sy(Stick s) { return s.fy * getHeight(); }
+    private float sx(Stick s) { return Float.isNaN(s.baseX) ? s.fx * getWidth() : s.baseX; }
+    private float sy(Stick s) { return Float.isNaN(s.baseX) ? s.fy * getHeight() : s.baseY; }
 
     private Btn hit(float x, float y) {
         Btn best = null; float bestD = Float.MAX_VALUE;
@@ -119,18 +149,22 @@ public class DoomPadView extends View {
         }
         return best;
     }
-    private boolean near(Stick s, float x, float y, float k) { float dx = x - sx(s), dy = y - sy(s); return dx * dx + dy * dy <= stickR * stickR * k * k; }
+    private boolean near(Stick s, float x, float y, float k) { float dx = x - sx(s), dy = y - sy(s); return dx * dx + dy * dy <= s.r * s.r * k * k; }
     private void moveStick(Stick s, float x, float y) {
         float dx = x - sx(s), dy = y - sy(s), d = (float) Math.sqrt(dx * dx + dy * dy);
-        if (d > stickR) { dx *= stickR / d; dy *= stickR / d; }
+        if (d > s.r) { dx *= s.r / d; dy *= s.r / d; }
         s.x = dx; s.y = dy; s.travel = Math.max(s.travel, d);
     }
     private void grab(Stick s, int id, float x, float y) { s.onKnob = near(s, x, y, 1.0f); s.pointer = id; s.down = SystemClock.uptimeMillis(); moveStick(s, x, y); s.travel = 0; }
-    private void release(Stick s) {   // a short tap on the move stick's knob still presses L3
-        if (s.onKnob && s.travel < 0.5f * stickR && SystemClock.uptimeMillis() - s.down < 300) {
+    // [D3] Floating move stick: a touch in the lower left (not on a button, outside the stick's home area) puts the base under the finger,
+    // so moving needs no aiming at the stick; it returns home on release. No L3 from such a touch (only a tap on the home knob clicks).
+    private boolean floatZone(float x, float y) { return x < 0.42f * getWidth() && y > 0.22f * getHeight(); }
+    private void grabFloating(Stick s, int id, float x, float y) { s.baseX = x; s.baseY = y; s.onKnob = false; s.pointer = id; s.down = SystemClock.uptimeMillis(); s.x = s.y = 0; s.travel = 0; }
+    private void release(Stick s) {   // a short tap on a stick's knob still presses L3 / R3
+        if (s.onKnob && s.travel < 0.5f * s.r &&SystemClock.uptimeMillis() - s.down < 300) {
             final int k = s.clickKey; DmActivity.nativePadKey(PAD_DEVICE, k, true); postDelayed(() -> DmActivity.nativePadKey(PAD_DEVICE, k, false), 120);
         }
-        s.pointer = -1; s.x = s.y = 0;
+        s.pointer = -1; s.x = s.y = 0; s.baseX = Float.NaN;
     }
 
     // Radial dead-zone compensation: a small finger deflection maps to just past the game's dead zone, then grows linearly.
@@ -163,7 +197,11 @@ public class DoomPadView extends View {
 
     private void axes() {
         updateLook();
-        float[] mv = shape(left.x / stickR, left.y / stickR);
+        float[] mv = shape(left.x / left.r, left.y / left.r);
+        if (right != null) {   // [D3] the right stick as is (no look playout)
+            float[] rv = shape(right.x / right.r, right.y / right.r);
+            DmActivity.nativePadAxes(PAD_DEVICE, mv[0], mv[1], rv[0], rv[1], 0, 0, 0, 0); return;
+        }
         DmActivity.nativePadAxes(PAD_DEVICE, mv[0], mv[1], lookX, lookY, 0, 0, 0, 0);
     }
 
@@ -184,7 +222,9 @@ public class DoomPadView extends View {
                 b.pointer = id; DmActivity.nativePadKey(PAD_DEVICE, b.key, true);
                 if (b.look && fireLook.pointer < 0) lookStart(fireLook, id, x, y);
             }
-            else if (left.pointer < 0 && near(left, x, y, 1.6f)) grab(left, id, x, y);   // the move stick takes touches around its base only
+            else if (left.pointer < 0 && near(left, x, y, left.grab)) grab(left, id, x, y);   // the move stick takes touches around its base only
+            else if (D3 && left.pointer < 0 && floatZone(x, y)) grabFloating(left, id, x, y);
+            else if (right != null) { if (right.pointer < 0 && near(right, x, y, right.grab)) grab(right, id, x, y); }   // [D3] no view to turn
             else if (look.pointer < 0) lookStart(look, id, x, y);                           // any other free spot turns the view
             break;
         }
@@ -193,6 +233,7 @@ public class DoomPadView extends View {
                 int pid = e.getPointerId(k);
                 float px = e.getX(k), py = e.getY(k);
                 if (pid == left.pointer) moveStick(left, px, py);
+                if (right != null && pid == right.pointer) moveStick(right, px, py);
                 if (pid == look.pointer) lookMove(look, px, py);
                 if (pid == fireLook.pointer) lookMove(fireLook, px, py);
             }
@@ -201,6 +242,7 @@ public class DoomPadView extends View {
             boolean all = a == MotionEvent.ACTION_CANCEL || a == MotionEvent.ACTION_UP;
             for (Btn b : btns) if (b.pointer >= 0 && (b.pointer == id || all)) { DmActivity.nativePadKey(PAD_DEVICE, b.key, false); b.pointer = -1; }
             if (left.pointer >= 0 && (id == left.pointer || all)) release(left);
+            if (right != null && right.pointer >= 0 && (id == right.pointer || all)) release(right);
             if (id == look.pointer || all) look.pointer = -1;
             if (id == fireLook.pointer || all) fireLook.pointer = -1;
             break;
@@ -212,8 +254,8 @@ public class DoomPadView extends View {
 
     private void drawStick(Canvas c, Stick s) {
         float cx = sx(s), cy = sy(s);
-        fill.setColor(0x20ffffff); c.drawCircle(cx, cy, stickR, fill); c.drawCircle(cx, cy, stickR, line);
-        fill.setColor(s.pointer >= 0 ? 0x80ffffff : 0x40ffffff); c.drawCircle(cx + s.x, cy + s.y, stickR * 0.42f, fill);
+        fill.setColor(0x20ffffff); c.drawCircle(cx, cy, s.r, fill); c.drawCircle(cx, cy, s.r, line);
+        fill.setColor(s.pointer >= 0 ? 0x80ffffff : 0x40ffffff); c.drawCircle(cx + s.x, cy + s.y, s.r * 0.42f, fill);
     }
 
     @Override protected void onDraw(Canvas c) {
@@ -223,6 +265,7 @@ public class DoomPadView extends View {
         drawFps(c);
         if (controllerMode) { for (Btn b : btns) if (b.key == SETTINGS) drawBtn(c, b); return; }
         drawStick(c, left);
+        if (right != null) drawStick(c, right);
         for (Btn b : btns) drawBtn(c, b);
     }
     private void drawBtn(Canvas c, Btn b) {

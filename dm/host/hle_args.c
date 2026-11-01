@@ -20,7 +20,12 @@ static void add(const char *s) { if (g_argc < 127) g_argv[g_argc++] = strdup(s);
 
 static void build(void) {
     if (g_argc >= 0) return;
-    g_argc = 0; add("doom");
+    g_argc = 0;
+#ifdef DM_GAME_D3
+    add("d3");   // [D3] argv[0] only; the DOOM cvar presets below are off, DM_DOOM_ARGS still appends extra arguments
+#else
+    add("doom");
+#endif
 #if !defined(DM_GAME_ETERNAL) && !defined(DM_GAME_XC2) && !defined(DM_GAME_D3)   // [ETERNAL] [D3] the DOOM (2016) cvar presets below are unverified on id Tech 7: Eternal gets only DM_DOOM_ARGS for now
     const char *res = getenv("DM_DOOM_RES");
     if (res && *res) {

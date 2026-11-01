@@ -268,6 +268,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 Os.setenv("DM_XC2_DRS", p.getBoolean("xc2_drs", true) ? "1" : "0", true);
                 startedAspect = p.getInt("aspect", ASPECT_DEFAULT);
                 if (startedAspect == 2) Os.setenv("DM_XC2_WIDE", "1", true); else Os.unsetenv("DM_XC2_WIDE");
+            } else if (D3) {   // [D3] the DOOM cvars (rs_enable / rs_forceFraction*) do not apply
+                Os.unsetenv("DM_DOOM_DRS"); Os.unsetenv("DM_DOOM_RES");
             } else {
             if (p.getBoolean("drs", false)) Os.setenv("DM_DOOM_DRS", "1", true); else Os.unsetenv("DM_DOOM_DRS");
             int res = p.getInt("res", 0);
@@ -394,7 +396,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             for (int i = 0; i < drvNames.length; i++) { RadioButton r = new RadioButton(this); r.setText(driverLabel(drvNames[i])); r.setId(7001 + i); drvG.addView(r); }
             { String cur = p.getString("driver", defaultDriver()); int di = -1; for (int i = 0; i < drvNames.length; i++) if (drvNames[i].equals(cur)) di = i; drvG.check(7000 + di + 1); }
             box.addView(drvG);
-            TextView langL = new TextView(this); langL.setText("Язык игры (тексты и озвучка, со следующего запуска):"); langL.setPadding(0, 24, 0, 0); box.addView(langL);
+            TextView langL = new TextView(this); langL.setText(D3 ? "Язык игры (со следующего запуска; без архивов этого языка в RomFS остаётся English):" : "Язык игры (тексты и озвучка, со следующего запуска):"); langL.setPadding(0, 24, 0, 0); box.addView(langL);
             RadioGroup langG = new RadioGroup(this); langG.setOrientation(XC2 ? RadioGroup.VERTICAL : RadioGroup.HORIZONTAL);
             for (int i = 0; i < LANG_CODES.length; i++) { RadioButton r = new RadioButton(this); r.setText(LANG_LABELS[i]); r.setId(5000 + i); langG.addView(r); }
             { String cur = p.getString("lang", ""); int li = 0; for (int i = 0; i < LANG_CODES.length; i++) if (LANG_CODES[i].equals(cur)) li = i; langG.check(5000 + li); }
@@ -414,19 +416,19 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             RadioGroup sh = new RadioGroup(this); sh.setOrientation(RadioGroup.HORIZONTAL);
             for (int i = 0; i < SHARPEN_LABELS.length; i++) { RadioButton r = new RadioButton(this); r.setText(SHARPEN_LABELS[i]); r.setId(2000 + i); sh.addView(r); }
             sh.check(2000 + p.getInt("sharpen", 0)); box.addView(sh);
-            TextView note = new TextView(this); note.setText(XC2 ? "Динамическое разрешение, формат 16:9 / растянуть и управление применяются сразу; драйвер, язык и расширенный формат — со следующего запуска." : "Графика применится при следующем запуске игры, управление — сразу."); note.setPadding(0, 24, 0, 0);
+            TextView note = new TextView(this); note.setText(D3 ? "Драйвер, язык, вибрация и резкость — со следующего запуска; управление и счётчик FPS — сразу." : XC2 ? "Динамическое разрешение, формат 16:9 / растянуть и управление применяются сразу; драйвер, язык и расширенный формат — со следующего запуска." : "Графика применится при следующем запуске игры, управление — сразу."); note.setPadding(0, 24, 0, 0);
             SharedPreferences cp = getSharedPreferences("doom_controls", MODE_PRIVATE);
-            TextView ll = new TextView(this); ll.setText(XC2 ? "Чувствительность камеры (свайп):" : "Чувствительность обзора (свайп и кнопка огня):"); ll.setPadding(0, 24, 0, 0); box.addView(ll);
+            TextView ll = new TextView(this); ll.setText(XC2 ? "Чувствительность камеры (свайп):" : "Чувствительность обзора (свайп и кнопка огня):"); ll.setPadding(0, 24, 0, 0); if (!D3) box.addView(ll);   // [D3] no camera to turn
             RadioGroup look = new RadioGroup(this); look.setOrientation(RadioGroup.HORIZONTAL);
             for (int i = 0; i < LOOK_GAINS.length; i++) { RadioButton r = new RadioButton(this); r.setText(LOOK_LABELS[i]); r.setId(3000 + i); look.addView(r); }
-            look.check(3000 + nearest(LOOK_GAINS, cp.getFloat("look", 1.0f))); box.addView(look);
-            TextView dl = new TextView(this); dl.setText("Стик движения: компенсация мёртвой зоны игры:"); dl.setPadding(0, 24, 0, 0); box.addView(dl);
+            look.check(3000 + nearest(LOOK_GAINS, cp.getFloat("look", 1.0f))); if (!D3) box.addView(look);
+            TextView dl = new TextView(this); dl.setText(D3 ? "Экранные стики: компенсация мёртвой зоны игры:" : "Стик движения: компенсация мёртвой зоны игры:"); dl.setPadding(0, 24, 0, 0); box.addView(dl);
             RadioGroup dz = new RadioGroup(this); dz.setOrientation(RadioGroup.HORIZONTAL);
             for (int i = 0; i < DEADZONES.length; i++) { RadioButton r = new RadioButton(this); r.setText(DEADZONE_LABELS[i]); r.setId(4000 + i); dz.addView(r); }
             dz.check(4000 + nearest(DEADZONES, cp.getFloat("move_dz", 0f))); box.addView(dz);
             box.addView(note);
             android.widget.ScrollView scroll = new android.widget.ScrollView(this); scroll.addView(box);
-            new AlertDialog.Builder(this).setTitle("Графика").setView(scroll)
+            new AlertDialog.Builder(this).setTitle(D3 ? "Настройки" : "Графика").setView(scroll)
                 .setPositiveButton("Сохранить", (d, w) -> {
                     p.edit().putBoolean(XC2 ? "xc2_drs" : "drs", drs.isChecked()).putString("driver", drvG.getCheckedRadioButtonId() > 7000 && drvG.getCheckedRadioButtonId() - 7001 < drvNames.length ? drvNames[drvG.getCheckedRadioButtonId() - 7001] : "").putBoolean("rumble", rumble.isChecked()).putFloat("aa", AA_STRENGTHS[Math.min(Math.max(0, aaG.getCheckedRadioButtonId() - 6000), AA_STRENGTHS.length - 1)]).putString("lang", LANG_CODES[Math.min(Math.max(0, langG.getCheckedRadioButtonId() - 5000), LANG_CODES.length - 1)])
                         .putInt("res", Math.max(0, res.getCheckedRadioButtonId() - 1000)).putInt("sharpen", Math.max(0, sh.getCheckedRadioButtonId() - 2000)).apply();
