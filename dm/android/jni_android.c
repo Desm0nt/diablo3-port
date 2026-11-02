@@ -196,6 +196,7 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     // [D3] language-pack DLC: Download/Diablo3Mobile/aoc/<index> holds each pack's extracted RomFS (10 Russian: ruRU_*.cpk;
     // tools/d3_dlc_romfs.py); hle_misc.c lists the indices that have a *_Common.cpk, hle_oe.c lets the game language use them
     { char aoc[1100]; snprintf(aoc, sizeof aoc, "%s/aoc", g_src); setenv("DM_AOC", aoc, 0); LOG("boot: add-on content %s", getenv("DM_AOC")); }
+    setenv("DM_RUNTIME_DIR", g_runtime, 1);   // [D3] the dm/ directory for hle_d3_ui.c (ui-dump-now trigger, ui-dump.tsv, ui-names.tsv)
 #endif
 #ifdef DM_ANDROID_DEBUG_ENV
     debug_environment();
@@ -463,4 +464,15 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeFrameStats(JNIEnv
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativePadRemoved(JNIEnv *env, jclass cls, jint device) {
     (void)env; (void)cls;
     front_android_pad_removed(device);
+}
+// [D3] Tap on a UI element (touch phase 3, hle_d3_ui.c, docs/TOUCH_DESIGN.md §7): x / y = fractions of the game picture (0..1, top left
+// origin). Queued only; the next npad poll (game thread) focuses the topmost visible activatable control under the point and presses A.
+// Java: `static native boolean nativeD3UiTap(float x, float y);` -> false when DM_D3_UITAP is off or the point is outside 0..1.
+JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiTap(JNIEnv *env, jclass cls, jfloat x, jfloat y) {
+    (void)env; (void)cls;
+#ifdef DM_GAME_D3
+    int dm_d3_ui_tap(float x, float y); return dm_d3_ui_tap(x, y) ? JNI_TRUE : JNI_FALSE;
+#else
+    (void)x; (void)y; return JNI_FALSE;
+#endif
 }

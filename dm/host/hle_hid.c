@@ -423,6 +423,9 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
       if (!(s->lx || s->ly) && (plx || ply)) { s->lx = plx; s->ly = ply; } if (!(s->rx || s->ry) && (prx || pry)) { s->rx = prx; s->ry = pry; } }
     { int dm_padmode_input_gate(uint64_t *); if (dm_padmode_input_gate(&s->buttons)) s->lx = s->ly = s->rx = s->ry = 0; }   // 手柄 / 触屏切换事务进行中：键和摇杆都不交给游戏；触发切换时按着的键松开前也不交（dm_padmode.c） | Controller / touch switch transaction in progress: neither keys nor sticks are handed to the game; keys held when the switch was triggered are not handed over either until released (dm_padmode.c)
     if (dm_pad_hook) dm_pad_hook(guest_ns(), &s->buttons, &s->lx, &s->ly, &s->rx, &s->ry);
+#ifdef DM_GAME_D3
+    { void dm_d3_ui_pump(uint64_t *); dm_d3_ui_pump(&s->buttons); }   // [D3] DM_D3_UIDUMP / DM_D3_UITAP (hle_d3_ui.c): focus log, UI dump, tap = focus + A, on the game's main thread
+#endif
 #ifdef DM_GAME_DOOM
     { static uint64_t prev; static int n; if (s->buttons != prev && n++ < 40) LOG("[input] npad %u style %#x buttons %#llx", id, style, (unsigned long long)s->buttons); prev = s->buttons; }
 #endif
