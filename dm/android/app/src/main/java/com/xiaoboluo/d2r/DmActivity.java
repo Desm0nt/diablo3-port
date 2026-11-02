@@ -57,6 +57,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final boolean DOOM = "doom".equals(BuildConfig.DM_GAME) || ETERNAL || XC2 || D3;
     static final String DATA_DIR = D3 ? "Diablo3Mobile" : XC2 ? "Xenoblade2Mobile" : ETERNAL ? "DOOM Eternal Mobile" : "DOOM Mobile";   // [DOOM] Download/<DATA_DIR>/{romfs,dm,drivers}
     private DoomPadView doomPad;
+    private D3PadView d3Pad;   // [D3] its own on-screen controls (touch / gamepad layouts) instead of doomPad
     static native int nativeStart(String filesDir, String extDir, String romfsSrc, String lang);
     static native void nativeSurface(Object surface, int w, int h);
     static native void nativeRefresh(float hz);
@@ -456,7 +457,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     //     720p), frame rate limit (DM_PRESENT_MAX_HZ 30 / 60 -> hle_nvn.c), sharpening (DM_GFX_SHARPEN -> RCAS in vulkan_present.cpp),
     //     Vulkan driver (DM_VK_DRIVER -> vk_driver.c), vibration (DM_RUMBLE);
     //   immediately: picture shape (16:9 bars / stretched: the SurfaceView size, applyAspectLayout), and "doom_controls" read by
-    //     DoomPadView.reloadSettings: FPS counter, stick dead-zone compensation, settings button look (normal / faded + opacity).
+    //     D3PadView.reloadSettings: FPS counter, stick dead-zone compensation, settings button look (normal / faded + opacity),
+    //     control layout ("d3_layout" touch / gamepad, on pick), layout opacity / size ("d3_opacity" / "d3_scale" %, live sliders),
+    //     touch walking hero height / depth correction ("d3_hero_y" / "d3_depth" %, live), menu swipes ("d3_menu_swipe" stick / d-pad);
+    //     "Edit control positions" saves the dialog and puts the pad in its edit mode (positions "d3_pos_<layout>_<group>").
     static final int[] D3_FPS_LIMITS = {30, 60};   // above 60 is not offered: D3 runs its frames at 60 like on the Switch (present interval 1)
     static final String[] D3_LANG_CODES = {"", "ru", "en-US", "en-GB"};
     static final String[] D3_LANG_LABELS = {null /* d3_system */, "Русский", "English (US)", "English (UK)"};   // game languages keep their own names
@@ -466,8 +470,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final int[] D3_DZ_LABELS = {R.string.d3_dz_none, R.string.d3_dz_small, R.string.d3_dz_medium, R.string.d3_dz_large};   // DEADZONES
     static final int[] D3_GEAR_LABELS = {R.string.d3_gear_normal, R.string.d3_gear_faded};   // DoomPadView.GEAR_*
     private int d3FpsLimit() { return doomPrefs().getInt("fps_limit", 60) == 30 ? 30 : 60; }
-    // Resources in the dialog's language: the phone's, or the one picked in the dialog.
-    private android.content.Context d3Ui() {
+    // Resources in the dialog's language: the phone's, or the one picked in the dialog (also D3PadView's labels).
+    android.content.Context d3Ui() {
         String l = doomPrefs().getString("ui_lang", "");
         if (l.isEmpty()) return this;
         android.content.res.Configuration c = new android.content.res.Configuration(getResources().getConfiguration());
@@ -531,8 +535,30 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             note(box, ui.getString(R.string.d3_driver_note));
             CheckBox rumble = new CheckBox(this); rumble.setText(when(ui, R.string.d3_rumble, false)); rumble.setChecked(p.getBoolean("rumble", false)); box.addView(rumble);
             CheckBox fps = new CheckBox(this); fps.setText(when(ui, R.string.d3_fps_counter, true)); fps.setChecked(cp.getBoolean("fps", true)); box.addView(fps);
+            // On-screen controls (D3PadView): layout touch / gamepad (applies when picked, the pad is visible behind the dialog), opacity and
+            // size of the whole layout (live sliders), and the edit mode for positions (kept per layout).
+            heading(box, when(ui, R.string.d3_layout, true));
+            boolean touchWas = D3PadView.LAYOUT_TOUCH.equals(cp.getString("d3_layout", D3PadView.LAYOUT_DEFAULT));
+            RadioGroup layG = radios(box, new String[] {ui.getString(R.string.d3_layout_touch), ui.getString(R.string.d3_layout_gamepad)}, 9200, touchWas ? 0 : 1, false);
+            layG.setOnCheckedChangeListener((g, id) -> {
+                cp.edit().putString("d3_layout", id == 9200 ? D3PadView.LAYOUT_TOUCH : D3PadView.LAYOUT_GAMEPAD).apply();
+                if (d3Pad != null) d3Pad.reloadSettings();
+            });
+            note(box, ui.getString(R.string.d3_layout_note));
+            d3Slider(box, ui, R.string.d3_opacity, cp, "d3_opacity", D3PadView.OPACITY_MIN, D3PadView.OPACITY_MAX, D3PadView.OPACITY_DEFAULT);
+            d3Slider(box, ui, R.string.d3_scale, cp, "d3_scale", D3PadView.SCALE_MIN, D3PadView.SCALE_MAX, D3PadView.SCALE_DEFAULT);
+            android.widget.Button editB = new android.widget.Button(this); editB.setText(ui.getString(R.string.d3_edit)); box.addView(editB);
+            note(box, ui.getString(R.string.d3_edit_note));
             heading(box, when(ui, R.string.d3_deadzone, true));
             RadioGroup dz = radios(box, texts(ui, D3_DZ_LABELS), 4000, nearest(DEADZONES, cp.getFloat("move_dz", 0f)), true);
+            // Touch layout: walking toward a held finger (D3PadView.HERO_* / DEPTH_*) and what menu-mode swipes press.
+            heading(box, when(ui, R.string.d3_touch_walk, true));
+            d3Slider(box, ui, R.string.d3_hero_y, cp, "d3_hero_y", D3PadView.HERO_Y_MIN, D3PadView.HERO_Y_MAX, D3PadView.HERO_Y_DEFAULT);
+            d3Slider(box, ui, R.string.d3_depth, cp, "d3_depth", D3PadView.DEPTH_MIN, D3PadView.DEPTH_MAX, D3PadView.DEPTH_DEFAULT);
+            note(box, ui.getString(R.string.d3_touch_walk_note));
+            heading(box, when(ui, R.string.d3_menu_swipe, true));
+            RadioGroup swG = radios(box, new String[] {ui.getString(R.string.d3_menu_swipe_stick), ui.getString(R.string.d3_menu_swipe_dpad)}, 9300,
+                cp.getInt("d3_menu_swipe", D3PadView.MENU_SWIPE_STICK), true);
             // Settings button (DoomPadView.GEAR_*): normal / faded, with the faded opacity slider below (saved and shown on the pad while
             // sliding: the pad is visible behind the dialog).
             heading(box, when(ui, R.string.d3_gear, true));
@@ -544,27 +570,44 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             alphaS.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
                 public void onProgressChanged(android.widget.SeekBar sb, int v, boolean user) {
                     alphaT.setText(ui.getString(R.string.d3_gear_alpha, v + 1)); cp.edit().putInt("gear_alpha", v + 1).apply();
-                    if (doomPad != null) doomPad.reloadSettings();
+                    if (d3Pad != null) d3Pad.reloadSettings();
                 }
                 public void onStartTrackingTouch(android.widget.SeekBar sb) {}
                 public void onStopTrackingTouch(android.widget.SeekBar sb) {}
             });
             android.widget.ScrollView scroll = new android.widget.ScrollView(this); scroll.addView(box);
-            new AlertDialog.Builder(this).setTitle(ui.getString(R.string.d3_title)).setView(scroll)
+            Runnable save = () -> {
+                int drvPick = picked(drvG, 7000, drvNames.length + 1);
+                p.edit().putString("ui_lang", D3_UI_LANGS[picked(uiG, 9100, D3_UI_LANGS.length)]).putString("lang", D3_LANG_CODES[picked(langG, 5000, D3_LANG_CODES.length)])
+                    .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 3))
+                    .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
+                    .putString("driver", drvPick > 0 ? drvNames[drvPick - 1] : "").putBoolean("rumble", rumble.isChecked()).apply();
+                cp.edit().putBoolean("fps", fps.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
+                    .putInt("gear_mode", picked(gearG, 9000, D3_GEAR_LABELS.length)).putInt("d3_menu_swipe", picked(swG, 9300, 2)).apply();
+                if (d3Pad != null) d3Pad.reloadSettings();
+                applyAspectLayout();
+            };
+            AlertDialog dlg = new AlertDialog.Builder(this).setTitle(ui.getString(R.string.d3_title)).setView(scroll)
                 .setPositiveButton(ui.getString(R.string.d3_save), (d, w) -> {
-                    String uiNow = D3_UI_LANGS[picked(uiG, 9100, D3_UI_LANGS.length)];
-                    int drvPick = picked(drvG, 7000, drvNames.length + 1);
-                    p.edit().putString("ui_lang", uiNow).putString("lang", D3_LANG_CODES[picked(langG, 5000, D3_LANG_CODES.length)])
-                        .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 3))
-                        .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
-                        .putString("driver", drvPick > 0 ? drvNames[drvPick - 1] : "").putBoolean("rumble", rumble.isChecked()).apply();
-                    cp.edit().putBoolean("fps", fps.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
-                        .putInt("gear_mode", picked(gearG, 9000, D3_GEAR_LABELS.length)).apply();
-                    if (doomPad != null) doomPad.reloadSettings();
-                    applyAspectLayout();
-                    if (!uiNow.equals(uiWas)) showD3Settings();   // the menu language applies at once: reopen in it
+                    save.run();
+                    if (!D3_UI_LANGS[picked(uiG, 9100, D3_UI_LANGS.length)].equals(uiWas)) showD3Settings();   // the menu language applies at once: reopen in it
                 })
                 .setNegativeButton(ui.getString(R.string.d3_cancel), null).show();
+            editB.setOnClickListener(v -> { save.run(); dlg.dismiss(); if (d3Pad != null) d3Pad.startEdit(); });   // drag controls on the pad; "Done" there ends it
+        });
+    }
+    // [D3] A percentage slider that saves "doom_controls" <key> and updates the pad while it moves (shown behind the dialog).
+    private void d3Slider(LinearLayout box, android.content.Context ui, int label, SharedPreferences cp, String key, int min, int max, int def) {
+        final int was = Math.max(min, Math.min(max, cp.getInt(key, def)));
+        final TextView t = new TextView(this); t.setText(ui.getString(label, was)); t.setPadding(0, 16, 0, 0); box.addView(t);
+        android.widget.SeekBar s = new android.widget.SeekBar(this); s.setMax(max - min); s.setProgress(was - min); box.addView(s);
+        s.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(android.widget.SeekBar sb, int v, boolean user) {
+                t.setText(ui.getString(label, v + min)); cp.edit().putInt(key, v + min).apply();
+                if (d3Pad != null) d3Pad.reloadSettings();
+            }
+            public void onStartTrackingTouch(android.widget.SeekBar sb) {}
+            public void onStopTrackingTouch(android.widget.SeekBar sb) {}
         });
     }
 
@@ -676,7 +719,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             catch (UnsatisfiedLinkError error) { showStartError(getString(R.string.dmAndroidLibrary)); return; }
             nativeContext(getApplicationContext());
         }
-        if (DOOM && doomPad == null) { doomPad = new DoomPadView(this); gameFrame.addView(doomPad, new FrameLayout.LayoutParams(-1, -1)); updatePadVisibility(); }   // [DOOM] on-screen controller
+        if (D3 && d3Pad == null) { d3Pad = new D3PadView(this); gameFrame.addView(d3Pad, new FrameLayout.LayoutParams(-1, -1)); updatePadVisibility(); }   // [D3] touch / gamepad layouts
+        else if (DOOM && !D3 && doomPad == null) { doomPad = new DoomPadView(this); gameFrame.addView(doomPad, new FrameLayout.LayoutParams(-1, -1)); updatePadVisibility(); }   // [DOOM] on-screen controller
         if (touchOverlay == null && !DOOM) {   // [DOOM] the D2R touch layout does not apply; a DOOM layout comes later
             int[] gameIds = {R.string.dmAndroidAttack, R.string.dmAndroidSkill1, R.string.dmAndroidSkill2, R.string.dmAndroidSkill3, R.string.dmAndroidSkill4,
                 R.string.dmAndroidPortal, R.string.dmAndroidPotion1, R.string.dmAndroidPotion2, R.string.dmAndroidPotion3, R.string.dmAndroidPotion4,
@@ -838,6 +882,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
 
     private void releaseTouches() {
         if (touchOverlay != null) touchOverlay.cancelTouches();
+        if (d3Pad != null) d3Pad.releaseAll();   // [D3] nothing stays held while the window is away (dialogs, pause)
         if (started) nativeTouch(0, new int[0], new float[0], new float[0]);
     }
 
@@ -900,10 +945,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         return (s & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD || (s & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
     }
     void updatePadVisibility() {
-        if (doomPad == null) return;
+        if (doomPad == null && d3Pad == null) return;
         boolean any = false;
         for (int id : InputDevice.getDeviceIds()) if (physicalController(InputDevice.getDevice(id))) { any = true; break; }
-        doomPad.setControllerMode(any);
+        if (doomPad != null) doomPad.setControllerMode(any);
+        if (d3Pad != null) d3Pad.setControllerMode(any);
     }
     @Override public void onDisplayAdded(int id) { updateRefresh(); }
     @Override public void onDisplayRemoved(int id) { updateRefresh(); }

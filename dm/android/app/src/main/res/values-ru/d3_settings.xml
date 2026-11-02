@@ -47,4 +47,23 @@
     <string name="d3_gear_alpha">Непрозрачность: %1$d%%</string>
     <string name="d3_toast_driver_crashed">Последние запуски с %1$s обрывались до первого кадра: включён системный драйвер.</string>
     <string name="d3_toast_driver_fallback">Драйвер %1$s не запустился (%2$s): используется системный.</string>
+    <string name="d3_layout">Раскладка управления</string>
+    <string name="d3_layout_touch">Сенсорная</string>
+    <string name="d3_layout_gamepad">Геймпад (Joy-Con)</string>
+    <string name="d3_layout_note">Сенсорная: левый стик появляется под пальцем внизу слева; коснитесь мира и держите — герой идёт туда, двойной тап — уклон в сторону точки; навыки справа (A основной, B, X, Y, R, ZR), L — зелье. Кнопка МЕНЮ включает жесты для меню: свайп двигает выбор, тап = A, долгое нажатие = удержание A, B остаётся кнопкой.</string>
+    <string name="d3_opacity">Непрозрачность управления: %1$d%%</string>
+    <string name="d3_scale">Размер управления: %1$d%%</string>
+    <string name="d3_edit">Расставить кнопки…</string>
+    <string name="d3_edit_note">Сохраняет этот диалог, затем перетаскивайте кнопки на экране; «Сбросить» возвращает их на места. Расстановка своя у каждой раскладки.</string>
+    <string name="d3_touch_walk">Сенсорная раскладка: ход к пальцу</string>
+    <string name="d3_hero_y">Высота героя на картинке (сверху): %1$d%%</string>
+    <string name="d3_depth">Поправка глубины: %1$d%%</string>
+    <string name="d3_touch_walk_note">Герой идёт от своего места на экране к удерживаемому пальцу. Поправка глубины учитывает наклон камеры: меньшее значение сильнее поворачивает касания выше или ниже героя к движению прямо вверх или вниз.</string>
+    <string name="d3_menu_swipe">Свайпы в режиме меню работают как</string>
+    <string name="d3_menu_swipe_stick">Левый стик</string>
+    <string name="d3_menu_swipe_dpad">Крестовина</string>
+    <string name="d3_pad_menu">МЕНЮ</string>
+    <string name="d3_pad_edit_hint">Перетащите кнопку, чтобы переместить её</string>
+    <string name="d3_pad_reset">Сбросить</string>
+    <string name="d3_pad_done">Готово</string>
 </resources>

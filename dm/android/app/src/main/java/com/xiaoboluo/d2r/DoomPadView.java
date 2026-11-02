@@ -28,6 +28,8 @@ import android.view.View;
 //   finger offset from the base); the gear dialog's dead-zone compensation applies to both. The move stick floats: a touch anywhere
 //   in the lower left that hits no button puts its base under the finger. D3 (Switch) reads no touch screen, mouse or keyboard
 //   (main imports only npad / six-axis / vibration), so free taps are not forwarded to the game.
+//   Since the touch layout, DmActivity gives D3 a D3PadView instead (this pad's D3 layout is its "gamepad" layout, plus a touch
+//   layout, opacity / size and an edit mode); the D3 branch here is no longer created.
 public class DoomPadView extends View {
     static final boolean D3 = DmActivity.D3;
     static final int PAD_DEVICE = 0x7d00;

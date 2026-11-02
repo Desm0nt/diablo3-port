@@ -48,4 +48,23 @@
     <string name="d3_gear_alpha">Faded opacity: %1$d%%</string>
     <string name="d3_toast_driver_crashed">The last launches with %1$s ended before the first frame: the system driver is used.</string>
     <string name="d3_toast_driver_fallback">Driver %1$s did not start (%2$s): the system driver is used.</string>
+    <string name="d3_layout">Control layout</string>
+    <string name="d3_layout_touch">Touch</string>
+    <string name="d3_layout_gamepad">Gamepad (Joy-Con)</string>
+    <string name="d3_layout_note">Touch: the left stick appears under your thumb in the lower left; touch and hold the world to walk there, double-tap to evade toward the point; skills on the right (A primary, B, X, Y, R, ZR), L = potion. The MENU button switches to menu gestures: swipe to move the selection, tap = A, long press = hold A, B stays a button.</string>
+    <string name="d3_opacity">Controls opacity: %1$d%%</string>
+    <string name="d3_scale">Controls size: %1$d%%</string>
+    <string name="d3_edit">Edit control positions…</string>
+    <string name="d3_edit_note">Saves this dialog, then drag the controls on the screen; Reset layout puts them back. Positions are kept for each layout separately.</string>
+    <string name="d3_touch_walk">Touch layout: walking to the finger</string>
+    <string name="d3_hero_y">Hero height on the picture (from the top): %1$d%%</string>
+    <string name="d3_depth">Depth correction: %1$d%%</string>
+    <string name="d3_touch_walk_note">The hero walks from his spot on the screen toward the held finger. Depth correction makes up for the slanted camera: lower values turn touches above or below the hero more toward straight up or down.</string>
+    <string name="d3_menu_swipe">Menu mode swipes act as</string>
+    <string name="d3_menu_swipe_stick">Left stick</string>
+    <string name="d3_menu_swipe_dpad">D-pad</string>
+    <string name="d3_pad_menu">MENU</string>
+    <string name="d3_pad_edit_hint">Drag a control to move it</string>
+    <string name="d3_pad_reset">Reset layout</string>
+    <string name="d3_pad_done">Done</string>
 </resources>
