@@ -69,4 +69,5 @@
     <string name="d3_pad_edit_hint">Перетащите кнопку, чтобы переместить её</string>
     <string name="d3_pad_reset">Сбросить</string>
     <string name="d3_pad_done">Готово</string>
+    <string name="d3_hide_sticks">Стики появляются только под пальцем (как в D2R Mobile)</string>
 </resources>

@@ -70,4 +70,5 @@
     <string name="d3_pad_edit_hint">Drag a control to move it</string>
     <string name="d3_pad_reset">Reset layout</string>
     <string name="d3_pad_done">Done</string>
+    <string name="d3_hide_sticks">Sticks appear only under the finger (as D2R Mobile)</string>
 </resources>

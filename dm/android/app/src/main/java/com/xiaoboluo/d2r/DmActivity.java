@@ -583,6 +583,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             d3Slider(box, ui, R.string.d3_opacity, cp, "d3_opacity", D3PadView.OPACITY_MIN, D3PadView.OPACITY_MAX, D3PadView.OPACITY_DEFAULT);
             d3Slider(box, ui, R.string.d3_scale, cp, "d3_scale", D3PadView.SCALE_MIN, D3PadView.SCALE_MAX, D3PadView.SCALE_DEFAULT);
             CheckBox iconsC = new CheckBox(this); iconsC.setText(when(ui, R.string.d3_skill_icons, true)); iconsC.setChecked(cp.getBoolean("d3_icons", true)); box.addView(iconsC);
+            CheckBox hideSt = new CheckBox(this); hideSt.setText(when(ui, R.string.d3_hide_sticks, true)); hideSt.setChecked(cp.getBoolean("d3_hide_sticks", true)); box.addView(hideSt);
             note(box, ui.getString(R.string.d3_skill_icons_note));
             android.widget.Button editB = new android.widget.Button(this); editB.setText(ui.getString(R.string.d3_edit)); box.addView(editB);
             note(box, ui.getString(R.string.d3_edit_note));
@@ -620,7 +621,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
                     .putString("driver", drvPick > 0 ? drvNames[drvPick - 1] : "").putBoolean("rumble", rumble.isChecked())
                     .putBoolean("d3_stretch_loading", stretchL.isChecked()).apply();
-                cp.edit().putBoolean("fps", fps.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
+                cp.edit().putBoolean("fps", fps.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putBoolean("d3_hide_sticks", hideSt.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
                     .putInt("gear_mode", picked(gearG, 9000, D3_GEAR_LABELS.length)).putInt("d3_menu_swipe", picked(swG, 9300, 2)).apply();
                 if (d3Pad != null) d3Pad.reloadSettings();
                 applyAspectLayout();

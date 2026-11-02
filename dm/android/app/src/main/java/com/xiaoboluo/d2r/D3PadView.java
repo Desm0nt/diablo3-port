@@ -120,7 +120,7 @@ public class D3PadView extends View {
     private boolean controllerMode, menuMode, editMode;
     // Skill icons (D3SkillIcons): sampled only while the pad is visible in play mode, the option is on and the activity is resumed.
     private final D3SkillIcons icons;
-    private boolean iconsOn = true, padVisible = true, hostResumed = true;
+    private boolean iconsOn = true, padVisible = true, hostResumed = true, hideSticks = true;
     private final Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final Path clip = new Path(); private final RectF iconDst = new RectF();
 
@@ -194,6 +194,7 @@ public class D3PadView extends View {
         menuSwipe = p.getInt("d3_menu_swipe", MENU_SWIPE_STICK) == MENU_SWIPE_DPAD ? MENU_SWIPE_DPAD : MENU_SWIPE_STICK;
         stretched = c.getSharedPreferences("doom_graphics", Context.MODE_PRIVATE).getInt("aspect", 0) == 1;
         iconsOn = p.getBoolean("d3_icons", true);
+        hideSticks = p.getBoolean("d3_hide_sticks", true);
         String want = LAYOUT_TOUCH.equals(p.getString("d3_layout", LAYOUT_DEFAULT)) ? LAYOUT_TOUCH : LAYOUT_GAMEPAD;
         if (!want.equals(layout)) {
             releaseAll(); menuMode = false; layout = want; btns.clear();
@@ -507,8 +508,11 @@ public class D3PadView extends View {
         for (Btn b : btns) if (shown(b)) drawBtn(c, b);
     }
     private float k() { return editMode ? Math.max(op, 0.5f) : op; }
+    // Hidden sticks ("d3_hide_sticks", default on, as D2R Mobile): an idle stick is not drawn at all; while a finger holds it, a faint
+    // ring (half the layout opacity) shows where its base is. The edit mode always draws them so they can be placed.
     private void drawStick(Canvas c, Stick s) {
-        float x = sx(s), y = sy(s), r = rad(s), k = k();
+        if (hideSticks && !editMode && s.pointer < 0) return;
+        float x = sx(s), y = sy(s), r = rad(s), k = hideSticks && !editMode ? k() * 0.5f : k();
         fill.setColor(0xffffffff); fill.setAlpha(Math.round(0x20 * k)); c.drawCircle(x, y, r, fill);
         line.setColor(editMode ? 0xffffd040 : 0xffffffff); line.setAlpha(editMode ? 0xe0 : Math.round(0x90 * k)); c.drawCircle(x, y, r, line);
         fill.setAlpha(Math.round((s.pointer >= 0 ? 0x80 : 0x40) * k)); c.drawCircle(x + s.x, y + s.y, r * 0.42f, fill);
