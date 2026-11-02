@@ -2,8 +2,10 @@ package com.xiaoboluo.d2r;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.RectF;
 import android.os.SystemClock;
 import android.view.KeyEvent;
@@ -30,7 +32,9 @@ import java.util.Map;
 //       the arc; ZL and a small d-pad top left, "-" (inventory / map) ⚙ "+" (menu) on top, R3 and the MENU toggle top right;
 //     * MENU toggle (manual menu mode; automatic detection is phase 2): skills, A/X/Y, R3 and the stick hide; a swipe anywhere drives the
 //       left stick (or the d-pad, "d3_menu_swipe") toward the swipe, a tap = A, a long press = hold A; B, L/R, ZL/ZR, d-pad, -/+ stay.
-// Both layouts: opacity ("d3_opacity" %), size ("d3_scale" %: radii and cluster offsets), and an edit mode (gear dialog "Edit control
+// Both layouts: skill icons on the buttons (gear "Skill icons on buttons", "d3_icons", default on: D3SkillIcons copies each HUD slot's
+// icon onto the button whose letter the HUD shows under it; the button's own label moves to a small badge in its lower right),
+// opacity ("d3_opacity" %), size ("d3_scale" %: radii and cluster offsets), and an edit mode (gear dialog "Edit control
 // positions") where each control (a d-pad or the A/B/X/Y diamond moves as one) is dragged to a new spot; positions are saved per layout
 // as fractions of the view ("d3_pos_<layout>_<group>" = "fx,fy"), "Reset layout" drops them. The ⚙ button keeps its own look
 // ("gear_mode" / "gear_alpha", as in DoomPadView). With a real controller in use only ⚙ is shown and nothing is sent.
@@ -114,12 +118,18 @@ public class D3PadView extends View {
     static final int GEAR_NORMAL = DoomPadView.GEAR_NORMAL, GEAR_FADED = DoomPadView.GEAR_FADED;
     private int gearMode = GEAR_NORMAL, gearAlpha = DoomPadView.GEAR_ALPHA_DEFAULT;
     private boolean controllerMode, menuMode, editMode;
+    // Skill icons (D3SkillIcons): sampled only while the pad is visible in play mode, the option is on and the activity is resumed.
+    private final D3SkillIcons icons;
+    private boolean iconsOn = true, padVisible = true, hostResumed = true;
+    private final Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final Path clip = new Path(); private final RectF iconDst = new RectF();
 
     public D3PadView(Context c) {
         super(c);
         dp = c.getResources().getDisplayMetrics().density;
         line.setStyle(Paint.Style.STROKE); line.setStrokeWidth(2 * dp);
         text.setTextAlign(Paint.Align.CENTER);
+        icons = c instanceof DmActivity ? new D3SkillIcons((DmActivity) c, this::invalidate) : null;
         reloadSettings();
     }
 
@@ -183,6 +193,7 @@ public class D3PadView extends View {
         depth = clamp(p.getInt("d3_depth", DEPTH_DEFAULT), DEPTH_MIN, DEPTH_MAX) / 100f;
         menuSwipe = p.getInt("d3_menu_swipe", MENU_SWIPE_STICK) == MENU_SWIPE_DPAD ? MENU_SWIPE_DPAD : MENU_SWIPE_STICK;
         stretched = c.getSharedPreferences("doom_graphics", Context.MODE_PRIVATE).getInt("aspect", 0) == 1;
+        iconsOn = p.getBoolean("d3_icons", true);
         String want = LAYOUT_TOUCH.equals(p.getString("d3_layout", LAYOUT_DEFAULT)) ? LAYOUT_TOUCH : LAYOUT_GAMEPAD;
         if (!want.equals(layout)) {
             releaseAll(); menuMode = false; layout = want; btns.clear();
@@ -195,8 +206,16 @@ public class D3PadView extends View {
             String[] f = v.split(",");
             try { if (f.length == 2) pos.put(k.group, new float[] {clampF(Float.parseFloat(f[0])), clampF(Float.parseFloat(f[1]))}); } catch (NumberFormatException e) { /* ignore */ }
         }
-        invalidate();
+        iconGate(); invalidate();
     }
+
+    // ---------------- skill icons ----------------
+    private void iconGate() { if (icons != null) icons.setGate(iconsOn && padVisible && hostResumed && !menuMode && !controllerMode && !editMode); }
+    // DmActivity.onResume / onPause: no read-back of a surface that is going away; a resume samples again soon.
+    void setHostResumed(boolean on) { hostResumed = on; iconGate(); }
+    @Override public void onVisibilityAggregated(boolean visible) { super.onVisibilityAggregated(visible); padVisible = visible; iconGate(); }
+    @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); if (icons != null) { icons.start(); iconGate(); } }
+    @Override protected void onDetachedFromWindow() { if (icons != null) icons.stop(); super.onDetachedFromWindow(); }
     private static int clamp(int v, int lo, int hi) { return Math.max(lo, Math.min(hi, v)); }
     private static float clampF(float v) { return Math.max(0f, Math.min(1f, v)); }
 
@@ -205,7 +224,7 @@ public class D3PadView extends View {
         if (on == controllerMode) return;
         controllerMode = on;   // first: no axes from releaseAll (they would make the touch pad the active controller in front_android.c)
         if (on) releaseAll();
-        invalidate();
+        iconGate(); invalidate();
     }
 
     // ---------------- geometry ----------------
@@ -350,7 +369,7 @@ public class D3PadView extends View {
         } else if (!cancel) pulse(K_A);
     }
     void setMenuMode(boolean on) {
-        releaseAll(); menuMode = on; axes(); invalidate();
+        releaseAll(); menuMode = on; axes(); iconGate(); invalidate();
     }
 
     // Lets go of everything this pad holds (focus lost, layout / mode switch, a controller took over, edit mode).
@@ -373,8 +392,8 @@ public class D3PadView extends View {
     // ---------------- edit mode ----------------
     private int editPtr = -1; private Ctl editCtl; private float editAx, editAy, editX0, editY0;
     private final RectF resetRect = new RectF(), doneRect = new RectF(), panelRect = new RectF();
-    void startEdit() { releaseAll(); editMode = true; invalidate(); }
-    private void endEdit() { editPtr = -1; editMode = false; invalidate(); }
+    void startEdit() { releaseAll(); editMode = true; iconGate(); invalidate(); }
+    private void endEdit() { editPtr = -1; editMode = false; iconGate(); invalidate(); }
     private void resetLayout() {
         SharedPreferences.Editor e = getContext().getSharedPreferences("doom_controls", Context.MODE_PRIVATE).edit();
         for (Ctl k : all()) e.remove(posKey(k.group));
@@ -500,12 +519,28 @@ public class D3PadView extends View {
         float x = cx(b), y = cy(b), r = rad(b);
         fill.setColor(b.key == MENU_TOGGLE && menuMode ? 0xffffb030 : 0xffffffff); fill.setAlpha(Math.round((on ? 0x80 : 0x30) * k));
         line.setColor(editMode ? 0xffffd040 : 0xffffffff); line.setAlpha(editMode ? 0xe0 : Math.round(0x90 * k));
+        Bitmap ic = iconsOn && icons != null && b.key >= 0 ? icons.icon(b.key) : null;
+        if (ic != null) { drawIconBtn(c, b, ic, x, y, r, k, on); return; }
         c.drawCircle(x, y, r, fill); c.drawCircle(x, y, r, line);
         float ts = touch() ? Math.max(12 * u(), 0.55f * r) : 15 * u();   // gamepad: the labels of DoomPadView's D3 pad
         text.setTextSize(ts); float w = text.measureText(b.label);
         if (w > 1.7f * r) { ts *= 1.7f * r / w; text.setTextSize(ts); }   // long labels (MENU / МЕНЮ) fit the circle
         text.setColor(0xffffffff); text.setAlpha(Math.round(0xd0 * k));
         c.drawText(b.label, x, y + ts * 0.35f, text);
+    }
+    // A button with the HUD's icon of its skill: the icon fills the circle (at the layout opacity), pressed = lighter, the button's
+    // label as a small badge in the lower right.
+    private void drawIconBtn(Canvas c, Btn b, Bitmap ic, float x, float y, float r, float k, boolean on) {
+        c.save();
+        clip.reset(); clip.addCircle(x, y, r, Path.Direction.CW); c.clipPath(clip);
+        iconPaint.setAlpha(Math.round(0xe0 * k)); iconDst.set(x - r, y - r, x + r, y + r); c.drawBitmap(ic, null, iconDst, iconPaint);
+        if (on) { fill.setColor(0xffffffff); fill.setAlpha(Math.round(0x70 * k)); c.drawCircle(x, y, r, fill); }
+        c.restore();
+        c.drawCircle(x, y, r, line);
+        float ts = Math.max(10 * dp, 0.34f * r); text.setTextSize(ts);
+        float bx = x + r * 0.70f, by = y + r * 0.70f, br = Math.max(ts * 0.72f, text.measureText(b.label) * 0.62f);
+        fill.setColor(0xff000000); fill.setAlpha(Math.round(0xb0 * k)); c.drawCircle(bx, by, br, fill);
+        text.setColor(0xffffffff); text.setAlpha(Math.round(0xe0 * k)); c.drawText(b.label, bx, by + ts * 0.35f, text);
     }
     private void drawEditPanel(Canvas c) {
         float w = getWidth(), h = getHeight(), pw = Math.min(w * 0.8f, 440 * dp), bh = 44 * dp, bw = (pw - 36 * dp) / 2, top = h * 0.30f;

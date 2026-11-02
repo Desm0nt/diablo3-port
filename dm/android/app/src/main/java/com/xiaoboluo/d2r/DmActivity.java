@@ -255,6 +255,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final String[] ASPECT_LABELS = {"Нативное 16:9 (чёрные полосы по бокам)", "Нативное, растянуть на весь экран", "Расширенное (шире обзор, со следующего запуска)"};
     static final int ASPECT_DEFAULT = 2;
     private int startedAspect = -1;   // the aspect mode the running game was started with (widened needs a restart)
+    private boolean startedHandheld;  // [D3] the Switch mode the running game was started with (DM_OPMODE 0)
     static final float[] LOOK_GAINS = {0.6f, 0.8f, 1.0f, 1.3f, 1.7f};
     static final String[] LOOK_LABELS = {"0.6", "0.8", "1.0", "1.3", "1.7"};
     static final float[] DEADZONES = {0f, 0.08f, 0.15f, 0.25f};
@@ -276,7 +277,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 Os.setenv("DM_PRESENT_MAX_HZ", String.valueOf(d3FpsLimit()), true);
                 // Resolution = the Switch operation mode the game is told (hle_oe.c GetOperationMode / GetPerformanceMode): docked
                 // renders 1600x900, handheld the game's own 720p preset. dm/env still wins (it is applied after this).
-                Os.setenv("DM_OPMODE", p.getBoolean("handheld", false) ? "0" : "1", true);
+                startedHandheld = p.getBoolean("handheld", false);
+                Os.setenv("DM_OPMODE", startedHandheld ? "0" : "1", true);
                 // Picture shape 2 = widescreen (hle_d3.c DM_D3_WIDE: the game renders at the screen's aspect, Hor+; next launch)
                 startedAspect = p.getInt("aspect", 0);
                 if (startedAspect == 2) Os.setenv("DM_D3_WIDE", "1", true); else Os.unsetenv("DM_D3_WIDE");
@@ -454,11 +456,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // dialog reopens in it). Options and how they reach the game:
     //   next launch (SharedPreferences "doom_graphics" -> environment before the library loads, applyDoomSettings; dm/env still wins):
     //     game language (DM_LANG -> hle_oe.c GetDesiredLanguage), resolution = Switch mode (DM_OPMODE 1 docked 1600x900 / 0 handheld
-    //     720p), frame rate limit (DM_PRESENT_MAX_HZ 30 / 60 -> hle_nvn.c), sharpening (DM_GFX_SHARPEN -> RCAS in vulkan_present.cpp),
+    //     720p; the labels show the size for the picked picture shape, widescreen W x 900 / W*4/5 x 720: d3RenderSize), frame rate limit (DM_PRESENT_MAX_HZ 30 / 60 -> hle_nvn.c), sharpening (DM_GFX_SHARPEN -> RCAS in vulkan_present.cpp),
     //     Vulkan driver (DM_VK_DRIVER -> vk_driver.c), vibration (DM_RUMBLE);
     //   immediately: picture shape (16:9 bars / stretched: the SurfaceView size, applyAspectLayout), and "doom_controls" read by
     //     D3PadView.reloadSettings: FPS counter, stick dead-zone compensation, settings button look (normal / faded + opacity),
-    //     control layout ("d3_layout" touch / gamepad, on pick), layout opacity / size ("d3_opacity" / "d3_scale" %, live sliders),
+    //     control layout ("d3_layout" touch / gamepad, on pick), skill icons on the buttons ("d3_icons", D3SkillIcons), layout opacity / size ("d3_opacity" / "d3_scale" %, live sliders),
     //     touch walking hero height / depth correction ("d3_hero_y" / "d3_depth" %, live), menu swipes ("d3_menu_swipe" stick / d-pad);
     //     "Edit control positions" saves the dialog and puts the pad in its edit mode (positions "d3_pos_<layout>_<group>").
     static final int[] D3_FPS_LIMITS = {30, 60};   // above 60 is not offered: D3 runs its frames at 60 like on the Switch (present interval 1)
@@ -470,6 +472,34 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final int[] D3_DZ_LABELS = {R.string.d3_dz_none, R.string.d3_dz_small, R.string.d3_dz_medium, R.string.d3_dz_large};   // DEADZONES
     static final int[] D3_GEAR_LABELS = {R.string.d3_gear_normal, R.string.d3_gear_faded};   // DoomPadView.GEAR_*
     private int d3FpsLimit() { return doomPrefs().getInt("fps_limit", 60) == 30 ? 30 : 60; }
+    // [D3] The game's render size, as the native side picks it: docked 1600x900, handheld 1280x720; widescreen (DM_D3_WIDE=1,
+    // hle_d3.c dm_d3_wide_install) W x 900 with W = front_game_res(1) (front_android.c: 900 x screen aspect, rounded to 8, max 4096)
+    // rounded to 16 (max 3200; not wider than 1600 = no widescreen), handheld (W x 4/5 rounded to 16) x 720. 2400x1080 -> 2000x900 / 1600x720.
+    static int[] d3RenderSize(boolean wide, boolean handheld, int sw, int sh) {
+        int w = 1600;
+        if (wide && sw > 0 && sh > 0 && (long) sw * 9 > (long) sh * 16) {
+            long bw = Math.round(900.0 * sw / sh / 8) * 8; if (bw > 4096) bw = 4096;
+            w = (int) Math.min(3200, (bw + 8) / 16 * 16);
+        }
+        if (w <= 1600) return handheld ? new int[] {1280, 720} : new int[] {1600, 900};
+        return handheld ? new int[] {(w * 4 / 5 + 8) / 16 * 16, 720} : new int[] {w, 900};
+    }
+    private int[] screenSize() {   // landscape: the long side first (the size the game's surface had at start)
+        android.graphics.Rect b = getWindowManager().getCurrentWindowMetrics().getBounds();
+        return new int[] {Math.max(b.width(), b.height()), Math.min(b.width(), b.height())};
+    }
+    // The running game's render size (D3SkillIcons reads the game picture back at this size); null before the game starts.
+    int[] d3RenderSize() {
+        if (startedAspect < 0) return null;
+        int[] sc = screenSize();
+        return d3RenderSize(startedAspect == 2, startedHandheld, sc[0], sc[1]);
+    }
+    SurfaceView gameSurface() { return view; }
+    private void d3ModeLabels(RadioGroup modeG, android.content.Context ui, boolean wide) {
+        int[] sc = screenSize(), dk = d3RenderSize(wide, false, sc[0], sc[1]), hh = d3RenderSize(wide, true, sc[0], sc[1]);
+        ((RadioButton) modeG.getChildAt(0)).setText(ui.getString(R.string.d3_mode_docked, dk[0] + "×" + dk[1]));
+        ((RadioButton) modeG.getChildAt(1)).setText(ui.getString(R.string.d3_mode_handheld, hh[0] + "×" + hh[1]));
+    }
     // Resources in the dialog's language: the phone's, or the one picked in the dialog (also D3PadView's labels).
     android.content.Context d3Ui() {
         String l = doomPrefs().getString("ui_lang", "");
@@ -506,11 +536,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             RadioGroup langG = radios(box, langLabels, 5000, indexOf(D3_LANG_CODES, p.getString("lang", "")), true);
             note(box, ui.getString(R.string.d3_game_lang_note));
             heading(box, when(ui, R.string.d3_mode, false));
-            RadioGroup modeG = radios(box, new String[] {ui.getString(R.string.d3_mode_docked), ui.getString(R.string.d3_mode_handheld)}, 1000, p.getBoolean("handheld", false) ? 1 : 0, false);
+            RadioGroup modeG = radios(box, new String[] {"", ""}, 1000, p.getBoolean("handheld", false) ? 1 : 0, false);
+            d3ModeLabels(modeG, ui, p.getInt("aspect", 0) == 2);   // the size the next launch renders at (widescreen: the screen's aspect)
             note(box, ui.getString(R.string.d3_mode_note));
             heading(box, when(ui, R.string.d3_aspect, true));
             RadioGroup aspG = radios(box, new String[] {ui.getString(R.string.d3_aspect_bars), ui.getString(R.string.d3_aspect_stretch), ui.getString(R.string.d3_aspect_wide)}, 8000, p.getInt("aspect", 0), false);
             note(box, ui.getString(R.string.d3_aspect_wide_note));
+            aspG.setOnCheckedChangeListener((g, id) -> d3ModeLabels(modeG, ui, id == 8002));
             heading(box, when(ui, R.string.d3_sharpen, false));
             RadioGroup sh = radios(box, texts(ui, D3_SHARPEN_LABELS), 2000, p.getInt("sharpen", 0), true);
             heading(box, when(ui, R.string.d3_fps_limit, false));
@@ -547,6 +579,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             note(box, ui.getString(R.string.d3_layout_note));
             d3Slider(box, ui, R.string.d3_opacity, cp, "d3_opacity", D3PadView.OPACITY_MIN, D3PadView.OPACITY_MAX, D3PadView.OPACITY_DEFAULT);
             d3Slider(box, ui, R.string.d3_scale, cp, "d3_scale", D3PadView.SCALE_MIN, D3PadView.SCALE_MAX, D3PadView.SCALE_DEFAULT);
+            CheckBox iconsC = new CheckBox(this); iconsC.setText(when(ui, R.string.d3_skill_icons, true)); iconsC.setChecked(cp.getBoolean("d3_icons", true)); box.addView(iconsC);
+            note(box, ui.getString(R.string.d3_skill_icons_note));
             android.widget.Button editB = new android.widget.Button(this); editB.setText(ui.getString(R.string.d3_edit)); box.addView(editB);
             note(box, ui.getString(R.string.d3_edit_note));
             heading(box, when(ui, R.string.d3_deadzone, true));
@@ -582,7 +616,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 3))
                     .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
                     .putString("driver", drvPick > 0 ? drvNames[drvPick - 1] : "").putBoolean("rumble", rumble.isChecked()).apply();
-                cp.edit().putBoolean("fps", fps.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
+                cp.edit().putBoolean("fps", fps.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
                     .putInt("gear_mode", picked(gearG, 9000, D3_GEAR_LABELS.length)).putInt("d3_menu_swipe", picked(swG, 9300, 2)).apply();
                 if (d3Pad != null) d3Pad.reloadSettings();
                 applyAspectLayout();
@@ -954,8 +988,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override public void onDisplayAdded(int id) { updateRefresh(); }
     @Override public void onDisplayRemoved(int id) { updateRefresh(); }
     @Override public void onDisplayChanged(int id) { updateRefresh(); }
-    @Override protected void onResume() { super.onResume(); resumed = true; immersive(); startHost(); updateRefresh(); if (started) { nativeFocus(3); if (touchOverlay != null && bootFailure == 0) touchOverlay.setInputEnabled(true); } }
-    @Override protected void onPause() { resumed = false; if (inputDialog != null) inputDialog.dismiss(); releaseTouches(); if (touchOverlay != null) touchOverlay.setInputEnabled(false); if (started) nativeFocus(0); super.onPause(); }
+    @Override protected void onResume() { super.onResume(); resumed = true; immersive(); startHost(); updateRefresh(); if (d3Pad != null) d3Pad.setHostResumed(true); if (started) { nativeFocus(3); if (touchOverlay != null && bootFailure == 0) touchOverlay.setInputEnabled(true); } }
+    @Override protected void onPause() { resumed = false; if (d3Pad != null) d3Pad.setHostResumed(false); if (inputDialog != null) inputDialog.dismiss(); releaseTouches(); if (touchOverlay != null) touchOverlay.setInputEnabled(false); if (started) nativeFocus(0); super.onPause(); }
     @Override protected void onStart() { super.onStart(); if (started) nativeFocus(2); }
     @Override protected void onStop() { if (started) nativeFocus(1); com.xiaoboluo.d2r.widget.HeroWidgetProvider.requestUpdate(this); super.onStop(); }
     @Override protected void onDestroy() { if (displays != null) displays.unregisterDisplayListener(this); if (inputs != null) inputs.unregisterInputDeviceListener(this); if (inputDialog != null) inputDialog.dismiss(); if (current.get() == this) current.clear(); super.onDestroy(); }

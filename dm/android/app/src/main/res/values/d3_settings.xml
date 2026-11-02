@@ -13,8 +13,8 @@
     <string name="d3_game_lang">Game language</string>
     <string name="d3_game_lang_note">Languages other than English need their language pack DLC in Download/Diablo3Mobile/aoc/&lt;index&gt;; without it the game stays in English.</string>
     <string name="d3_mode">Game resolution (Switch mode)</string>
-    <string name="d3_mode_docked">Docked: 1600×900</string>
-    <string name="d3_mode_handheld">Handheld: 1280×720 (lighter on the GPU)</string>
+    <string name="d3_mode_docked">Docked: %1$s</string>
+    <string name="d3_mode_handheld">Handheld: %1$s (lighter on the GPU)</string>
     <string name="d3_mode_note">The game picks its own render resolution for each Switch mode; the display hardware scales the picture to the screen.</string>
     <string name="d3_aspect">Picture shape</string>
     <string name="d3_aspect_bars">16:9 with black side bars</string>
@@ -52,6 +52,8 @@
     <string name="d3_layout_touch">Touch</string>
     <string name="d3_layout_gamepad">Gamepad (Joy-Con)</string>
     <string name="d3_layout_note">Touch: the left stick appears under your thumb in the lower left; touch and hold the world to walk there, double-tap to evade toward the point; skills on the right (A primary, B, X, Y, R, ZR), L = potion. The MENU button switches to menu gestures: swipe to move the selection, tap = A, long press = hold A, B stays a button.</string>
+    <string name="d3_skill_icons">Skill icons on buttons</string>
+    <string name="d3_skill_icons_note">About once a second the skill icons are copied from the HUD of the game (bottom left) onto the buttons with the same letter; a button whose letter the HUD does not show keeps its plain look.</string>
     <string name="d3_opacity">Controls opacity: %1$d%%</string>
     <string name="d3_scale">Controls size: %1$d%%</string>
     <string name="d3_edit">Edit control positions…</string>

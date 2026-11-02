@@ -12,8 +12,8 @@
     <string name="d3_game_lang">Язык игры</string>
     <string name="d3_game_lang_note">Языкам, кроме английского, нужен DLC-пакет языка в Download/Diablo3Mobile/aoc/&lt;индекс&gt;; без него игра остаётся на английском.</string>
     <string name="d3_mode">Разрешение игры (режим Switch)</string>
-    <string name="d3_mode_docked">В доке: 1600×900</string>
-    <string name="d3_mode_handheld">В руках: 1280×720 (легче для GPU)</string>
+    <string name="d3_mode_docked">В доке: %1$s</string>
+    <string name="d3_mode_handheld">В руках: %1$s (легче для GPU)</string>
     <string name="d3_mode_note">Игра сама выбирает разрешение для каждого режима Switch; до размера экрана картинку растягивает дисплейный контроллер.</string>
     <string name="d3_aspect">Формат картинки</string>
     <string name="d3_aspect_bars">16:9 с чёрными полосами по бокам</string>
@@ -51,6 +51,8 @@
     <string name="d3_layout_touch">Сенсорная</string>
     <string name="d3_layout_gamepad">Геймпад (Joy-Con)</string>
     <string name="d3_layout_note">Сенсорная: левый стик появляется под пальцем внизу слева; коснитесь мира и держите — герой идёт туда, двойной тап — уклон в сторону точки; навыки справа (A основной, B, X, Y, R, ZR), L — зелье. Кнопка МЕНЮ включает жесты для меню: свайп двигает выбор, тап = A, долгое нажатие = удержание A, B остаётся кнопкой.</string>
+    <string name="d3_skill_icons">Иконки навыков на кнопках</string>
+    <string name="d3_skill_icons_note">Примерно раз в секунду иконки навыков копируются из интерфейса игры (внизу слева) на кнопки с той же буквой; кнопка, чьей буквы в интерфейсе нет, остаётся обычной.</string>
     <string name="d3_opacity">Непрозрачность управления: %1$d%%</string>
     <string name="d3_scale">Размер управления: %1$d%%</string>
     <string name="d3_edit">Расставить кнопки…</string>
