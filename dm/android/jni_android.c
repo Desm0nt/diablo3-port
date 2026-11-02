@@ -257,7 +257,12 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     // (main 0xe72b0) and makes no NVN call while it waits, so a report published only when its slot retires (which the next
     // NVN call triggers) is never written; on the Switch the GPU writes it by itself. With 2 the AUTOSAVE screen froze ~4 s
     // after the first present in 3 of 5 runs, with 0 in none of 6, same 60 fps (Mi 14 Ultra, 02.11.2026).
-    setenv("DM_GFX_DEFER_EVENTS", "0", 0);
+    // Later the same night: frame overlap back with the Switch-like idle retire (the nvn-translate thread retires signalled
+    // slots and writes reports / events to guest memory on its own, nvnEventGetValue never waits) and one submission per
+    // frame (a 2-slot ring): gameplay 45 -> 60 fps (sync_q 60 -> 0, CPU 17 -> 5 ms), AUTOSAVE 0 freezes in 6 runs.
+    setenv("DM_GFX_DEFER_EVENTS", "2", 0);
+    setenv("DM_GFX_IDLE_RETIRE", "2", 0);
+    setenv("DM_GFX_SUBMIT_CHUNK_US", "0", 0);
 #else
     setenv("DM_GFX_DEFER_EVENTS", "2", 0);
 #endif
