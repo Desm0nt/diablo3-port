@@ -60,10 +60,20 @@ static void mem_init(void) {
     const size_t ALIAS_BIG = 0;
 #endif
     const size_t start = (5ull << 30) + ALIAS_BIG, step = 128ull << 20, limit = (4864ull << 20) + ALIAS_BIG;
+#ifdef DM_GAME_D3
+    // [D3] MAP_NORESERVE (DM_AS_NORESERVE, default 1): without it the first mprotect RW of a part sets VM_ACCOUNT on it, which an
+    // mprotect back to PROT_NONE keeps (UnmapPhysicalMemory, SetHeapSize shrink), so a once-committed range and a never-committed
+    // neighbour with the same protection can never merge into one VMA again: every VAMM map / unmap cycle at a new place left
+    // permanent VMA boundaries in the 32 GiB alias region (vm.max_map_count budget, hle_vma.c). With VM_NORESERVE no part is ever
+    // accounted, equal protections merge. Pages are still allocated on touch only, as before.
+    const int as_flags = MAP_PRIVATE | MAP_ANON | (getenv("DM_AS_NORESERVE") && *getenv("DM_AS_NORESERVE") == '0' ? 0 : MAP_NORESERVE);
+#else
+    const int as_flags = MAP_PRIVATE | MAP_ANON;
+#endif
     for (size_t sz = start; sz >= limit; sz -= step) {
 #if defined(DM_GAME_ETERNAL) || defined(DM_GAME_XC2) || defined(DM_GAME_D3)
-        g_as = dm_mmap_low40(sz, PROT_NONE, MAP_PRIVATE | MAP_ANON);
-        if (g_as == MAP_FAILED) { LOG("【红】reserve %zu MiB below 1 TiB failed: anywhere (40-bit GPU addresses will be truncated)", sz >> 20); g_as = mmap(NULL, sz, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0); }
+        g_as = dm_mmap_low40(sz, PROT_NONE, as_flags);
+        if (g_as == MAP_FAILED) { LOG("【红】reserve %zu MiB below 1 TiB failed: anywhere (40-bit GPU addresses will be truncated)", sz >> 20); g_as = mmap(NULL, sz, PROT_NONE, as_flags, -1, 0); }
 #else
         g_as = mmap(NULL, sz, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
 #endif
@@ -81,6 +91,25 @@ static void mem_init(void) {
     { void doom_alias_init(void); doom_alias_init(); }
 #endif
     LOG("guest AS %p +%zu MiB（降档后实际预留 %zu MiB）  heap %p alias %p stack %p", g_as, g_reserve >> 20, g_reserve >> 20, g_heap, g_alias, g_stack);
+#ifdef DM_GAME_D3
+    LOG("[vma] guest AS reserved %s MAP_NORESERVE (DM_AS_NORESERVE)", as_flags & MAP_NORESERVE ? "with" : "without");
+#endif
+    { void dm_vma_watch_start(void) __attribute__((weak)); if (dm_vma_watch_start) dm_vma_watch_start(); }   // hle_vma.c: VMA count log / relief (Linux)
+}
+// Guest address space [b0, b1) and alias region [b2, b3) (hle_vma.c classifies /proc/self/maps lines by them)
+void dm_guest_as_bounds(uint64_t b[4]) {
+    b[0] = (uint64_t)(uintptr_t)g_as; b[1] = b[0] + g_reserve; b[2] = (uint64_t)(uintptr_t)g_alias; b[3] = b[2] + g_alias_cap;
+}
+// mprotect of guest memory for the SVCs. ENOMEM (a split past vm.max_map_count, or no commit) is not fatal at once: the dirty tracker
+// hands its VMAs back (hle_vma.c dm_vma_relieve -> nvn_dirty_relieve) and the call is retried. 0 or errno.
+static int svc_mprotect(void *a, size_t n, int prot, const char *who) {
+    if (!mprotect(a, n, prot)) return 0;
+    int err = errno;
+    if (err != ENOMEM) return err;
+    uint64_t dm_vma_relieve(const char *why) __attribute__((weak));
+    if (dm_vma_relieve) dm_vma_relieve(who);
+    if (!mprotect(a, n, prot)) { LOG("[vma] %s: mprotect %p+%#zx succeeded after the relief", who, a, n); return 0; }
+    return errno;
 }
 
 // 应用内存池 = Switch（4 GB 机型）给应用的 3285 MB。游戏启动（main+0x1b66160）把 QueryMemoryInfo 报的总量整块设成堆、失败就减 2 MB 重试，
@@ -356,8 +385,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
 #endif
         if (size + image_bytes() > app_pool()) { g_heap_rejects++; regs[0] = 0x10801; return 0; }   // 超出应用内存池：ResultLimitReached。游戏启动时按 2 MB 递减重试直到放得下（main+0x1b66184） | exceeds the application memory pool: ResultLimitReached. At startup the game retries in 2 MB decrements until it fits (main+0x1b66184)
         int rc = 0;
-        if (size > g_heap_cur) rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
-        else if (size < g_heap_cur) rc = mprotect(g_heap + size, g_heap_cur - size, PROT_NONE);
+        if (size > g_heap_cur) rc = svc_mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE, "SetHeapSize");
+        else if (size < g_heap_cur) rc = svc_mprotect(g_heap + size, g_heap_cur - size, PROT_NONE, "SetHeapSize");
+        if (rc) { LOG("【红】SetHeapSize %#zx: mprotect errno=%d: ResultOutOfMemory", size, rc); regs[0] = 0xD001; return 0; }   // was ignored: the guest then faulted in its "new" heap
         if (g_flag.svc) LOG("SetHeapSize %#zx -> base %p mprotect=%d errno=%d", size, g_heap, rc, errno);
         { static int said; if (!said && size) { said = 1; LOG("SetHeapSize：首次设堆成功 %zu MB（应用内存池 %llu MB − 映像 %zu MB；此前被拒 %d 次）", size >> 20, (unsigned long long)(app_pool() >> 20), image_bytes() >> 20, g_heap_rejects); } }
         g_heap_cur = size;
@@ -383,7 +413,8 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (result) { pthread_mutex_unlock(&g_map_lock); LOG("[RED] MapMemory refused (%#x): %#llx <- %#llx +%#llx", result, (unsigned long long)dst, (unsigned long long)src, (unsigned long long)size); regs[0] = result; return 0; }
         uint64_t mask = (uint64_t)getpagesize() - 1;   // host page (4 KiB or 16 KiB on Android): the extra bytes opened are unused pages of the same region
         uint64_t lo = dst & ~mask, hi = (dst + size + mask) & ~mask;
-        if (mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE)) die("MapMemory mprotect errno=%d", errno);
+        { int e = svc_mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE, "MapMemory");
+          if (e) { pthread_mutex_unlock(&g_map_lock); LOG("【红】MapMemory %#llx+%#llx: mprotect errno=%d: ResultOutOfMemory", (unsigned long long)dst, (unsigned long long)size, e); regs[0] = 0xD001; return 0; } }
         memcpy((void *)dst, (void *)src, size);   // move semantics: the source is inaccessible while mapped (QueryMemory reports it Locked)
         map_add_l(dst, size, src, 0x0B /*MappedMemory*/);
         pthread_mutex_unlock(&g_map_lock);
@@ -467,8 +498,16 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             if ((mhi - hi) / 4096 != (uint64_t)alias_unmapped(hi - (uintptr_t)g_alias, mhi - hi)) mhi -= pg;
         }
         if (changed && mhi > mlo) {
-            if (mprotect((void *)mlo, mhi - mlo, commit ? PROT_READ | PROT_WRITE : PROT_NONE)) die("SVC %#x mprotect %p+%#zx errno=%d", num, (void *)a, size, errno);
-            if (!commit) (void)madvise((void *)mlo, mhi - mlo, MADV_FREE);
+            // ENOMEM (vm.max_map_count, see hle_vma.c): svc_mprotect has the dirty tracker give VMAs back and retries. Still failing:
+            // MapPhysicalMemory answers ResultOutOfMemory (0xD001) as the kernel does when it cannot map, instead of a host abort;
+            // UnmapPhysicalMemory, which Horizon does not fail, drops the pages (they read as zero) and leaves them accessible.
+            int e = svc_mprotect((void *)mlo, mhi - mlo, commit ? PROT_READ | PROT_WRITE : PROT_NONE, commit ? "MapPhysicalMemory" : "UnmapPhysicalMemory");
+            if (e && commit) {
+                pthread_mutex_unlock(&g_map_lock);
+                LOG("【红】MapPhysicalMemory %p+%#zx: mprotect errno=%d after the VMA relief: ResultOutOfMemory", (void *)a, size, e);
+                regs[0] = 0xD001; return 0; }
+            if (e) { static int said; if (!said++) LOG("【红】UnmapPhysicalMemory %p+%#zx: mprotect errno=%d: pages dropped (MADV_DONTNEED) but left accessible", (void *)a, size, e); }
+            if (!commit) (void)madvise((void *)mlo, mhi - mlo, e ? MADV_DONTNEED : MADV_FREE);
         }
         if (commit && changed) alias_initialize(off, size);   // newly committed pages read as zero, as on Horizon
         if (g_flag.svc) LOG("%sPhysicalMemory %p+%#zx", commit ? "Map" : "Unmap", (void *)a, size);
