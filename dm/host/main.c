@@ -167,6 +167,9 @@ static void host_preload(int argc, char **argv) {
 #ifdef DM_GAME_XC2
     { void dm_xc2_wide_install(void); dm_xc2_wide_install(); }   // [XC2] DM_XC2_WIDE: widen the NVN window before the guest runs (hle_xc2.c)
 #endif
+#ifdef DM_GAME_D3
+    { void dm_d3_wide_install(void); dm_d3_wide_install(); }   // [D3] DM_D3_WIDE: widen the NVN window / display mode before the guest runs (hle_d3.c)
+#endif
     uint64_t ta = now_ns();
 #ifndef DM_GAME_DOOM   // [DOOM] D2R-only: probes / tick hash (diag.c), target ranking (hle_target.c)
     probe_install();   // DM_PROBE 探针（诊断用） | DM_PROBE probes (for diagnostics)

@@ -118,4 +118,63 @@ HLE_FORCE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_14SecurityConfigERKNS0_1
 HLE_FORCE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoEPNS0_16NodeLatestUpdateEi", "local wireless (cut)", Result, h_ldn_NetInfoU, void *o, void *upd, int n) { (void)o; (void)upd; (void)n; return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", "local wireless (cut)", Result, h_ldn_Ip, uint32_t *a, uint32_t *m) { if (a) *a = 0; if (m) *m = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless (cut)", Result, h_ldn_Adv, const void *d, uint64_t n) { (void)d; (void)n; return RES_FAIL; }
+
+// ---- Widescreen (DM_D3_WIDE, default off until tested on the phone; docs/WIDESCREEN.md)
+// D3 never asks the system for a display size. NX64NVNCore's init (update 2.7.7 main 0xe7830, called once from the Gfx window open
+// 0x29a12c) fills its global (GOT 0x114c970 -> 0x179bc58) with constants:
+//   0xe7858 mov x8,#1600 / 0xe7860 movk x8,#900,lsl#32  -> +0x00 docked window size 1600x900
+//   0xe785c mov x9,#1280 / 0xe7864 movk x9,#720,lsl#32  -> +0x08 handheld size 1280x720
+//   0xe7868 mov w10,#0x8e39 / 0xe786c movk w10,#0x3fe3  -> +0x10 aspect 16/9 (1.7777778f)
+// Everything else follows them: the three swap textures and nvnWindowBuilderSetTextures (0xe6940) take +0x00 (docked size, always);
+// the present (0xeae2c) crops to +0x00 docked / +0x08 handheld; GetCurrentDisplayMode (0xea0e0) reports the mode's size as the
+// DisplayMode window / UI-optimal / full sizes and +0x10 as its aspect (DisplayMode at gfx+0x224, aspect at gfx+0x258, GetAspect
+// 0x29a7f0). The 3D cameras take that aspect (0x266740 -> camera+0x48 -> 0x29b7a0 perspective: m11 = 1/tan(fovY/2), m00 = m11/aspect,
+// vertical FOV => wider = Hor+). The UI (960x720 virtual space) is laid out in the centred 4:3 region of the real window size
+// (0x34baf0) with PC-style edge anchoring, so it needs nothing. The only 16:9 constant is the "Letterbox" check (0x29b480: option
+// flag and |16/9 - aspect| > 0.01 -> the 3D forced to 16/9); it is made to answer "no" so the option can never squeeze the wide view.
+//   DM_D3_WIDE=1        docked width = 900 x screen aspect (front_game_res(1): the screen size is known, nativeSurface runs before nativeStart)
+//   DM_D3_WIDE=<width>  explicit docked width (1601..3200)
+//   unset / 0           original 1600x900 / 1280x720
+// Widths are rounded to 16; handheld = docked x 4/5 (720 high), aspect = docked width / 900. All sites are checked word for word.
+#include <sys/mman.h>
+#include <stdlib.h>
+#include "front.h"
+enum { DW_INIT = 0xe7850, DW_LBOX = 0x29b480 };
+static const uint32_t k_dw_init[10] = {0xb0008336, 0xf944bad6, 0xd280c808 /* mov x8,#1600 */, 0xd280a009 /* mov x9,#1280 */,
+    0xf2c07088 /* movk x8,#900,lsl#32 */, 0xf2c05a09 /* movk x9,#720,lsl#32 */, 0x5291c72a /* mov w10,#0x8e39 */,
+    0x72a7fc6a /* movk w10,#0x3fe3,lsl#16 */, 0xb90012ca /* str w10,[x22,#0x10] */, 0xa90026c8 /* stp x8,x9,[x22] */};
+static const uint32_t k_dw_lbox[4] = {0xb00075a8 /* adrp x8,0x1150000 */, 0xf9423908 /* ldr x8,[x8,#0x470] */, 0xf9400108, 0x39400109};
+static int dw_poke(module_t *m, uint32_t off, const uint32_t *w, int n) {
+    uint32_t *at = (uint32_t *)(m->base + off);
+    uint8_t *pg = (uint8_t *)((uintptr_t)at & ~(uintptr_t)0x3FFF), *end = (uint8_t *)(at + n);
+    size_t len = (size_t)(((uintptr_t)end - (uintptr_t)pg + 0x3FFF) & ~(uintptr_t)0x3FFF);   // 16 KB = the loader's sealing granule
+    if (mprotect(pg, len, PROT_READ | PROT_WRITE)) return -1;
+    for (int i = 0; i < n; i++) at[i] = w[i];
+    if (mprotect(pg, len, PROT_READ | PROT_EXEC)) die("[wide] mprotect RX");
+    __builtin___clear_cache((char *)at, (char *)end);
+    return 0;
+}
+void dm_d3_wide_install(void);   // main.c host_preload, right after load_modules (before any guest code runs)
+void dm_d3_wide_install(void) {
+    const char *e = getenv("DM_D3_WIDE");
+    if (!e || !*e || (*e == '0' && !e[1])) { LOG("[wide] DM_D3_WIDE off: window 1600x900 (handheld 1280x720)"); return; }
+    long want = atol(e); unsigned w;
+    if (want > 1600) w = (unsigned)want;
+    else { uint64_t r = front_game_res(1); w = (uint32_t)(r >> 32) == 900 ? (uint32_t)r : 1600; }
+    w = (w + 8) / 16 * 16; if (w > 3200) w = 3200;
+    if (w <= 1600) { LOG("[wide] DM_D3_WIDE=%s: screen not wider than 16:9 (or unknown): window stays 1600x900", e); return; }
+    unsigned wh = (w * 4 / 5 + 8) / 16 * 16;
+    module_t *m = NULL;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
+    if (!m || m->text_end < DW_LBOX + sizeof k_dw_lbox || memcmp(m->base + DW_INIT, k_dw_init, sizeof k_dw_init) ||
+        memcmp(m->base + DW_LBOX, k_dw_lbox, sizeof k_dw_lbox)) {
+        LOG("【红】[wide] main is not D3 update 2.7.7 (build 2607a74f): window size site not found, stays 1600x900"); return; }
+    float a = (float)w / 900.0f; uint32_t ab; memcpy(&ab, &a, 4);
+    const uint32_t init[6] = {0xd2800008u | w << 5 /* mov x8,#W */, 0xd2800009u | wh << 5 /* mov x9,#Wh */, k_dw_init[4], k_dw_init[5],
+                              0x5280000au | (ab & 0xffff) << 5 /* mov w10,#lo */, 0x72a0000au | (ab >> 16) << 5 /* movk w10,#hi,lsl#16 */};
+    const uint32_t lbox[2] = {0x2a1f03e0 /* mov w0,wzr */, 0xd65f03c0 /* ret */};
+    if (dw_poke(m, DW_INIT + 8, init, 6) || dw_poke(m, DW_LBOX, lbox, 2)) { LOG("【红】[wide] mprotect RW failed: window stays 1600x900"); return; }
+    LOG("[wide] main+%#x window 1600x900 -> %ux900, handheld 1280x720 -> %ux720, aspect %.4f (Hor+ 3D, UI edge-anchored); letterbox check main+%#x off",
+        DW_INIT + 8, w, wh, a, DW_LBOX);
+}
 #endif

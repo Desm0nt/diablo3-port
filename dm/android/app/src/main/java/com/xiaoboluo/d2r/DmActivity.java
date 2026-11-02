@@ -276,6 +276,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 // Resolution = the Switch operation mode the game is told (hle_oe.c GetOperationMode / GetPerformanceMode): docked
                 // renders 1600x900, handheld the game's own 720p preset. dm/env still wins (it is applied after this).
                 Os.setenv("DM_OPMODE", p.getBoolean("handheld", false) ? "0" : "1", true);
+                // Picture shape 2 = widescreen (hle_d3.c DM_D3_WIDE: the game renders at the screen's aspect, Hor+; next launch)
+                startedAspect = p.getInt("aspect", 0);
+                if (startedAspect == 2) Os.setenv("DM_D3_WIDE", "1", true); else Os.unsetenv("DM_D3_WIDE");
             } else {
             if (p.getBoolean("drs", false)) Os.setenv("DM_DOOM_DRS", "1", true); else Os.unsetenv("DM_DOOM_DRS");
             int res = p.getInt("res", 0);
@@ -502,7 +505,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             RadioGroup modeG = radios(box, new String[] {ui.getString(R.string.d3_mode_docked), ui.getString(R.string.d3_mode_handheld)}, 1000, p.getBoolean("handheld", false) ? 1 : 0, false);
             note(box, ui.getString(R.string.d3_mode_note));
             heading(box, when(ui, R.string.d3_aspect, true));
-            RadioGroup aspG = radios(box, new String[] {ui.getString(R.string.d3_aspect_bars), ui.getString(R.string.d3_aspect_stretch)}, 8000, p.getInt("aspect", 0), false);
+            RadioGroup aspG = radios(box, new String[] {ui.getString(R.string.d3_aspect_bars), ui.getString(R.string.d3_aspect_stretch), ui.getString(R.string.d3_aspect_wide)}, 8000, p.getInt("aspect", 0), false);
+            note(box, ui.getString(R.string.d3_aspect_wide_note));
             heading(box, when(ui, R.string.d3_sharpen, false));
             RadioGroup sh = radios(box, texts(ui, D3_SHARPEN_LABELS), 2000, p.getInt("sharpen", 0), true);
             heading(box, when(ui, R.string.d3_fps_limit, false));
@@ -551,7 +555,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     String uiNow = D3_UI_LANGS[picked(uiG, 9100, D3_UI_LANGS.length)];
                     int drvPick = picked(drvG, 7000, drvNames.length + 1);
                     p.edit().putString("ui_lang", uiNow).putString("lang", D3_LANG_CODES[picked(langG, 5000, D3_LANG_CODES.length)])
-                        .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 2))
+                        .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 3))
                         .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
                         .putString("driver", drvPick > 0 ? drvNames[drvPick - 1] : "").putBoolean("rumble", rumble.isChecked()).apply();
                     cp.edit().putBoolean("fps", fps.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
@@ -568,10 +572,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // 1280x720 buffer, gfx-present-native); stretched and widened = the whole screen. A game started widened renders W x 720 at
     // the screen's aspect, so it fills the screen whatever the saved choice until the next launch.
     void applyAspectLayout() {
-        if (!(XC2 || D3) || view == null || gameFrame == null) return;   // [D3] 0 = 16:9 with bars (default), 1 = stretched; the game's 1600x900 / 720p is 16:9
+        if (!(XC2 || D3) || view == null || gameFrame == null) return;   // [D3] 0 = 16:9 with bars (default), 1 = stretched, 2 = widescreen (W x 900 at the screen's aspect)
         runOnUiThread(() -> {
             int fw = gameFrame.getWidth(), fh = gameFrame.getHeight();
             int mode = XC2 && startedAspect == 2 ? 2 : doomPrefs().getInt("aspect", XC2 ? ASPECT_DEFAULT : 0);
+            if (D3) mode = startedAspect == 2 ? 2 : mode == 2 ? 0 : mode;   // [D3] widescreen = whole screen only when the game was started with it
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -1, android.view.Gravity.CENTER);
             if (mode == 0 && fw > 0 && fh > 0 && fw * 9 > fh * 16) lp.width = fh * 16 / 9;
             else if (mode == 0 && fw > 0 && fh > 0 && fw * 9 < fh * 16) lp.height = fw * 9 / 16;
