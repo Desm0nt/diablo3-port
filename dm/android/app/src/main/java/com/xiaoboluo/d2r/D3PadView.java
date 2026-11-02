@@ -143,7 +143,7 @@ public class D3PadView extends View {
     }
     private void buildGamepad() {   // = DoomPadView's D3 pad (abf0b6a); 2400x1080 ~ 914x411 dp
         left = new Stick("lstick", 0.125f, 0.52f, 64, K_L3, 1.6f, 0.295f, 0.30f);   // floating zone: x < 0.42, y > 0.22 at home
-        right = new Stick("rstick", 0.735f, 0.80f, 50, K_R3, 1.5f, 0, 0);
+        right = new Stick("rstick", 0.735f, 0.80f, 50, K_R3, 1.5f, 0.26f, 0.40f);   // floating too (owner: the fixed one reacted only near the minimap): x 0.475..0.995, y > 0.40 at home, buttons win
         final float ax = 0.875f, ay = 0.48f, g = 50;   // right Joy-Con: diamond X top, A right (largest), B bottom, Y left
         addBtn("X", K_X, "abxy", ax, ay, 0, 0, 0, -g, 27, true); addBtn("A", K_A, "abxy", ax, ay, 0, 0, g, 0, 30, true);
         addBtn("B", K_B, "abxy", ax, ay, 0, 0, 0, g, 27, true); addBtn("Y", K_Y, "abxy", ax, ay, 0, 0, -g, 0, 27, true);
@@ -449,7 +449,7 @@ public class D3PadView extends View {
             else if (menuMode) { if (menuPtr < 0) menuStart(id, x, y); }
             else if (left.pointer < 0 && near(left, x, y, left.grab)) grab(left, id, x, y);   // the stick takes touches around its home
             else if (left.pointer < 0 && floatZone(left, x, y)) grabFloating(left, id, x, y);
-            else if (right != null) { if (right.pointer < 0 && near(right, x, y, right.grab)) grab(right, id, x, y); }   // gamepad: free taps do nothing
+            else if (right != null) { if (right.pointer < 0 && near(right, x, y, right.grab)) grab(right, id, x, y); else if (right.pointer < 0 && floatZone(right, x, y)) grabFloating(right, id, x, y); }   // gamepad: other free taps do nothing
             else if (worldPtr < 0 && y > TOP_STRIP_F * getHeight()) worldStart(id, x, y);
             break;
         }

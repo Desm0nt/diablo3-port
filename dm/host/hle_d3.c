@@ -138,6 +138,9 @@ HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless (cut)", Result, h
 // Widths are rounded to 16; handheld = docked x 4/5 (720 high), aspect = docked width / 900. All sites are checked word for word.
 #include <math.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include "front.h"
 enum { DW_INIT = 0xe7850, DW_LBOX = 0x29b480 };
@@ -184,12 +187,24 @@ static int ls_read(uint64_t a, void *out, size_t n) {
     int dm_guest_heap_readable(uint64_t a, size_t n);
     uint64_t b = (uint64_t)(uintptr_t)g_ls_base;
     if ((a >= b && n <= g_ls_size && a - b <= g_ls_size - n) || dm_guest_heap_readable(a, n)) { memcpy(out, (const void *)(uintptr_t)a, n); return 1; }
-    return 0;
+    // st (the loading-screen state) is outside the guest heap range the fast path knows: read it through the kernel (a bad pointer
+    // gives EFAULT, never a fault) - found on the phone with DM_D3_LS_DEBUG=1 (o read, o+0x800 refused, loading screens kept their bars)
+    if (a < 0x10000 || a >= (1ull << 48) || n > 4096) return 0;
+    struct iovec l = {out, n}, r = {(void *)(uintptr_t)a, n};
+    return syscall(SYS_process_vm_readv, getpid(), &l, 1UL, &r, 1UL, 0UL) == (ssize_t)n;
 }
 static void ls_present_crop(int crop[4]) {
     static int was, logged;
     int on = 0, c[4] = {0};
-    uint64_t o = 0, st = 0; uint32_t s[2]; float m[3];
+    uint64_t o = 0, st = 0; uint32_t s[2] = {0, 0}; float m[3];
+    {   // DM_D3_LS_DEBUG=1: once a second, what the detector reads (o, st, +0x6c, +0x70, the UI map) - to see why a loading screen is missed
+        static int dbg = -1; static uint64_t last; if (dbg < 0) { const char *e = getenv("DM_D3_LS_DEBUG"); dbg = e && *e == '1'; }
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); uint64_t now = (uint64_t)ts.tv_sec;
+        if (dbg && now != last) { last = now; uint64_t o2 = 0, st2 = 0; uint32_t s2[2] = {9, 9}; float m2[3] = {0, 0, 0};
+            int r1 = ls_read((uint64_t)(uintptr_t)(g_ls_base + LS_G) + 0x10, &o2, 8), r2 = o2 && ls_read(o2 + 0x800, &st2, 8),
+                r3 = st2 && ls_read(st2 + 0x6c, s2, 8), r4 = ls_read((uint64_t)(uintptr_t)(g_ls_base + LS_UIMAP), m2, sizeof m2);
+            LOG("[wide] ls-debug crop %d,%d %dx%d | o %#llx (%d) st %#llx (%d) +0x6c %u +0x70 %u (%d) | sx %.3f sy %.3f ox %.1f (%d)", crop[0], crop[1], crop[2], crop[3],
+                (unsigned long long)o2, r1, (unsigned long long)st2, r2, s2[0], s2[1], r3, m2[0], m2[1], m2[2], r4); } }
     if (crop[2] > 0 && crop[3] > 0 && ls_read((uint64_t)(uintptr_t)(g_ls_base + LS_G) + 0x10, &o, 8) && o && ls_read(o + 0x800, &st, 8) && st &&
         ls_read(st + 0x6c, s, 8) && s[0] && !s[1] && ls_read((uint64_t)(uintptr_t)(g_ls_base + LS_UIMAP), m, sizeof m) &&
         isfinite(m[0]) && isfinite(m[1]) && isfinite(m[2]) && m[0] > 0.1f && m[1] > 0.1f) {
