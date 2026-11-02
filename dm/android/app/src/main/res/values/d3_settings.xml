@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [D3] Gear (settings) dialog of Diablo III Mobile (DmActivity.showD3Settings). English default; values-ru has the Russian text.
+     The dialog can also be switched to a language other than the phone's (its own "Menu language" option). -->
+<resources>
+    <string name="d3_title">Settings</string>
+    <string name="d3_save">Save</string>
+    <string name="d3_cancel">Cancel</string>
+    <string name="d3_label_fmt">%1$s (%2$s)</string>
+    <string name="d3_when_now">applies immediately</string>
+    <string name="d3_when_next">applies on next launch</string>
+    <string name="d3_ui_lang">Menu language</string>
+    <string name="d3_system">System</string>
+    <string name="d3_game_lang">Game language</string>
+    <string name="d3_game_lang_note">Languages other than English need their language pack DLC in Download/Diablo3Mobile/aoc/&lt;index&gt;; without it the game stays in English.</string>
+    <string name="d3_mode">Game resolution (Switch mode)</string>
+    <string name="d3_mode_docked">Docked: 1600×900</string>
+    <string name="d3_mode_handheld">Handheld: 1280×720 (lighter on the GPU)</string>
+    <string name="d3_mode_note">The game picks its own render resolution for each Switch mode; the display hardware scales the picture to the screen.</string>
+    <string name="d3_aspect">Picture shape</string>
+    <string name="d3_aspect_bars">16:9 with black side bars</string>
+    <string name="d3_aspect_stretch">Stretched to the whole screen</string>
+    <string name="d3_sharpen">Sharpening (FSR RCAS)</string>
+    <string name="d3_off">Off</string>
+    <string name="d3_low">Low</string>
+    <string name="d3_medium">Medium</string>
+    <string name="d3_high">High</string>
+    <string name="d3_fps_limit">Frame rate limit</string>
+    <string name="d3_fps_note">30 saves battery and heat. The game itself runs at 60 (as on the Switch); higher limits are not offered.</string>
+    <string name="d3_driver">Vulkan driver</string>
+    <string name="d3_driver_system">System (vendor driver)</string>
+    <string name="d3_driver_system_short">system</string>
+    <string name="d3_driver_active">In use now: %1$s</string>
+    <string name="d3_driver_active_fallback">In use now: system driver (%1$s did not start)</string>
+    <string name="d3_driver_note">Driver packages (adrenotools: meta.json + .so, or a .zip) go to Download/Diablo3Mobile/drivers/.</string>
+    <string name="d3_rumble">Vibration</string>
+    <string name="d3_fps_counter">FPS and frame time counter</string>
+    <string name="d3_deadzone">On-screen sticks: game dead-zone compensation</string>
+    <string name="d3_dz_none">None</string>
+    <string name="d3_dz_small">Small</string>
+    <string name="d3_dz_medium">Medium</string>
+    <string name="d3_dz_large">Large</string>
+    <string name="d3_gear">Settings button</string>
+    <string name="d3_gear_normal">Normal</string>
+    <string name="d3_gear_faded">Faded</string>
+    <string name="d3_gear_note">Faded: the ⚙ button is drawn at the opacity below until it is pressed; it stays in the same place.</string>
+    <string name="d3_gear_alpha">Faded opacity: %1$d%%</string>
+    <string name="d3_toast_driver_crashed">The last launches with %1$s ended before the first frame: the system driver is used.</string>
+    <string name="d3_toast_driver_fallback">Driver %1$s did not start (%2$s): the system driver is used.</string>
+</resources>

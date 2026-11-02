@@ -192,6 +192,11 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
       char t1[1200]; snprintf(t1, sizeof t1, "%s/1/aoc1.arh", aoc); if (!access(t1, R_OK)) setenv("DM_AOC_OWNED", "1", 0);
       LOG("boot: add-on content %s (%s)", aoc, getenv("DM_AOC_OWNED") && !strcmp(getenv("DM_AOC_OWNED"), "1") ? "owned" : "none"); }
 #endif
+#ifdef DM_GAME_D3
+    // [D3] language-pack DLC: Download/Diablo3Mobile/aoc/<index> holds each pack's extracted RomFS (10 Russian: ruRU_*.cpk;
+    // tools/d3_dlc_romfs.py); hle_misc.c lists the indices that have a *_Common.cpk, hle_oe.c lets the game language use them
+    { char aoc[1100]; snprintf(aoc, sizeof aoc, "%s/aoc", g_src); setenv("DM_AOC", aoc, 0); LOG("boot: add-on content %s", getenv("DM_AOC")); }
+#endif
 #ifdef DM_ANDROID_DEBUG_ENV
     debug_environment();
 #endif
@@ -380,6 +385,12 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSurface(JNIEnv *e
 
 // 触点：Java 按手指槽号（最小空槽，抬起前不变）交整组归一化坐标，n = 0 = 全抬起
 // Touch points: Java hands over the whole set of normalized coordinates by finger slot number (lowest free slot, unchanged until lifted), n = 0 = all lifted
+// [D3] Vulkan driver status for the gear dialog (vk_driver.c, from the DOOM 2016 port): "<requested>\t<active>\t<reason>", or "" before
+// the driver is loaded.
+const char *dm_vk_driver_status(void);
+JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeDriverStatus(JNIEnv *env, jclass cls) {
+    (void)cls; return (*env)->NewStringUTF(env, dm_vk_driver_status());
+}
 // [XC2] Gear dialog: dynamic resolution on / off while the game runs (hle_xc2.c dm_xc2_set_drs); a no-op for other games
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetDrs(JNIEnv *env, jclass cls, jboolean on) {
     (void)env; (void)cls;

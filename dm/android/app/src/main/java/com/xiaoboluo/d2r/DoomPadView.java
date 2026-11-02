@@ -109,6 +109,11 @@ public class DoomPadView extends View {
     // Control options from the gear dialog (DmActivity): move dead-zone compensation and look sensitivity.
     // A real controller is connected (DmActivity.updatePadVisibility): only the settings button stays; everything held is released.
     private boolean controllerMode;
+    // Settings button look (gear dialog, doom_controls "gear_mode"; from the DOOM 2016 port): normal, or faded (its alpha scaled to
+    // "gear_alpha" % of the usual, a slider in the dialog, full while pressed, same spot). Applies in controllerMode too. Only the D3
+    // dialog offers it; other games keep the default (normal).
+    static final int GEAR_NORMAL = 0, GEAR_FADED = 1, GEAR_ALPHA_DEFAULT = 10;
+    private int gearMode = GEAR_NORMAL, gearAlpha = GEAR_ALPHA_DEFAULT;
     // Frame counter (gear dialog): fps, mean / max frame time and GPU time of the last 0.5 s, redrawn twice a second.
     private boolean showFps; private final float[] fstats = new float[4];
     private final Runnable fpsTick = new Runnable() { public void run() { if (!showFps) return; DmActivity.nativeFrameStats(fstats); invalidate(); postDelayed(this, 500); } };
@@ -134,6 +139,7 @@ public class DoomPadView extends View {
     void reloadSettings() {
         SharedPreferences p = getContext().getSharedPreferences("doom_controls", Context.MODE_PRIVATE);
         deadzone = p.getFloat("move_dz", 0f); showFps = p.getBoolean("fps", true); if (showFps) postDelayed(fpsTick, 500); lookGain = p.getFloat("look", 1.0f);
+        gearMode = p.getInt("gear_mode", GEAR_NORMAL) == GEAR_NORMAL ? GEAR_NORMAL : GEAR_FADED; gearAlpha = Math.max(1, Math.min(100, p.getInt("gear_alpha", GEAR_ALPHA_DEFAULT))); invalidate();
     }
 
     private float bx(Btn b) { return b.fx * getWidth() + b.ox * dp; }
@@ -269,9 +275,12 @@ public class DoomPadView extends View {
         for (Btn b : btns) drawBtn(c, b);
     }
     private void drawBtn(Canvas c, Btn b) {
+        boolean dim = b.key == SETTINGS && gearMode == GEAR_FADED && b.pointer < 0;   // faded gear: gearAlpha % of every alpha until pressed
         float x = bx(b), y = by(b), r = b.r * dp;
         fill.setColor(b.pointer >= 0 ? 0x80ffffff : (b.look ? 0x40ff6040 : 0x30ffffff));
+        if (dim) { fill.setAlpha(fill.getAlpha() * gearAlpha / 100); line.setAlpha(0x90 * gearAlpha / 100); text.setAlpha(0xd0 * gearAlpha / 100); }
         c.drawCircle(x, y, r, fill); c.drawCircle(x, y, r, line);
         c.drawText(b.label, x, y + text.getTextSize() * 0.35f, text);
+        if (dim) { line.setAlpha(0x90); text.setAlpha(0xd0); }
     }
 }

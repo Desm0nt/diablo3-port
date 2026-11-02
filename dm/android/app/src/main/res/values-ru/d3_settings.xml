@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [D3] Диалог настроек (шестерёнка) Diablo III Mobile, русский текст (DmActivity.showD3Settings). -->
+<resources>
+    <string name="d3_title">Настройки</string>
+    <string name="d3_save">Сохранить</string>
+    <string name="d3_cancel">Отмена</string>
+    <string name="d3_label_fmt">%1$s (%2$s)</string>
+    <string name="d3_when_now">применяется сразу</string>
+    <string name="d3_when_next">со следующего запуска</string>
+    <string name="d3_ui_lang">Язык этого меню</string>
+    <string name="d3_system">Как в системе</string>
+    <string name="d3_game_lang">Язык игры</string>
+    <string name="d3_game_lang_note">Языкам, кроме английского, нужен DLC-пакет языка в Download/Diablo3Mobile/aoc/&lt;индекс&gt;; без него игра остаётся на английском.</string>
+    <string name="d3_mode">Разрешение игры (режим Switch)</string>
+    <string name="d3_mode_docked">В доке: 1600×900</string>
+    <string name="d3_mode_handheld">В руках: 1280×720 (легче для GPU)</string>
+    <string name="d3_mode_note">Игра сама выбирает разрешение для каждого режима Switch; до размера экрана картинку растягивает дисплейный контроллер.</string>
+    <string name="d3_aspect">Формат картинки</string>
+    <string name="d3_aspect_bars">16:9 с чёрными полосами по бокам</string>
+    <string name="d3_aspect_stretch">Растянуть на весь экран</string>
+    <string name="d3_sharpen">Резкость (FSR RCAS)</string>
+    <string name="d3_off">Выкл</string>
+    <string name="d3_low">Слабая</string>
+    <string name="d3_medium">Средняя</string>
+    <string name="d3_high">Сильная</string>
+    <string name="d3_fps_limit">Ограничение FPS</string>
+    <string name="d3_fps_note">30 экономит батарею и меньше греет. Сама игра идёт в 60 (как на Switch); выше не предлагается.</string>
+    <string name="d3_driver">Драйвер Vulkan</string>
+    <string name="d3_driver_system">Системный (драйвер производителя)</string>
+    <string name="d3_driver_system_short">системный</string>
+    <string name="d3_driver_active">Сейчас используется: %1$s</string>
+    <string name="d3_driver_active_fallback">Сейчас используется: системный (%1$s не запустился)</string>
+    <string name="d3_driver_note">Пакеты драйверов (adrenotools: meta.json + .so или .zip) кладите в Download/Diablo3Mobile/drivers/.</string>
+    <string name="d3_rumble">Вибрация</string>
+    <string name="d3_fps_counter">Счётчик FPS и времени кадра</string>
+    <string name="d3_deadzone">Экранные стики: компенсация мёртвой зоны игры</string>
+    <string name="d3_dz_none">Нет</string>
+    <string name="d3_dz_small">Малая</string>
+    <string name="d3_dz_medium">Средняя</string>
+    <string name="d3_dz_large">Большая</string>
+    <string name="d3_gear">Кнопка настроек</string>
+    <string name="d3_gear_normal">Обычная</string>
+    <string name="d3_gear_faded">Прозрачная</string>
+    <string name="d3_gear_note">Прозрачная: кнопка ⚙ рисуется с прозрачностью ниже, пока её не нажмут; место то же.</string>
+    <string name="d3_gear_alpha">Непрозрачность: %1$d%%</string>
+    <string name="d3_toast_driver_crashed">Последние запуски с %1$s обрывались до первого кадра: включён системный драйвер.</string>
+    <string name="d3_toast_driver_fallback">Драйвер %1$s не запустился (%2$s): используется системный.</string>
+</resources>

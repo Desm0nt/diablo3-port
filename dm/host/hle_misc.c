@@ -18,6 +18,28 @@ enum { AOC_WARLOCK = 1 };
 #if defined(DM_GAME_ETERNAL)   // [ETERNAL] AOC 1..5 = Rip and Tear, Deluxe, Campaign (the update makes the campaign an add-on), The Ancient Gods 1 / 2;
 // their content is in the update's RomFS (base/game/dlc*): owned unless DM_AOC_OWNED=0
 static int aoc_owned(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_AOC_OWNED"); v = !(e && !strcmp(e, "0")); } return v; }
+#elif defined(DM_GAME_D3)
+// [D3] AOC index = a language pack (main 0x1099aa0: 1 english_eu, 2 english_southeast_asia, 3 spanish_eu, 4 spanish_latam, 5 french,
+// 6 italian, 7 german, 8 korean, 9 portuguese_brazil, 10 russian, 11 chinese_china, 12 chinese_taiwan, 14 polish, 15 portuguese_portugal,
+// 16 japanese, 17 english_us; 100..102 cosmetic dlc.*). The game lists the add-ons, mounts each as "aoc_<index>" (hle_fs.c
+// h_fs_MountAoc -> DM_AOC/<index>) and reads a locale's archives there. Owned = DM_AOC/<index> holds a *_Common.cpk (the extracted
+// pack RomFS, tools/d3_dlc_romfs.py); DM_AOC_OWNED=0 reports none.
+#include <dirent.h>
+static int g_d3_aoc[32], g_d3_aoc_n = -1;
+static void d3_aoc_scan(void) {
+    if (g_d3_aoc_n >= 0) return;
+    int n = 0; const char *a = getenv("DM_AOC");
+    for (int idx = 1; idx <= 17 && a && *a && n < (int)(sizeof g_d3_aoc / sizeof *g_d3_aoc); idx++) {
+        char d[1100]; snprintf(d, sizeof d, "%s/%d", a, idx);
+        DIR *dir = opendir(d); struct dirent *de; int hit = 0;
+        while (dir && !hit && (de = readdir(dir))) { size_t l = strlen(de->d_name); hit = l > 11 && !strcmp(de->d_name + l - 11, "_Common.cpk"); }
+        if (dir) closedir(dir);
+        if (hit) { g_d3_aoc[n++] = idx; LOG("aoc: language pack %d in %s", idx, d); }
+    }
+    g_d3_aoc_n = n;
+    if (!n) LOG("aoc: no language packs in %s/<index>", a && *a ? a : "(DM_AOC unset)");
+}
+static int aoc_owned(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_AOC_OWNED"); v = !(e && !strcmp(e, "0")); } if (!v) return 0; d3_aoc_scan(); return g_d3_aoc_n > 0; }
 #elif defined(DM_GAME_DOOM)   // [DOOM] AOC 1 = D2R "Reign of the Warlock"; Doom: no add-on content unless DM_AOC_OWNED=1
 static int aoc_owned(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_AOC_OWNED"); v = e && !strcmp(e, "1"); } return v; }
 #else
@@ -29,17 +51,24 @@ static const int g_aoc_owned[] = {1, 2, 3, 4, 5};
 // [XC2] AOC 0100E9500403900N: 1 Torna - The Golden Country, 2 New Quests, 3 New Rare Blade, 4 New Challenge Mode, 5 Helpful Items,
 // 6 My Nintendo Bonus Items, 99 (0x63) Japanese voice; owned only with DM_AOC_OWNED=1 (their RomFS must be in DM_AOC/<index>)
 static const int g_aoc_owned[] = {1, 2, 3, 4, 5, 6, 99};
-#else
+#elif !defined(DM_GAME_D3)
 static const int g_aoc_owned[] = {AOC_WARLOCK};
 #endif
-HLE_FORCE("_ZN2nn3aoc17CountAddOnContentEv", "追加内容数：已拥有术士君临 1 个（复刻范围必须保留）", int, h_aoc_Count, void) { return aoc_owned() ? (int)(sizeof g_aoc_owned / sizeof *g_aoc_owned) : 0; }
+#ifdef DM_GAME_D3
+#define AOC_LIST g_d3_aoc
+#define AOC_COUNT g_d3_aoc_n
+#else
+#define AOC_LIST g_aoc_owned
+#define AOC_COUNT (int)(sizeof g_aoc_owned / sizeof *g_aoc_owned)
+#endif
+HLE_FORCE("_ZN2nn3aoc17CountAddOnContentEv", "追加内容数：已拥有术士君临 1 个（复刻范围必须保留）", int, h_aoc_Count, void) { return aoc_owned() ? AOC_COUNT : 0; }
 // ListAddOnContent(out, 起始下标, 最多个数)：按已拥有序号列表 {1} 从起始下标起写出，返回写出个数
 // ListAddOnContent(out, start index, max count): writes out from the owned index list {1} starting at the start index, returns the number written
 HLE_FORCE("_ZN2nn3aoc16ListAddOnContentEPiii", "追加内容列表：{1}（术士君临）", int, h_aoc_List, int *out, int off, int n) {
-    const int *owned = g_aoc_owned;
     int w = 0;
     if (!aoc_owned()) return 0;
-    for (int i = off; i < (int)(sizeof g_aoc_owned / sizeof *g_aoc_owned) && w < n; i++) out[w++] = owned[i];
+    const int *owned = AOC_LIST;
+    for (int i = off; i < AOC_COUNT && w < n; i++) out[w++] = owned[i];
     return w;
 }
 // 事件对象按需由 nn::os 旁表建（未触发），游戏等它只会超时 / 取到未触发

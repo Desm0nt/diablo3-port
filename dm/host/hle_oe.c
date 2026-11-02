@@ -438,14 +438,27 @@ HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "系统语言查询；按 DM_LANG �
     { static const char *const ok[] = {"ja", "en-US", "en-GB", "fr", "de", "it", "es", "es-419", "pt", "ru", "ko", "zh-Hans", "zh-Hant"}; int hit = 0;
       for (unsigned i = 0; i < sizeof ok / sizeof *ok; i++) if (!strcmp(code, ok[i])) hit = 1;
       if (!hit) { memset(code, 0, sizeof code); strcpy(code, "en-US"); } }
-    // [D3] the update's RomFS ships one locale's archives (CPKs/enUS_*.cpk): with no other <locale>_Common.cpk next to them the game
-    // would look for archives that are not there, so any other language becomes en-US
-    { static int others = -1;
-      if (others < 0) { others = 0; char d[1100]; const char *r = getenv("DM_ROMFS"); snprintf(d, sizeof d, "%s/CPKs", r ? r : "romfs");
-          DIR *dir = opendir(d); struct dirent *de;
-          while (dir && (de = readdir(dir))) { size_t l = strlen(de->d_name); if (l > 11 && !strcmp(de->d_name + l - 11, "_Common.cpk") && strncmp(de->d_name, "enUS_", 5)) others++; }
-          if (dir) closedir(dir); }
-      if (!others && strcmp(code, "en-US")) { LOG("oe::GetDesiredLanguage: %s requested, only enUS archives in the RomFS -> en-US", code); memset(code, 0, sizeof code); strcpy(code, "en-US"); } }
+    // [D3] the update's RomFS ships one locale's archives (CPKs/enUS_*.cpk); the others come as language-pack DLC that the game mounts
+    // as "aoc_<index>" (main 0x73140) and reads as aoc_<index>:/<locale>_Common.cpk when CPKs/ lacks it (main 0x738e0; index table
+    // main 0x1099aa0: 1 english_eu, 10 russian, ...). A language whose archives are in neither place would make the game look for files
+    // that are not there, so it becomes en-US. DM_AOC/<index> holds the extracted pack (tools/d3_dlc_romfs.py; hle_misc.c lists it).
+    // ruRU / 10 and enGB / 1 are confirmed from the real packs; the other locale names / indices follow the same table (unverified).
+    if (strcmp(code, "en-US")) {
+        static const struct { const char *code, *loc; int aoc; } k[] = {{"ru", "ruRU", 10}, {"en-GB", "enGB", 1}, {"fr", "frFR", 5}, {"de", "deDE", 7},
+            {"it", "itIT", 6}, {"es", "esES", 3}, {"es-419", "esMX", 4}, {"ko", "koKR", 8}, {"pt", "ptBR", 9}, {"zh-Hans", "zhCN", 11}, {"zh-Hant", "zhTW", 12}, {"ja", "jaJP", 16}};
+        static char seen[8], found[1200]; static int have = -1;
+        if (have < 0 || strcmp(seen, code)) {
+            const char *r = getenv("DM_ROMFS"), *a = getenv("DM_AOC"), *o = getenv("DM_AOC_OWNED");
+            have = 0; strlcpy(seen, code, sizeof seen); found[0] = 0;
+            for (unsigned i = 0; i < sizeof k / sizeof *k && !have; i++) if (!strcmp(code, k[i].code)) {
+                snprintf(found, sizeof found, "%s/CPKs/%s_Common.cpk", r ? r : "romfs", k[i].loc); have = !access(found, R_OK);
+                if (!have && a && *a && !(o && !strcmp(o, "0"))) { snprintf(found, sizeof found, "%s/%d/%s_Common.cpk", a, k[i].aoc, k[i].loc); have = !access(found, R_OK); }
+            }
+            if (have) LOG("oe::GetDesiredLanguage: %s, archives %s", code, found);
+            else LOG("oe::GetDesiredLanguage: %s requested, no %s archives (RomFS CPKs/ or DM_AOC/<index>) -> en-US", code, found[0] ? found : "known");
+        }
+        if (!have) { memset(code, 0, sizeof code); strcpy(code, "en-US"); }
+    }
     static int once; if (!once++) LOG("oe::GetDesiredLanguage: %s (DM_LANG %s)", code, e ? e : "unset");
 #elif defined(DM_GAME_DOOM)
     lang_to_switch(e && *e ? e : "en-US", code);
