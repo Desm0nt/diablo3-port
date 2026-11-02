@@ -136,6 +136,7 @@ HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless (cut)", Result, h
 //   DM_D3_WIDE=<width>  explicit docked width (1601..3200)
 //   unset / 0           original 1600x900 / 1280x720
 // Widths are rounded to 16; handheld = docked x 4/5 (720 high), aspect = docked width / 900. All sites are checked word for word.
+#include <math.h>
 #include <sys/mman.h>
 #include <stdlib.h>
 #include "front.h"
@@ -153,6 +154,74 @@ static int dw_poke(module_t *m, uint32_t off, const uint32_t *w, int n) {
     if (mprotect(pg, len, PROT_READ | PROT_EXEC)) die("[wide] mprotect RX");
     __builtin___clear_cache((char *)at, (char *)end);
     return 0;
+}
+// ---- Loading screens stretched to the screen in widescreen (DM_D3_WIDE_STRETCH_LOADING, default 1 with DM_D3_WIDE; docs/WIDESCREEN.md)
+// The loading screen is not a UI control: the main loop (0x40810 -> 0x41418 / 0x408dc, also 0x3d37c / 0x3d510 from blocking loads) calls
+// LoadingScreen_Frame 0x3ebc0 with st = *(*(g + 0x10) + 0x800) (g = main+0x1905610):
+//   st+0x6c  1 = loading screen up (set at 0x3ecf8 on its first frame, cleared only by 0x3dbd0 at 0x3dc9c when the loop sees loading over)
+//   st+0x70  its mode, = global 0x1767bc4 at start: 0 = the act art (0x32e200 loads the textures, 0x3ee18 b 0x32ec60 draws), else a plain
+//            window-sized fill (0x3ed8c..0x3edc8, nothing to stretch)
+// 0x32ec60 draws the art in UI units (960x720 space): EndCapLeft x -160.2..0 (0x32ecac mov/movk = 0xc3203334) when the full-screen rect
+// (0x3d9e0) starts left of 0, the 4x3 centre 0..960, EndCapRight 960..1120.2 (0x32ed74 = 0x448c0666) when it ends right of 960, y 0..720;
+// the logo, tips text and loading dots are inside 0..960. -160.2..1120.2 = 1280.4 x 720 = 16:9. UI -> pixels: 0x34bf50, px = ox + ui*sx,
+// py = ui*sy with {sx, sy, ox} at 0x1862680 (the centred 4:3 region of the window: 2000x900 -> sx 1.25, ox 400 -> art 199.75..1800.25).
+// While st+0x6c && !st+0x70 the present (hle_nvn.c g_nvn_present_crop, game thread) takes only the art's whole-pixel rect (200,0 1600x900)
+// inside the game's own crop; vulkan_present.cpp present_native gives the window buffer that size and the compositor scales it to the
+// full-screen SurfaceView (non-uniform: stretched, like the 'stretched' picture shape). Every other frame keeps the full window.
+enum { LS_G = 0x1905610, LS_GOT_G = 0x114a840, LS_UIMAP = 0x1862680 };
+static const struct { uint32_t off, n, w[5]; } k_ls_sites[] = {
+    {0x3ebe0, 5, {0xf9442108 /* ldr x8,[x8,#0x840] (GOT g) */, 0xf9400908 /* ldr x8,[x8,#0x10] */, 0xf9440115 /* ldr x21,[x8,#0x800] */,
+                  0x97ff2f81 /* bl 0xa9f0 */, 0xb9406ea8 /* ldr w8,[x21,#0x6c] */}},
+    {0x3ecf4, 2, {0x320003e8 /* mov w8,#1 */, 0xb9006ea8 /* str w8,[x21,#0x6c] */}},
+    {0x3ed84, 3, {0xb94072a9 /* ldr w9,[x21,#0x70] */, 0x290c02a8, 0x340002e9 /* cbz w9 -> art */}},
+    {0x3ee18, 1, {0x140bbf92 /* b 0x32ec60 */}},
+    {0x32ecac, 2, {0x52866688, 0x72b86408 /* w8 = -160.2f */}},
+    {0x32ed74, 2, {0xd280ccc8, 0xf2a89188 /* x8 lo = 1120.2f */}},
+    {0x34bf50, 4, {0xf000a8a8, 0x911a0108 /* x8 = 0x1862680 */, 0xbd400800, 0x2d401101 /* ldp s1(sx), s4(sy), [x8] */}},
+};
+static uint8_t *g_ls_base; static size_t g_ls_size;
+static int ls_read(uint64_t a, void *out, size_t n) {
+    int dm_guest_heap_readable(uint64_t a, size_t n);
+    uint64_t b = (uint64_t)(uintptr_t)g_ls_base;
+    if ((a >= b && n <= g_ls_size && a - b <= g_ls_size - n) || dm_guest_heap_readable(a, n)) { memcpy(out, (const void *)(uintptr_t)a, n); return 1; }
+    return 0;
+}
+static void ls_present_crop(int crop[4]) {
+    static int was, logged;
+    int on = 0, c[4] = {0};
+    uint64_t o = 0, st = 0; uint32_t s[2]; float m[3];
+    if (crop[2] > 0 && crop[3] > 0 && ls_read((uint64_t)(uintptr_t)(g_ls_base + LS_G) + 0x10, &o, 8) && o && ls_read(o + 0x800, &st, 8) && st &&
+        ls_read(st + 0x6c, s, 8) && s[0] && !s[1] && ls_read((uint64_t)(uintptr_t)(g_ls_base + LS_UIMAP), m, sizeof m) &&
+        isfinite(m[0]) && isfinite(m[1]) && isfinite(m[2]) && m[0] > 0.1f && m[1] > 0.1f) {
+        float fl = m[2] - 160.2f * m[0], fr = m[2] + 1120.2f * m[0], fb = 720.0f * m[1];
+        int l = (int)ceilf(fl - 0.01f), r = (int)floorf(fr + 0.01f), b = (int)floorf(fb + 0.5f);
+        if (l < 0) l = 0;
+        if (r > crop[2]) r = crop[2];
+        if (b > crop[3]) b = crop[3];
+        if (r - l >= 64 && b >= 64 && (l > 0 || r < crop[2])) { on = 1; c[0] = crop[0] + l; c[1] = crop[1]; c[2] = r - l; c[3] = b; }
+        if (on != was && logged < 400) { logged++;
+            LOG("[wide] loading screen (st %#llx +0x6c %u +0x70 %u): art UI -160.2..1120.2 -> px %.2f..%.2f x 0..%.1f (sx %.4f ox %.1f): %s",
+                (unsigned long long)st, s[0], s[1], fl, fr, fb, m[0], m[2], on ? "present crop below, stretched to the screen" : "fills the window, nothing to crop"); }
+    }
+    if (on != was && logged < 400) { logged++;
+        if (on) LOG("[wide] loading screen: present %d,%d %dx%d of the window crop %d,%d %dx%d, stretched to the screen", c[0], c[1], c[2], c[3], crop[0], crop[1], crop[2], crop[3]);
+        else LOG("[wide] loading screen over: present the whole window %d,%d %dx%d again", crop[0], crop[1], crop[2], crop[3]); }
+    was = on;
+    if (on) memcpy(crop, c, sizeof c);
+}
+static void ls_install(module_t *m) {
+    const char *e = getenv("DM_D3_WIDE_STRETCH_LOADING");
+    if (e && *e == '0' && !e[1]) { LOG("[wide] DM_D3_WIDE_STRETCH_LOADING=0: loading screens keep their 16:9 art with side bars"); return; }
+    for (unsigned i = 0; i < sizeof k_ls_sites / sizeof *k_ls_sites; i++)
+        if (m->size < k_ls_sites[i].off + 4 * k_ls_sites[i].n || memcmp(m->base + k_ls_sites[i].off, k_ls_sites[i].w, 4 * k_ls_sites[i].n)) {
+            LOG("【红】[wide] main+%#x differs: loading-screen stretch off (not update 2.7.7 build 2607a74f)", k_ls_sites[i].off); return; }
+    if (m->size < LS_G + 0x18 || m->size < LS_UIMAP + 12 || *(uint64_t *)(m->base + LS_GOT_G) != (uint64_t)(uintptr_t)(m->base + LS_G)) {
+        LOG("【红】[wide] GOT main+%#x does not point at main+%#x: loading-screen stretch off", LS_GOT_G, LS_G); return; }
+    g_ls_base = m->base; g_ls_size = m->size;
+    extern void (*g_nvn_present_crop)(int crop[4]);
+    g_nvn_present_crop = ls_present_crop;
+    LOG("[wide] loading screens: the 16:9 act art (main 0x32ec60, UI -160.2..1120.2) is presented alone and stretched to the screen "
+        "while st+0x6c (loading screen up) && !st+0x70 (art mode); DM_D3_WIDE_STRETCH_LOADING=0 turns it off");
 }
 void dm_d3_wide_install(void);   // main.c host_preload, right after load_modules (before any guest code runs)
 void dm_d3_wide_install(void) {
@@ -176,5 +245,6 @@ void dm_d3_wide_install(void) {
     if (dw_poke(m, DW_INIT + 8, init, 6) || dw_poke(m, DW_LBOX, lbox, 2)) { LOG("【红】[wide] mprotect RW failed: window stays 1600x900"); return; }
     LOG("[wide] main+%#x window 1600x900 -> %ux900, handheld 1280x720 -> %ux720, aspect %.4f (Hor+ 3D, UI edge-anchored); letterbox check main+%#x off",
         DW_INIT + 8, w, wh, a, DW_LBOX);
+    ls_install(m);
 }
 #endif

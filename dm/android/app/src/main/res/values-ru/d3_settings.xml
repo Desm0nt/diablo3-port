@@ -20,6 +20,7 @@
     <string name="d3_aspect_stretch">Растянуть на весь экран</string>
     <string name="d3_aspect_wide">Широкий экран: шире обзор по бокам (со следующего запуска)</string>
     <string name="d3_aspect_wide_note">Широкий экран: игра рендерит в пропорциях экрана (напр. 2000×900 в режиме приставки, 1600×720 в портативном) — по бокам видно больше, HUD у краёв экрана. Нужен перезапуск игры; до него картинка 16:9 с полосами.</string>
+    <string name="d3_stretch_loading">Широкий экран: растягивать экраны загрузки на весь экран</string>
     <string name="d3_sharpen">Резкость (FSR RCAS)</string>
     <string name="d3_off">Выкл</string>
     <string name="d3_low">Слабая</string>

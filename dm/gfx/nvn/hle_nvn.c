@@ -1880,6 +1880,9 @@ static uint64_t present_period(const win_t *o) {
     int itv = g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; double hz = g_hz_auto ? present_auto_hz(mtl_display_refresh()) : g_hz;
     return hz > 0 ? (uint64_t)(itv * 1e9 / hz) : 0;
 }
+// Host registration: may narrow this present's crop (game thread, at the game's present); null = the window's crop as set.
+// [D3] hle_d3.c registers it in widescreen to show only the 16:9 loading-screen art, stretched to the screen (DM_D3_WIDE_STRETCH_LOADING)
+void (*g_nvn_present_crop)(int crop[4]);
 int (*g_nvn_loadscreen_up)(void);   // 宿主登记：读取画面此刻是否开着（diag.c 订阅界面消息时填；图形单测里为空 = 不设闸） | host registration: whether the loading screen is up right now (filled in when diag.c subscribes to UI messages; null in graphics unit tests = no gate)
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
@@ -1896,6 +1899,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     uint64_t t0 = now_ns();
     if (idx >= 0 && idx < o->ntex && idx < 4) {   // 只入队，立即返回；ticket 存翻译队列的任务号 | Enqueue only and return at once; ticket holds the translation queue's job number
         xjob j = {XJ_PRESENT, 0, NULL, snap_tex(o->tex[idx]), present_period(o) / 1e9}; memcpy(j.crop, o->crop, sizeof j.crop);
+        if (g_nvn_present_crop) g_nvn_present_crop(j.crop);
         o->ticket[idx] = x_push(&j); o->done[idx] = x_fence();
 #ifndef __OHOS__
         atomic_store(&g_pf1, atomic_load(&g_pf0)); atomic_store(&g_pf0, o->done[idx]);   // frame-age classes for nvnSyncWait (DM_NVN_SYNC_LAG / GW stats)
