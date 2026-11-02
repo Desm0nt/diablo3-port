@@ -53,6 +53,8 @@ __attribute__((weak)) void nvn_dirty_slot_stats(int *live,int *used_slots,uint64
 __attribute__((weak)) int nvn_texel_sync_on(void);
 __attribute__((weak)) void nvn_texel_lock(void);
 __attribute__((weak)) void nvn_texel_unlock(void);
+// The host pre-write hook (dm/host/crash.c): the page trackers unprotect a range and count it as written (zc remaps guest pages).
+__attribute__((weak)) void dm_guest_write_prepare(void *addr,size_t len);
 #ifdef DM_GAME_ETERNAL
 // [ETERNAL] Virtual (sparse) memory pools (hle_nvn.c, nvnMemoryPoolMapVirtual; design from nxnative, MIT): by host address. Weak like the tracker.
 __attribute__((weak)) int nvn_sparse_at(const void *a);
@@ -990,7 +992,7 @@ void save_pipeline_cache(){
     cache_save_join();cache_save_busy=true;
     cache_saver=std::thread([unsaved]{setpriority(PRIO_PROCESS,0,10);write_pipeline_cache(unsaved);cache_save_busy=false;});
 }
-extern bool tex_dirty;extern uint64_t tex_dirty_tracked,tex_dirty_checks,tex_dirty_changed;extern uint64_t hash_site_bytes[4],hash_site_calls[4];extern std::map<int,uint64_t> pass_end_lines;extern uint64_t read_break_why[8],depth_feedback_reads;namespace zc{extern int enabled;extern uint64_t hits,sticky_misses,align_misses,pending_misses,mapped_bytes;}
+extern bool tex_dirty;extern uint64_t tex_dirty_tracked,tex_dirty_checks,tex_dirty_changed;extern uint64_t hash_site_bytes[4],hash_site_calls[4];extern std::map<int,uint64_t> pass_end_lines;extern uint64_t read_break_why[8],depth_feedback_reads;namespace zc{extern int enabled;extern uint64_t hits,sticky_misses,align_misses,pending_misses,mapped_bytes,retired;extern int live_chunks;}
 extern uint64_t guest_barriers_skipped,storage_chained,storage_merges,barriers_avoided,pro_copies,partial_blocks,partial_bytes,partial_uploads,gpu_indirect_draws,gpu_indirect_fallbacks,gpu_indirect_cpu;   // texture checks through the dirty tracker (get_image)
 // 3D 画面加亮的读数（定义在 dispatch 前的 namespace bright）
 // Readings of the 3D picture brightening (defined in namespace bright before dispatch)
@@ -1027,7 +1029,7 @@ void perf_frame(){
      inpass_reports=lazy_folded=lazy_flushed=lazy_appended=0;}
     xbg_logf("NVN PERF snapfront front_hits=%.1f map_hits=%.1f invalidations=%.1f erased=%.1f",snap_front_hits/f,snap_map_hits/f,snap_invalidations/f,snap_invalidated/f);xbg_logf("NVN PERF textures bc_native=%llu bc_decoded=%llu live_images=%.1fMB bc_images=%.1fMB bc_payload=%.1fMB",(unsigned long long)native_bc_images,(unsigned long long)decoded_bc_images,image_bytes_live/1048576.0,bc_image_bytes_live/1048576.0,bc_data_bytes_live/1048576.0);snap_front_hits=snap_map_hits=snap_invalidations=snap_invalidated=0;
     if(bright::enabled){xbg_logf("NVN PERF bright applied=%.2f k=%.2f",bright::applied/f,bright::last_k);bright::applied=0;}
-    if(tex_dirty){xbg_logf("NVN PERF texdirty tracked=%.1f checks=%.1f changed=%.1f",tex_dirty_tracked/f,tex_dirty_checks/f,tex_dirty_changed/f);tex_dirty_tracked=tex_dirty_checks=tex_dirty_changed=0;}{char buf[512];int at=0;std::vector<std::pair<uint64_t,int>> v;for(auto &e:pass_end_lines)v.push_back({e.second,e.first});std::sort(v.rbegin(),v.rend());for(size_t i=0;i<v.size() && i<8;i++)at+=snprintf(buf+at,sizeof buf-at," L%d=%.1f",v[i].second,v[i].first/f);pass_end_lines.clear();xbg_logf("NVN PERF pass_end_lines%s read_break layout/written/attach=%.1f/%.1f/%.1f/%.1f depth_feedback_reads=%.1f",at?buf:"",read_break_why[1]/f,read_break_why[2]/f,read_break_why[4]/f,(read_break_why[3]+read_break_why[5]+read_break_why[6]+read_break_why[7])/f,depth_feedback_reads/f);memset(read_break_why,0,sizeof read_break_why);depth_feedback_reads=0;}xbg_logf("NVN PERF hash_sites MB/calls other=%.2f/%.0f texcheck=%.2f/%.0f texel=%.2f/%.0f upload=%.2f/%.0f",hash_site_bytes[0]/f/1048576,hash_site_calls[0]/f,hash_site_bytes[1]/f/1048576,hash_site_calls[1]/f,hash_site_bytes[2]/f/1048576,hash_site_calls[2]/f,hash_site_bytes[3]/f/1048576,hash_site_calls[3]/f);memset(hash_site_bytes,0,sizeof hash_site_bytes);memset(hash_site_calls,0,sizeof hash_site_calls);if(zc::enabled>0){xbg_logf("NVN PERF zerocopy hits=%.1f sticky_miss=%.1f align_miss=%.1f pending_miss=%.1f mapped=%.0fMB",zc::hits/f,zc::sticky_misses/f,zc::align_misses/f,zc::pending_misses/f,zc::mapped_bytes/1048576.0);zc::hits=zc::sticky_misses=zc::align_misses=zc::pending_misses=0;}if(storage_chained || guest_barriers_skipped){xbg_logf("NVN PERF storage-chain reused=%.1f gpu_merges=%.1f prologue_copies=%.1f guest_barriers_skipped=%.1f barriers_avoided=%.1f",storage_chained/f,storage_merges/f,pro_copies/f,guest_barriers_skipped/f,barriers_avoided/f);storage_chained=storage_merges=pro_copies=guest_barriers_skipped=barriers_avoided=0;}if(gpu_indirect_draws || gpu_indirect_fallbacks){xbg_logf("NVN PERF gpu-indirect draws=%.1f fallbacks=%.1f cpu=%.1f",gpu_indirect_draws/f,gpu_indirect_fallbacks/f,gpu_indirect_cpu/f);gpu_indirect_draws=gpu_indirect_fallbacks=gpu_indirect_cpu=0;}if(partial_uploads){xbg_logf("NVN PERF partial-tex uploads=%.1f blocks=%.1f KB=%.1f",partial_uploads/f,partial_blocks/f,partial_bytes/f/1024);partial_uploads=partial_blocks=partial_bytes=0;}
+    if(tex_dirty){xbg_logf("NVN PERF texdirty tracked=%.1f checks=%.1f changed=%.1f",tex_dirty_tracked/f,tex_dirty_checks/f,tex_dirty_changed/f);tex_dirty_tracked=tex_dirty_checks=tex_dirty_changed=0;}{char buf[512];int at=0;std::vector<std::pair<uint64_t,int>> v;for(auto &e:pass_end_lines)v.push_back({e.second,e.first});std::sort(v.rbegin(),v.rend());for(size_t i=0;i<v.size() && i<8;i++)at+=snprintf(buf+at,sizeof buf-at," L%d=%.1f",v[i].second,v[i].first/f);pass_end_lines.clear();xbg_logf("NVN PERF pass_end_lines%s read_break layout/written/attach=%.1f/%.1f/%.1f/%.1f depth_feedback_reads=%.1f",at?buf:"",read_break_why[1]/f,read_break_why[2]/f,read_break_why[4]/f,(read_break_why[3]+read_break_why[5]+read_break_why[6]+read_break_why[7])/f,depth_feedback_reads/f);memset(read_break_why,0,sizeof read_break_why);depth_feedback_reads=0;}xbg_logf("NVN PERF hash_sites MB/calls other=%.2f/%.0f texcheck=%.2f/%.0f texel=%.2f/%.0f upload=%.2f/%.0f",hash_site_bytes[0]/f/1048576,hash_site_calls[0]/f,hash_site_bytes[1]/f/1048576,hash_site_calls[1]/f,hash_site_bytes[2]/f/1048576,hash_site_calls[2]/f,hash_site_bytes[3]/f/1048576,hash_site_calls[3]/f);memset(hash_site_bytes,0,sizeof hash_site_bytes);memset(hash_site_calls,0,sizeof hash_site_calls);if(zc::enabled>0){xbg_logf("NVN PERF zerocopy hits=%.1f sticky_miss=%.1f align_miss=%.1f pending_miss=%.1f mapped=%.0fMB chunks=%d retired=%llu",zc::hits/f,zc::sticky_misses/f,zc::align_misses/f,zc::pending_misses/f,zc::mapped_bytes/1048576.0,zc::live_chunks,(unsigned long long)zc::retired);zc::hits=zc::sticky_misses=zc::align_misses=zc::pending_misses=0;}if(storage_chained || guest_barriers_skipped){xbg_logf("NVN PERF storage-chain reused=%.1f gpu_merges=%.1f prologue_copies=%.1f guest_barriers_skipped=%.1f barriers_avoided=%.1f",storage_chained/f,storage_merges/f,pro_copies/f,guest_barriers_skipped/f,barriers_avoided/f);storage_chained=storage_merges=pro_copies=guest_barriers_skipped=barriers_avoided=0;}if(gpu_indirect_draws || gpu_indirect_fallbacks){xbg_logf("NVN PERF gpu-indirect draws=%.1f fallbacks=%.1f cpu=%.1f",gpu_indirect_draws/f,gpu_indirect_fallbacks/f,gpu_indirect_cpu/f);gpu_indirect_draws=gpu_indirect_fallbacks=gpu_indirect_cpu=0;}if(partial_uploads){xbg_logf("NVN PERF partial-tex uploads=%.1f blocks=%.1f KB=%.1f",partial_uploads/f,partial_blocks/f,partial_bytes/f/1024);partial_uploads=partial_blocks=partial_bytes=0;}
     if(vcache::enabled){xbg_logf("NVN PERF vcache hits=%.1f (%.2fMB) fills=%.1f (%.2fMB) refills=%.2f volatile=%llu untracked=%llu flushes=%llu entries=%zu arena=%.1fMB pools=%d",vcache::hits/f,vcache::hit_bytes/1048576.0/f,vcache::fills/f,vcache::fill_bytes/1048576.0/f,vcache::refills/f,(unsigned long long)vcache::volatiles,(unsigned long long)vcache::untracked,(unsigned long long)vcache::flushes,vcache::live(),vcache::arena_bytes()/1048576.0,[]{int live=0,used=0;uint64_t adds=0;if(nvn_dirty_slot_stats)nvn_dirty_slot_stats(&live,&used,&adds);return used;}());vcache::hits=vcache::hit_bytes=vcache::fills=vcache::fill_bytes=vcache::refills=0;}
     {static uint64_t pm=0,pe=0;xbg_logf("NVN PERF pipelines_new=%llu evicted=%llu warm_hits=%llu created=%llu create_ms=%.1f create_max_ms=%.1f warm_built=%llu warm_failed=%llu warm_ms=%.0f async_skips=%llu async_built=%llu",(unsigned long long)(pipeline_counts.misses-pm),(unsigned long long)(pipeline_counts.evictions-pe),(unsigned long long)warm::hits,(unsigned long long)warm::creates,warm::create_ns/1e6,warm::create_max_ns/1e6,(unsigned long long)warm::built.load(),(unsigned long long)warm::failed.load(),warm::build_ns.load()/1e6,(unsigned long long)warm::async_skips.exchange(0),(unsigned long long)warm::async_built.load());warm::hits=warm::creates=warm::create_ns=warm::create_max_ns=0;pm=pipeline_counts.misses;pe=pipeline_counts.evictions;}
     xbg_logf("NVN PERF setcache ab=%d hits=%.1f misses=%.1f template=%.1f plain=%.1f memo_hits=%.1f memo_misses=%.1f memo_front=%.1f why=texel%.1f/simg%.1f/dm%.1f/dynbuf%.1f/store%.1f",int(ab_frame_on),set_cache_hits/f,set_cache_misses/f,template_updates/f,plain_updates/f,desc_memo_hits/f,desc_memo_misses/f,memo_front_hits/f,desc_memo_why[0]/f,desc_memo_why[1]/f,desc_memo_why[2]/f,desc_memo_why[3]/f,desc_memo_why[4]/f);desc_memo_hits=desc_memo_misses=memo_front_hits=0;for(auto &w:desc_memo_why)w=0;xbg_logf("NVN PERF keydiff shader%.0f pool%.0f ubo%.0f uaddr%.0f size%.0f vp%.0f alpha%.0f drv%.0f tex%.0f samp%.0f saddr%.0f same%.0f new%.0f len%.0f",key_diff[0]/tf,key_diff[1]/tf,key_diff[2]/tf,key_diff[3]/tf,key_diff[4]/tf,key_diff[5]/tf,key_diff[6]/tf,key_diff[7]/tf,key_diff[8]/tf,key_diff[9]/tf,key_diff[10]/tf,key_diff[11]/tf,key_diff[12]/tf,key_diff[13]/tf);for(auto &k:key_diff)k=0;   // per timed frame
@@ -1336,10 +1338,16 @@ bool lookup(uint64_t address,size_t bytes,Buffer &out){
 // still read them (UpdateUniformBuffer, CPU buffer copies and clears) become "sticky" and keep the snapshot path.
 // DOOM: on by default, DM_GFX_ZEROCOPY=0 turns it off; it needs dma-buf mappings coherent with the GPU (work/zc_test).
 namespace zc {
-constexpr size_t CHUNK=64u<<20;
-struct Chunk{uintptr_t lo=0;size_t n=0;VkBuffer buffer{};VkDeviceMemory memory{};AHardwareBuffer *ahb=nullptr;std::vector<uint8_t> sticky;};
-Chunk table[512];std::atomic<int> count{0};std::mutex mu;int enabled=-1;
-uint64_t hits=0,sticky_misses=0,align_misses=0,pending_misses=0,mapped_bytes=0;
+constexpr size_t CHUNK=64u<<20;constexpr int MAX_CHUNKS=512;
+// [D3] Chunks are owned by the pool that mapped them (owner = its base) and retired at nvnMemoryPoolFinalize (pool_del ->
+// unmap_pool) or when a new pool overlaps them: before, a finalized pool's chunk stayed in the table for good, a pool re-created
+// at the same guest address appended a second chunk with a new AHB mapped over the range, and find() kept returning the first,
+// stale one, whose AHB was no longer the guest memory (the GPU read old vertex / uniform data: black or wrong picture after a
+// while in gameplay); 512 such chunks were fatal ("chunk table full"). The table is only changed under the engine mutex (all
+// readers run under it), freed slots are reused, find() takes the newest live chunk.
+struct Chunk{uintptr_t lo=0;size_t n=0;uintptr_t owner=0;uint64_t gen=0;bool live=false;VkBuffer buffer{};VkDeviceMemory memory{};AHardwareBuffer *ahb=nullptr;std::vector<uint8_t> sticky;};
+Chunk table[MAX_CHUNKS];std::atomic<int> count{0};std::mutex mu;int enabled=-1;   // count: high-water mark of used slots; mu serializes map_pool
+uint64_t hits=0,sticky_misses=0,align_misses=0,pending_misses=0,mapped_bytes=0,retired=0,retired_bytes=0,alias_pools=0,next_gen=1;int live_chunks=0;
 PFN_vkGetAndroidHardwareBufferPropertiesANDROID get_props=nullptr;
 bool on(){
     if(enabled<0){const char *e=getenv("DM_GFX_ZEROCOPY");
@@ -1361,7 +1369,11 @@ int recv_fd(int sock){char buf[512];char ctrl[CMSG_SPACE(sizeof(int)*8)];iovec i
     if(recvmsg(sock,&m,0)<0)return -1;int fd=-1;
     for(cmsghdr *c=CMSG_FIRSTHDR(&m);c;c=CMSG_NXTHDR(&m,c))if(c->cmsg_level==SOL_SOCKET && c->cmsg_type==SCM_RIGHTS){int n=int((c->cmsg_len-CMSG_LEN(0))/sizeof(int));for(int i=0;i<n;i++){int f;memcpy(&f,CMSG_DATA(c)+i*sizeof(int),sizeof f);if(fd<0)fd=f;else close(f);}}
     return fd;}
-bool map_chunk(uint8_t *lo,size_t n){
+// The page trackers (nvn_dirty.c, wtrack) keep per-page protect state; a mapping replaced under them comes back writable, so
+// first let them unprotect the range and count its pages as written (the host pre-write hook, as before any host write).
+void trackers_release(uintptr_t lo,size_t n){if(dm_guest_write_prepare)dm_guest_write_prepare(reinterpret_cast<void*>(lo),n);}
+// Builds a chunk (AHB + imported VkBuffer) and puts its pages at the guest range; the caller enters it in the table.
+bool map_chunk(uint8_t *lo,size_t n,Chunk &out){
     AHardwareBuffer_Desc d{};d.width=uint32_t(n);d.height=1;d.layers=1;d.format=AHARDWAREBUFFER_FORMAT_BLOB;
     d.usage=AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN|AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN|AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER;
     AHardwareBuffer *ahb=nullptr;if(AHardwareBuffer_allocate(&d,&ahb)){xbg_logf("NVN zero-copy: AHardwareBuffer_allocate(%zu) failed",n);return false;}
@@ -1378,36 +1390,80 @@ bool map_chunk(uint8_t *lo,size_t n){
     while(a.memoryTypeIndex<32 && !(props.memoryTypeBits&(1u<<a.memoryTypeIndex)))++a.memoryTypeIndex;
     VkDeviceMemory memory{};VkResult r=vkAllocateMemory(cfg.device,&a,nullptr,&memory);
     if(r){imp.pNext=nullptr;r=vkAllocateMemory(cfg.device,&a,nullptr,&memory);}
-    if(r || vkBindBufferMemory(cfg.device,buffer,memory,0)){xbg_logf("NVN zero-copy: import failed %d",int(r));vkDestroyBuffer(cfg.device,buffer,nullptr);close(fd);AHardwareBuffer_release(ahb);return false;}
+    if(r || vkBindBufferMemory(cfg.device,buffer,memory,0)){xbg_logf("NVN zero-copy: import failed %d",int(r));vkDestroyBuffer(cfg.device,buffer,nullptr);if(memory)vkFreeMemory(cfg.device,memory,nullptr);close(fd);AHardwareBuffer_release(ahb);return false;}
     // carry the current contents over, then put the shared pages at the guest address
     void *tmp=mmap(nullptr,n,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
     if(tmp==MAP_FAILED){xbg_logf("NVN zero-copy: dma-buf mmap failed errno=%d",errno);close(fd);vkDestroyBuffer(cfg.device,buffer,nullptr);vkFreeMemory(cfg.device,memory,nullptr);AHardwareBuffer_release(ahb);return false;}
-    memcpy(tmp,lo,n);
+    trackers_release(uintptr_t(lo),n);memcpy(tmp,lo,n);
     void *fixed=mmap(lo,n,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,fd,0);munmap(tmp,n);close(fd);
     if(fixed!=lo)xbg_fatalf("NVN zero-copy: MAP_FIXED of guest pool %p+%zu failed errno=%d",(void*)lo,n,errno);   // the range is gone: cannot continue
-    int i=count.load();if(i>=512)xbg_fatalf("NVN zero-copy: chunk table full");
-    Chunk &c=table[i];c.lo=uintptr_t(lo);c.n=n;c.buffer=buffer;c.memory=memory;c.ahb=ahb;c.sticky.assign((n+4095)/4096,0);count.store(i+1,std::memory_order_release);mapped_bytes+=n;
+    out.lo=uintptr_t(lo);out.n=n;out.buffer=buffer;out.memory=memory;out.ahb=ahb;out.sticky.assign((n+4095)/4096,0);
     return true;
 }
-// a whole guest pool, called synchronously from nvnMemoryPoolInitialize (before the game uses it as GPU memory)
+// Gives the guest range plain private anonymous pages again (as the guest memory was before map_chunk), with its current
+// contents: copy into a fresh mapping, then move that over the range in one mremap (the range is never unmapped meanwhile).
+bool restore_anon(uintptr_t lo,size_t n){
+    const int flags=MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE;void *at=reinterpret_cast<void*>(lo);
+    void *tmp=mmap(nullptr,n,PROT_READ|PROT_WRITE,flags,-1,0);if(tmp==MAP_FAILED){xbg_logf("NVN zero-copy: restore of %#lx+%#zx: mmap failed errno=%d, chunk kept",(unsigned long)lo,n,errno);return false;}
+    trackers_release(lo,n);memcpy(tmp,at,n);
+    if(mremap(tmp,n,n,MREMAP_MAYMOVE|MREMAP_FIXED,at)==at)return true;
+    const int e=errno;   // fallback: anonymous pages straight over the range, then the copy back
+    if(mmap(at,n,PROT_READ|PROT_WRITE,flags|MAP_FIXED,-1,0)!=at)xbg_fatalf("NVN zero-copy: restore of guest range %p+%zu failed (mremap errno=%d, mmap errno=%d)",at,n,e,errno);
+    memcpy(at,tmp,n);munmap(tmp,n);return true;
+}
+// Takes chunk i out of the table: the guest range gets anonymous pages back now; the VkBuffer / VkDeviceMemory / AHB die when
+// the recording slot retires (submissions recorded so far may still read them), like the other per-slot resources.
+// Engine mutex held.
+bool retire(int i,const char *why){Chunk &c=table[i];if(!c.live)return true;
+    if(!restore_anon(c.lo,c.n))return false;
+    VkBuffer b=c.buffer;VkDeviceMemory m=c.memory;AHardwareBuffer *a=c.ahb;
+    auto destroy=[b,m,a]{vkDestroyBuffer(cfg.device,b,nullptr);vkFreeMemory(cfg.device,m,nullptr);AHardwareBuffer_release(a);};
+    if(initialized)retire_handle(destroy);else destroy();
+    c.live=false;mapped_bytes-=c.n;--live_chunks;++retired;retired_bytes+=c.n;++memo_epoch;   // descriptor memos must not outlive the buffer handle
+    if(retired<=16 || retired%64==0)xbg_logf("NVN zero-copy: chunk %#lx+%#zx of pool %#lx retired (%s): retired %llu (%.1f MB) so far, live %d chunks %.1f MB",(unsigned long)c.lo,c.n,(unsigned long)c.owner,why,(unsigned long long)retired,retired_bytes/1048576.0,live_chunks,mapped_bytes/1048576.0);
+    c.buffer={};c.memory={};c.ahb=nullptr;c.owner=0;std::vector<uint8_t>().swap(c.sticky);
+    return true;
+}
+// [lo,hi) lies entirely in live chunks
+bool covered(uintptr_t lo,uintptr_t hi){const int n=count.load(std::memory_order_acquire);
+    for(uintptr_t a=lo;a<hi;){uintptr_t next=a;for(int i=0;i<n;i++){const Chunk &c=table[i];if(c.live && a>=c.lo && a-c.lo<c.n){next=c.lo+c.n;break;}}if(next==a)return false;a=next;}
+    return true;}
+// a whole guest pool, called synchronously from nvnMemoryPoolInitialize (before the game uses it as GPU memory); no engine
+// mutex held by the caller (lock order: mu, then the engine mutex)
 void map_pool(void *p,size_t n){
     if(!on() || !p || (uintptr_t(p)&4095) || n<(1u<<20) || (n&4095))return;
-    std::lock_guard<std::mutex> l(mu);
-    for(size_t at=0;at<n;at+=CHUNK)if(!map_chunk(static_cast<uint8_t*>(p)+at,std::min(CHUNK,n-at)))break;
-    static unsigned told=0;if(told++<16)xbg_logf("NVN zero-copy pool %p+%#zx mapped (total %.1f MB in %d chunks)",p,n,mapped_bytes/1048576.0,count.load());
+    std::lock_guard<std::mutex> serial(mu);
+    const uintptr_t lo=uintptr_t(p),hi=lo+n;const int need=int((n+CHUNK-1)/CHUNK);
+    {std::lock_guard<std::recursive_mutex> l(mutex);const int k=count.load();
+        // a pool inside memory that is already mapped (an alias of a live pool) keeps that mapping: a second AHB over it would
+        // leave the live chunk's buffer reading pages that are no longer the guest memory
+        if(covered(lo,hi)){if(alias_pools++<16)xbg_logf("NVN zero-copy pool %p+%#zx lies in mapped chunks, kept (aliases %llu)",p,n,(unsigned long long)alias_pools);return;}
+        for(int i=0;i<k;i++){const Chunk &c=table[i];if(c.live && c.lo<hi && lo<c.lo+c.n && !retire(i,"overlapped by a new pool")){xbg_logf("NVN zero-copy pool %p+%#zx not mapped: an overlapping chunk could not be retired",p,n);return;}}
+        int free=MAX_CHUNKS-k;for(int i=0;i<k;i++)if(!table[i].live)++free;
+        if(free<need){static unsigned full=0;if(full++<8)xbg_logf("NVN zero-copy pool %p+%#zx not mapped: chunk table full (%d live)",p,n,live_chunks);return;}}
+    std::vector<Chunk> made;   // the slow part (AHB, import, 64 MB copies) without the engine mutex: translation may run meanwhile
+    for(size_t at=0;at<n;at+=CHUNK){Chunk c;if(!map_chunk(static_cast<uint8_t*>(p)+at,std::min(CHUNK,n-at),c))break;made.push_back(std::move(c));}
+    std::lock_guard<std::recursive_mutex> l(mutex);   // only map_pool takes slots and it holds mu: the free slots counted above are still free
+    for(auto &c:made){int k=count.load(),i=0;while(i<k && table[i].live)++i;
+        Chunk &t=table[i];t=std::move(c);t.owner=lo;t.gen=next_gen++;t.live=true;mapped_bytes+=t.n;++live_chunks;if(i==k)count.store(k+1,std::memory_order_release);}
+    static unsigned told=0;++told;if(told<=16 || told%64==0)xbg_logf("NVN zero-copy pool %p+%#zx mapped (#%u; live %.1f MB in %d chunks, retired %llu)",p,n,told,mapped_bytes/1048576.0,live_chunks,(unsigned long long)retired);
 }
-Chunk *find(uint64_t address,uint64_t bytes){
-    int n=count.load(std::memory_order_acquire);
-    for(int i=0;i<n;i++){Chunk &c=table[i];if(address>=c.lo && address-c.lo<c.n){return address+bytes<=c.lo+c.n?&c:nullptr;}}
-    return nullptr;
+// nvnMemoryPoolFinalize (pool_del): the pool's chunks go; the memory stays the game's, with its contents (as on the Switch)
+void unmap_pool(uintptr_t base){if(enabled<=0)return;const int k=count.load();for(int i=0;i<k;i++)if(table[i].live && table[i].owner==base)retire(i,"pool finalized");}
+// the newest live chunk holding address (there is at most one; newest in case)
+Chunk *holder(uint64_t address){
+    int n=count.load(std::memory_order_acquire);Chunk *best=nullptr;
+    for(int i=0;i<n;i++){Chunk &c=table[i];if(c.live && address>=c.lo && address-c.lo<c.n && (!best || c.gen>best->gen))best=&c;}
+    return best;
 }
+Chunk *find(uint64_t address,uint64_t bytes){Chunk *c=holder(address);return c && address+bytes<=c->lo+c->n?c:nullptr;}
 // replay-time CPU writes: never bind these pages directly again
 void mark(uint64_t address,uint64_t bytes){
     if(enabled<=0 || !bytes)return;
     int n=count.load(std::memory_order_acquire);
-    for(int i=0;i<n;i++){Chunk &c=table[i];if(address+bytes>c.lo && address<c.lo+c.n){uint64_t a=std::max<uint64_t>(address,c.lo)-c.lo,b=std::min<uint64_t>(address+bytes,c.lo+c.n)-c.lo;for(uint64_t pg=a>>12;pg<=(b-1)>>12;pg++)c.sticky[pg]=1;}}
+    for(int i=0;i<n;i++){Chunk &c=table[i];if(c.live && address+bytes>c.lo && address<c.lo+c.n){uint64_t a=std::max<uint64_t>(address,c.lo)-c.lo,b=std::min<uint64_t>(address+bytes,c.lo+c.n)-c.lo;for(uint64_t pg=a>>12;pg<=(b-1)>>12;pg++)c.sticky[pg]=1;}}
 }
-uint64_t tail(uint64_t address){int n=count.load(std::memory_order_acquire);for(int i=0;i<n;i++){Chunk &c=table[i];if(address>=c.lo && address-c.lo<c.n)return c.lo+c.n-address;}return 0;}   // bytes to the end of the chunk holding address
+uint64_t tail(uint64_t address){if(enabled<=0)return 0;Chunk *c=holder(address);return c?c->lo+c->n-address:0;}   // bytes to the end of the chunk holding address
 bool view(uint64_t address,uint64_t bytes,VkDeviceSize align,Buffer &out){
     if(enabled<=0 || !bytes)return false;
     Chunk *c=find(address,bytes);if(!c)return false;
@@ -6051,7 +6107,7 @@ extern "C" void xbg_game_frame_counters(xbg_frame_counters *out){if(out)*out={hu
 extern "C" void xbg_game_set_frame(uint64_t frame){hud::frame.store(frame,std::memory_order_relaxed);}
 extern "C" double xbg_game_gpu_ms(uint64_t frame){const hud::Gpu &g=hud::gpu[frame%64];if(g.frame.load(std::memory_order_acquire)!=frame)return -1;return double(g.ns.load(std::memory_order_acquire))/1e6;}
 static void xbg_legacy_pool_add_now(void *p,size_t n){std::lock_guard<std::recursive_mutex> lock(mutex);need(p&&n,"Invalid NVN pool");pools[uintptr_t(p)]=n;cmd_range_lo=0;cmd_range_bytes=0;auto epoch=provenance.pool(uint64_t(p),true);provenance_log("POOL_ADD mem=%p bytes=%zu epoch=%llu",p,n,epoch);}
-static void xbg_legacy_pool_del_now(void *p){std::lock_guard<std::recursive_mutex> lock(mutex);provenance_log("POOL_DEL mem=%p epoch=%llu",p,provenance.epoch(uint64_t(p)));provenance.pool(uint64_t(p),false);{auto pit=pools.find(uintptr_t(p));if(pit!=pools.end())vcache::drop_pool(uintptr_t(p),pit->second);}pools.erase(uintptr_t(p));cmd_range_lo=0;cmd_range_bytes=0;}
+static void xbg_legacy_pool_del_now(void *p){std::lock_guard<std::recursive_mutex> lock(mutex);provenance_log("POOL_DEL mem=%p epoch=%llu",p,provenance.epoch(uint64_t(p)));provenance.pool(uint64_t(p),false);{auto pit=pools.find(uintptr_t(p));if(pit!=pools.end())vcache::drop_pool(uintptr_t(p),pit->second);}zc::unmap_pool(uintptr_t(p));pools.erase(uintptr_t(p));cmd_range_lo=0;cmd_range_bytes=0;}
 static void xbg_register_texture_now(const dpool_t *p,int id,const tex_t *t,const view_t *v){std::lock_guard<std::recursive_mutex> lock(mutex);need(p&&id>=0&&id<p->n&&t,"Invalid texture registration");auto &slot=textures[pool_key(p)][id];if(register_texture_record(slot,*t,v)){++memo_bump[0];note_reg(id);}}
 static void xbg_register_sampler_now(const dpool_t *p,int id,const samp_par *s){std::lock_guard<std::recursive_mutex> lock(mutex);need(p&&id>=0&&id<p->n&&s,"Invalid sampler registration");auto &slot=samplers[pool_key(p)][id];if(memcmp(&slot,s,sizeof(*s))){++memo_epoch;++memo_bump[1];}slot=*s;}
 static void xbg_legacy_tex_release_now(tex_t *t){std::lock_guard<std::recursive_mutex> lock(mutex);if(t){
@@ -6189,7 +6245,7 @@ extern "C" void xbg_legacy_read_texels(const tex_t *t,unsigned level,unsigned la
     else{p_copy_b2t p{};p.src=uint64_t(dst);p.tex=t;p.has_view=1;p.view.set_levels=p.view.set_layers=1;p.view.base_level=level;p.view.nlevels=1;p.view.min_layer=layer;p.view.nlayers=1;p.r=*r;int64_t old=state.copy_stride,old_image=state.copy_image_stride;state.copy_stride=row;state.copy_image_stride=image;copy_texture_buffer(p,true);state.copy_stride=old;state.copy_image_stride=old_image;}}
 
 // ---- public entry points (queued in order on the graphics thread) ----
-extern "C" void xbg_zc_pool_map(void *p,size_t n){if(initialized)zc::map_pool(p,n);else{static int told=0;if(!told++)xbg_logf("NVN zero-copy: pool %p+%#zx before the engine is initialized, not mapped",p,n);}}
+extern "C" void xbg_zc_pool_map(void *p,size_t n){gfx_drain();if(initialized)zc::map_pool(p,n);else{static int told=0;if(!told++)xbg_logf("NVN zero-copy: pool %p+%#zx before the engine is initialized, not mapped",p,n);}}
 extern "C" void xbg_legacy_pool_add(void *p,size_t n){gfx_enqueue([p,n]{xbg_legacy_pool_add_now(p,n);});}
 extern "C" void xbg_legacy_pool_del(void *p){gfx_enqueue([p]{xbg_legacy_pool_del_now(p);});}
 extern "C" void xbg_register_texture(const dpool_t *p,int id,const tex_t *t,const view_t *v){
