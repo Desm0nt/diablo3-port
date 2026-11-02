@@ -34,6 +34,7 @@ extern "C" int xbg_completion_wait_selftest(char *report,size_t bytes);
 #include "xbg_spirv_gscull.h"
 #include "xbg_spirv_warp.h"
 #include "xbg_spirv_ldc.h"
+#include "xbg_spirv_peep.h"     // [d3-perf] DOOM round-3 peepholes (f2i, texcoord guard)
 #include "xbg_spirv_temps.h"
 #include "xbg_spirv_raster.h"
 #include "xbg_spirv_gspass.h"
@@ -709,6 +710,9 @@ bool slot_pools_enabled=true,readback_cached=false;
 // samples_report_seen: the game has recorded a samples-passed report (D2R never does: its ~8 pending reports a frame are
 // all timestamps).
 bool heavy_timestamps=false;extern uint64_t pass_fast_hits;   // gfx-heavy-timestamps = '1': timestamp reports end the pass with full barriers, as before
+// [d3-perf] DM_GFX_REPORT_INPASS / DM_GFX_LAZY_CLEAR (OP_REPORT_COUNTER, lazy_clear_*) and the shader switches of tidy_rewrite.
+bool report_inpass=false,lazy_clear_on=false,lazy_pending=false;uint64_t inpass_reports=0,lazy_folded=0,lazy_flushed=0,lazy_appended=0;void lazy_clear_flush();
+extern bool nan_sat,ldc_canon,f2i_notrunc,texcoord_unguard;extern std::atomic<uint64_t> nan_sat_kept,canon_shifts,canon_merges,f2i_rewrites,texcoord_unguarded;
 bool no_occlusion_queries=false,samples_report_seen=false;uint64_t samples_reports=0,samples_reported=0,counter_ops[3]={};extern uint64_t pipeline_fast_hits;extern bool pipe_memo;extern uint64_t pipe_memo_hits,pipe_memo_misses;extern uint64_t snap_front_hits,snap_map_hits,snap_invalidations,snap_invalidated;extern std::atomic<uint64_t> quad_rewrites,warp_rewrites,ldc_folds,temps_forwarded,nan_minmax_swaps;namespace vcache{extern bool enabled;extern uint64_t hits,hit_bytes,fills,fill_bytes,refills,volatiles,untracked,flushes;size_t live();VkDeviceSize arena_bytes();}   // counter_ops: resets, timestamp reports, samples reports recorded
 // Resident uniform texel copies (texel_acquire, before descriptors()).
 struct TexelKey{uint64_t base,bytes;uint32_t format;bool operator==(const TexelKey &o)const{return base==o.base&&bytes==o.bytes&&format==o.format;}};
@@ -754,7 +758,7 @@ void begin_occlusion_query(VkCommandBuffer cmd,VkQueryPool pool,uint32_t index){
     need(!open_occlusion.cmd,"Nested occlusion query");
     vkCmdBeginQuery(cmd,pool,index,VK_QUERY_CONTROL_PRECISE_BIT);open_occlusion={cmd,pool,index};++occlusion_queries_started;
 }
-void end_open_pass(int line){if(open_pass.cmd){++pass_end_lines[line];end_occlusion_query();vkCmdEndRenderPass(open_pass.cmd);if(open_pass.depth_attached && !open_pass.depth_used){++depth_idle_passes;pass_prof_depth_idle(open_pass.cmd);}pass_prof_end(open_pass.cmd);open_pass=OpenPass{};++pass_end_by[cur_op<64?cur_op:63];}}
+void end_open_pass(int line){if(open_pass.cmd){if(lazy_pending)lazy_clear_flush();++pass_end_lines[line];end_occlusion_query();vkCmdEndRenderPass(open_pass.cmd);if(open_pass.depth_attached && !open_pass.depth_used){++depth_idle_passes;pass_prof_depth_idle(open_pass.cmd);}pass_prof_end(open_pass.cmd);open_pass=OpenPass{};++pass_end_by[cur_op<64?cur_op:63];}}
 void full_barrier(VkCommandBuffer cmd){storage_unbarriered=false;storage_dirty.clear();VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};b.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;b.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&b,0,nullptr,0,nullptr);barrier_seq=write_seq;++barrier_by[cur_op<64?cur_op:63];}
 struct PerfCounts{size_t pipelines,layouts,samplers,passes,images,host_segments,host_bytes;};
 PerfCounts perf_counts();
@@ -1017,6 +1021,10 @@ void perf_frame(){
     xbg_logf("NVN PERF wtrack copied_kb_per_frame=%.1f dirty_pages_per_frame=%.1f mismatches=%llu fallbacks=%llu",wtrack::copied_bytes/1024.0/f,wtrack::dirty_pages/f,(unsigned long long)wtrack::mismatches,(unsigned long long)wtrack::fallbacks);wtrack::copied_bytes=wtrack::dirty_pages=0;
     xbg_logf("NVN PERF uniform_trimmed_bindings=%llu snap_mb_per_frame other=%.2f vertex=%.2f index=%.2f storage=%.2f texel=%.2f uniform=%.2f requested vertex=%.2f index=%.2f storage=%.2f",(unsigned long long)uniform_trimmed,snap_site_bytes[0]/1048576.0/f,snap_site_bytes[1]/1048576.0/f,snap_site_bytes[2]/1048576.0/f,snap_site_bytes[3]/1048576.0/f,snap_site_bytes[4]/1048576.0/f,snap_site_bytes[5]/1048576.0/f,snap_site_req[1]/1048576.0/f,snap_site_req[2]/1048576.0/f,snap_site_req[3]/1048576.0/f);for(auto &b:snap_site_bytes)b=0;for(auto &b:snap_site_req)b=0;
     xbg_logf("NVN PERF quad_rewrites=%llu warp_rewrites=%llu ldc_folds=%llu temps_forwarded=%llu nan_minmax=%llu",(unsigned long long)quad_rewrites.load(std::memory_order_relaxed),(unsigned long long)warp_rewrites.load(std::memory_order_relaxed),(unsigned long long)ldc_folds.load(std::memory_order_relaxed),(unsigned long long)temps_forwarded.load(std::memory_order_relaxed),(unsigned long long)nan_minmax_swaps.load(std::memory_order_relaxed));
+    {   // [d3-perf]
+     if(nan_sat || ldc_canon || f2i_notrunc || texcoord_unguard || report_inpass || lazy_clear_on){xbg_logf("NVN PERF d3perf nan_sat_kept=%llu ldc_canon=%llu canon_merges=%llu f2i_notrunc=%llu texcoord_unguarded=%llu inpass_reports=%.2f lazy_clear folded=%.2f flushed=%.2f appended=%.2f",
+        (unsigned long long)nan_sat_kept.load(),(unsigned long long)canon_shifts.load(),(unsigned long long)canon_merges.load(),(unsigned long long)f2i_rewrites.load(),(unsigned long long)texcoord_unguarded.load(),inpass_reports/f,lazy_folded/f,lazy_flushed/f,lazy_appended/f);}
+     inpass_reports=lazy_folded=lazy_flushed=lazy_appended=0;}
     xbg_logf("NVN PERF snapfront front_hits=%.1f map_hits=%.1f invalidations=%.1f erased=%.1f",snap_front_hits/f,snap_map_hits/f,snap_invalidations/f,snap_invalidated/f);xbg_logf("NVN PERF textures bc_native=%llu bc_decoded=%llu live_images=%.1fMB bc_images=%.1fMB bc_payload=%.1fMB",(unsigned long long)native_bc_images,(unsigned long long)decoded_bc_images,image_bytes_live/1048576.0,bc_image_bytes_live/1048576.0,bc_data_bytes_live/1048576.0);snap_front_hits=snap_map_hits=snap_invalidations=snap_invalidated=0;
     if(bright::enabled){xbg_logf("NVN PERF bright applied=%.2f k=%.2f",bright::applied/f,bright::last_k);bright::applied=0;}
     if(tex_dirty){xbg_logf("NVN PERF texdirty tracked=%.1f checks=%.1f changed=%.1f",tex_dirty_tracked/f,tex_dirty_checks/f,tex_dirty_changed/f);tex_dirty_tracked=tex_dirty_checks=tex_dirty_changed=0;}{char buf[512];int at=0;std::vector<std::pair<uint64_t,int>> v;for(auto &e:pass_end_lines)v.push_back({e.second,e.first});std::sort(v.rbegin(),v.rend());for(size_t i=0;i<v.size() && i<8;i++)at+=snprintf(buf+at,sizeof buf-at," L%d=%.1f",v[i].second,v[i].first/f);pass_end_lines.clear();xbg_logf("NVN PERF pass_end_lines%s read_break layout/written/attach=%.1f/%.1f/%.1f/%.1f depth_feedback_reads=%.1f",at?buf:"",read_break_why[1]/f,read_break_why[2]/f,read_break_why[4]/f,(read_break_why[3]+read_break_why[5]+read_break_why[6]+read_break_why[7])/f,depth_feedback_reads/f);memset(read_break_why,0,sizeof read_break_why);depth_feedback_reads=0;}xbg_logf("NVN PERF hash_sites MB/calls other=%.2f/%.0f texcheck=%.2f/%.0f texel=%.2f/%.0f upload=%.2f/%.0f",hash_site_bytes[0]/f/1048576,hash_site_calls[0]/f,hash_site_bytes[1]/f/1048576,hash_site_calls[1]/f,hash_site_bytes[2]/f/1048576,hash_site_calls[2]/f,hash_site_bytes[3]/f/1048576,hash_site_calls[3]/f);memset(hash_site_bytes,0,sizeof hash_site_bytes);memset(hash_site_calls,0,sizeof hash_site_calls);if(zc::enabled>0){xbg_logf("NVN PERF zerocopy hits=%.1f sticky_miss=%.1f align_miss=%.1f pending_miss=%.1f mapped=%.0fMB",zc::hits/f,zc::sticky_misses/f,zc::align_misses/f,zc::pending_misses/f,zc::mapped_bytes/1048576.0);zc::hits=zc::sticky_misses=zc::align_misses=zc::pending_misses=0;}if(storage_chained || guest_barriers_skipped){xbg_logf("NVN PERF storage-chain reused=%.1f gpu_merges=%.1f prologue_copies=%.1f guest_barriers_skipped=%.1f barriers_avoided=%.1f",storage_chained/f,storage_merges/f,pro_copies/f,guest_barriers_skipped/f,barriers_avoided/f);storage_chained=storage_merges=pro_copies=guest_barriers_skipped=barriers_avoided=0;}if(gpu_indirect_draws || gpu_indirect_fallbacks){xbg_logf("NVN PERF gpu-indirect draws=%.1f fallbacks=%.1f cpu=%.1f",gpu_indirect_draws/f,gpu_indirect_fallbacks/f,gpu_indirect_cpu/f);gpu_indirect_draws=gpu_indirect_fallbacks=gpu_indirect_cpu=0;}if(partial_uploads){xbg_logf("NVN PERF partial-tex uploads=%.1f blocks=%.1f KB=%.1f",partial_uploads/f,partial_blocks/f,partial_bytes/f/1024);partial_uploads=partial_blocks=partial_bytes=0;}
@@ -2600,14 +2608,29 @@ bool ldc_fold=false,forward_temps=false;std::atomic<uint64_t> ldc_folds{0},temps
 // pass the NaN on, and written to a UNORM target it comes out black. DM_GFX_NAN_MINMAX (marker gfx-nan-minmax) swaps them in
 // place for NMin / NMax / NClamp: the same operands, the same result for values that are not NaN, and Maxwell's result for NaN.
 bool nan_minmax=false;std::atomic<uint64_t> nan_minmax_swaps{0};
+// [d3-perf] Shader switches ported from the DOOM branch (docs/D3_PERF_CANDIDATES.md), all off unless set in dm/env:
+// - DM_GFX_NAN_SAT=1 (DOOM perf6, 30.10): with DM_GFX_NAN_MINMAX keep FClamp(x, 0.0, 1.0) (Maxwell .SAT) instead of NClamp.
+//   NIR makes it fsat (NaN -> 0 like .SAT; a free (sat) modifier on ir3); NClamp expands to NaN checks + max + min. Exact.
+//   D3 offline: all 6,690 FClamp of the 1,323 bundles are saturates (1,113 modules; 3,149 in pixel shaders).
+// - DM_GFX_LDC_CANON=1 (DOOM round 3a, xbg_spirv_ldc_canon): canonical vec4 index of word-addressed UBO reads, so the LDCs of one
+//   bone-matrix row read one value. Exact. D3 offline: 7,132 shifts in 203 modules (vertex skinning), 3,564 merges.
+// - DM_GFX_F2I_NOTRUNC=1 (round 3e): Trunc dropped before ConvertFToU/S. Exact. D3 offline: 6 sites in 4 modules.
+// - DM_GFX_TEXCOORD_NAN=0 (round 3f): the Select(IsNan(c), 0, c) guard on sample coordinates goes. NOT exact (only NaN coordinates
+//   change). D3 offline: 2,601 guarded coordinates in 766 modules. DOOM measured no gain.
+bool nan_sat=false,ldc_canon=false,f2i_notrunc=false,texcoord_unguard=false;
+std::atomic<uint64_t> nan_sat_kept{0},canon_shifts{0},canon_merges{0},f2i_rewrites{0},texcoord_unguarded{0};
 size_t nan_minmax_swap(std::vector<uint32_t> &w){
-    uint32_t glsl=0;size_t k=0;
+    uint32_t glsl=0;size_t k=0,kept=0;std::unordered_map<uint32_t,uint32_t> fconst;   // OpConstant id -> bits (32-bit), for DM_GFX_NAN_SAT
     for(size_t i=5;i<w.size();){
         uint32_t op=w[i]&0xFFFFu,n=w[i]>>16;if(!n || i+n>w.size())break;
+        if(nan_sat && op==43 && n==4)fconst[w[i+2]]=w[i+3];
         if(op==11 && n>=5 && !memcmp(&w[i+2],"GLSL.std.450",13))glsl=w[i+1];
-        else if(op==12 && n>=5 && glsl && w[i+3]==glsl){uint32_t &e=w[i+4];if(e==37){e=79;++k;}else if(e==40){e=80;++k;}else if(e==43){e=81;++k;}}
+        else if(op==12 && n>=5 && glsl && w[i+3]==glsl){uint32_t &e=w[i+4];
+            if(e==43 && nan_sat && n>=8){auto lo=fconst.find(w[i+6]),hi=fconst.find(w[i+7]);if(lo!=fconst.end() && hi!=fconst.end() && lo->second==0u && hi->second==0x3f800000u){++kept;i+=n;continue;}}
+            if(e==37){e=79;++k;}else if(e==40){e=80;++k;}else if(e==43){e=81;++k;}}
         i+=n;
     }
+    if(kept)nan_sat_kept.fetch_add(kept,std::memory_order_relaxed);
     return k;
 }
 void tidy_rewrite(std::vector<uint32_t> &words){
@@ -2615,6 +2638,10 @@ void tidy_rewrite(std::vector<uint32_t> &words){
     if(nan_minmax){size_t k=nan_minmax_swap(words);if(k)nan_minmax_swaps.fetch_add(k,std::memory_order_relaxed);}
     if(ldc_fold){size_t k=xbg_spirv_ldc_fold(words.data(),words.size(),out);if(k){words.swap(out);ldc_folds.fetch_add(k,std::memory_order_relaxed);}}
     if(forward_temps){size_t k=xbg_spirv_forward_temps(words.data(),words.size(),out);if(k){words.swap(out);temps_forwarded.fetch_add(k,std::memory_order_relaxed);}}
+    // [d3-perf] after the forwarding, which leaves the translator's chains as SSA values (as in the DOOM branch)
+    if(ldc_canon){size_t m=0,k=xbg_spirv_ldc_canon(words.data(),words.size(),out,&m);if(k){words.swap(out);canon_shifts.fetch_add(k,std::memory_order_relaxed);canon_merges.fetch_add(m,std::memory_order_relaxed);}}
+    if(f2i_notrunc){size_t k=xbg_spirv_f2i_notrunc(words.data(),words.size(),out);if(k){words.swap(out);f2i_rewrites.fetch_add(k,std::memory_order_relaxed);}}
+    if(texcoord_unguard){size_t k=xbg_spirv_texcoord_unguard(words.data(),words.size(),out);if(k){words.swap(out);texcoord_unguarded.fetch_add(k,std::memory_order_relaxed);}}
 }
 // Diagnostic (files/dm/spv-override/<key>.spv): this SPIR-V replaces the bundle's, for offline-optimized test modules.
 bool spv_override(const std::string &key,std::vector<uint32_t> &words){
@@ -4334,7 +4361,12 @@ uint64_t noload_passes=0;bool noload_enabled=false;
 // compatible with pass and its pipelines and framebuffers.
 struct RenderPassEntry {VkRenderPass pass{},noload{};PipelineDefinition definition;};
 std::map<std::vector<uint32_t>,RenderPassEntry> render_pass_cache;
-void clear_render_pass_cache(){for(auto &r:render_pass_cache){vkDestroyRenderPass(cfg.device,r.second.pass,nullptr);if(r.second.noload)vkDestroyRenderPass(cfg.device,r.second.noload,nullptr);}render_pass_cache.clear();pipeline_fast.clear();pipe_memo_valid=false;}
+// [d3-perf] DM_GFX_LAZY_CLEAR state (DOOM round 3c; functions after begin_pass): the pending pass, its clears, the attachment index of
+// each color slot; create info of cached render passes and their load-op twins.
+struct LazyClear{Pass pass;std::vector<VkClearAttachment> clears;uint8_t slot_att[8]{};uint32_t colors=0;bool depth=false;} lazy;
+struct LazyInfo{std::vector<VkAttachmentDescription> desc;std::vector<VkAttachmentReference> colors;VkAttachmentReference depth{VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_GENERAL};VkSubpassDependency dep[2]{};};
+std::unordered_map<VkRenderPass,LazyInfo> lazy_info;std::map<std::pair<VkRenderPass,uint32_t>,VkRenderPass> lazy_twins;
+void clear_render_pass_cache(){for(auto &t:lazy_twins)if(t.second)vkDestroyRenderPass(cfg.device,t.second,nullptr);lazy_twins.clear();lazy_info.clear();lazy_pending=false;for(auto &r:render_pass_cache){vkDestroyRenderPass(cfg.device,r.second.pass,nullptr);if(r.second.noload)vkDestroyRenderPass(cfg.device,r.second.noload,nullptr);}render_pass_cache.clear();pipeline_fast.clear();pipe_memo_valid=false;}
 bool create_pass(Pass &p,Commands &c,int clear_color=-1,bool clear_depth=false,bool soft=false){CPU_SCOPE(Pass);
     const bool plain_draw=c.draw && clear_color<0 && !clear_depth && !soft && !provenance_file && !capture.active && !ab_off("passfast");
     if(plain_draw && last_pass.valid && open_pass.cmd==c.command && open_pass.pass==last_pass.pass.pass && open_pass.framebuffer==last_pass.pass.framebuffer && !memcmp(&state.rt,&last_pass.rt,sizeof state.rt)){
@@ -4384,6 +4416,7 @@ bool create_pass(Pass &p,Commands &c,int clear_color=-1,bool clear_depth=false,b
     {XbgPipelineKey key;bool valid=xbg_renderpass_key(key,rp);
         if(valid && key.valid){static std::vector<uint32_t> words;words.assign(key.words,key.words+key.count);auto it=render_pass_cache.find(words);
             if(it==render_pass_cache.end()){RenderPassEntry e;VK(vkCreateRenderPass(cfg.device,&rp,nullptr,&e.pass));e.definition.assign(key,true);
+                if(lazy_clear_on){LazyInfo &li=lazy_info[e.pass];li.desc.assign(descriptions.begin(),descriptions.end());li.colors.assign(colors.begin(),colors.end());li.depth=depth;li.dep[0]=dep[0];li.dep[1]=dep[1];}   // [d3-perf] lazy_twin
                 if(noload_enabled && p.samples==VK_SAMPLE_COUNT_1_BIT){std::vector<VkAttachmentDescription> nl(descriptions.begin(),descriptions.end());bool any=false;
                     for(size_t k=0;k<nl.size() && k<p.images.size();k++)if(p.images[k]->aspects==VK_IMAGE_ASPECT_COLOR_BIT){nl[k].loadOp=VK_ATTACHMENT_LOAD_OP_DONT_CARE;any=true;}
                     if(any){VkRenderPassCreateInfo r2=rp;r2.pAttachments=nl.data();VK(vkCreateRenderPass(cfg.device,&r2,nullptr,&e.noload));}}
@@ -4446,6 +4479,50 @@ void lrz_touch_before(const Pass &p,VkCommandBuffer cmd){
     lrz_prev_serial=dim->source.serial;
 }
 void begin_pass(Pass &p,Commands &c){lrz_touch_before(p,c.command);pass_prof_begin(p,c.command);VkRenderPassBeginInfo b{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};b.renderPass=p.pass;b.framebuffer=p.framebuffer;b.renderArea.extent={p.width,p.height};vkCmdBeginRenderPass(c.command,&b,VK_SUBPASS_CONTENTS_INLINE);}
+// [d3-perf] DM_GFX_LAZY_CLEAR (DOOM round 3c, pipeline_audit.md 3.12). lazy_clear_open records the pass instead of beginning it; the
+// clears of the whole framebuffer that follow collect in lazy (later ones of the same aspect replace earlier ones). The next draw
+// in that pass (draw() matched open_pass, so nothing read or wrote the attachments in between: every other use ends the open pass)
+// begins it through a twin render pass with loadOp / stencilLoadOp CLEAR on exactly those aspects and the same clear values; the
+// twin differs only in load ops, so it is compatible with the framebuffer and the pipelines. Turnip then keeps LRZ valid
+// (vkCmdClearAttachments at draw 0 disables it for the pass) and clears through the load op. Anything that ends the open pass
+// first gets lazy_clear_flush: begin + vkCmdClearAttachments, exactly the former recording. D3: 10 clear-opened passes a frame.
+bool lazy_clear_known(const Pass &p){return p.definition && p.definition->valid && lazy_info.count(p.pass) && p.images.size()<=9;}
+void lazy_clear_open(const Pass &p){lazy.pass=p;lazy.clears.clear();lazy.colors=0;for(int i=0;i<8;i++)lazy.slot_att[i]=255;for(int i=0;i<state.rt.n && i<8;i++)if(state.rt.color[i])lazy.slot_att[i]=uint8_t(lazy.colors++);lazy.depth=state.rt.depth!=nullptr;lazy_pending=true;}
+void lazy_clear_add(const VkClearAttachment &a){
+    for(auto &x:lazy.clears){const bool same=(x.aspectMask&VK_IMAGE_ASPECT_COLOR_BIT)?(a.aspectMask&VK_IMAGE_ASPECT_COLOR_BIT) && x.colorAttachment==a.colorAttachment:!(a.aspectMask&VK_IMAGE_ASPECT_COLOR_BIT);
+        if(!same)continue;
+        if(a.aspectMask&VK_IMAGE_ASPECT_COLOR_BIT){x.clearValue=a.clearValue;++lazy_appended;return;}
+        if(a.aspectMask&VK_IMAGE_ASPECT_DEPTH_BIT)x.clearValue.depthStencil.depth=a.clearValue.depthStencil.depth;
+        if(a.aspectMask&VK_IMAGE_ASPECT_STENCIL_BIT)x.clearValue.depthStencil.stencil=a.clearValue.depthStencil.stencil;
+        x.aspectMask|=a.aspectMask;++lazy_appended;return;}
+    lazy.clears.push_back(a);if(lazy.clears.size()>1)++lazy_appended;}
+void lazy_clear_flush(){   // the former recording: begin the pass with its load ops, then the clears
+    lazy_pending=false;VkCommandBuffer cmd=open_pass.cmd;
+    lrz_touch_before(lazy.pass,cmd);pass_prof_begin(lazy.pass,cmd);VkRenderPassBeginInfo b{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};b.renderPass=lazy.pass.pass;b.framebuffer=lazy.pass.framebuffer;b.renderArea.extent={lazy.pass.width,lazy.pass.height};vkCmdBeginRenderPass(cmd,&b,VK_SUBPASS_CONTENTS_INLINE);
+    VkClearRect r{{{0,0},{lazy.pass.width,lazy.pass.height}},0,1};if(r.rect.extent.width && r.rect.extent.height)for(auto &a:lazy.clears)vkCmdClearAttachments(cmd,1,&a,1,&r);
+    ++lazy_flushed;}
+VkRenderPass lazy_twin(VkRenderPass base,uint32_t mask){
+    auto t=lazy_twins.find({base,mask});if(t!=lazy_twins.end())return t->second;
+    auto in=lazy_info.find(base);if(in==lazy_info.end())return VK_NULL_HANDLE;LazyInfo &li=in->second;
+    std::vector<VkAttachmentDescription> desc=li.desc;for(size_t k=0;k<desc.size();k++){if(mask&(1u<<(2*k)))desc[k].loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;if(mask&(2u<<(2*k)))desc[k].stencilLoadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;}
+    VkSubpassDescription sub{};sub.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS;sub.colorAttachmentCount=uint32_t(li.colors.size());sub.pColorAttachments=li.colors.data();sub.pDepthStencilAttachment=li.depth.attachment!=VK_ATTACHMENT_UNUSED?&li.depth:nullptr;
+    VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};rp.attachmentCount=uint32_t(desc.size());rp.pAttachments=desc.data();rp.subpassCount=1;rp.pSubpasses=&sub;rp.dependencyCount=2;rp.pDependencies=li.dep;
+    VkRenderPass twin{};if(vkCreateRenderPass(cfg.device,&rp,nullptr,&twin)!=VK_SUCCESS)twin=VK_NULL_HANDLE;
+    lazy_twins.emplace(std::make_pair(base,mask),twin);return twin;}
+// Draw in the pending pass: begin it with the clears as load ops (fallback: the former recording, the pass stays open).
+void lazy_clear_begin(Pass &p,VkCommandBuffer cmd){
+    uint32_t mask=0;VkClearValue values[9]{};const uint32_t n=uint32_t(lazy.pass.images.size());bool ok=n<=9;
+    for(auto &a:lazy.clears){uint32_t k=lazy.colors;   // attachment index: color slots in order, then depth (create_pass)
+        if(a.aspectMask&VK_IMAGE_ASPECT_COLOR_BIT)k=a.colorAttachment<8?lazy.slot_att[a.colorAttachment]:255u;
+        else if(!lazy.depth)ok=false;
+        if(k>=n){ok=false;break;}
+        if(a.aspectMask&(VK_IMAGE_ASPECT_COLOR_BIT|VK_IMAGE_ASPECT_DEPTH_BIT))mask|=1u<<(2*k);if(a.aspectMask&VK_IMAGE_ASPECT_STENCIL_BIT)mask|=2u<<(2*k);
+        if(a.aspectMask&VK_IMAGE_ASPECT_COLOR_BIT)values[k].color=a.clearValue.color;
+        else{if(a.aspectMask&VK_IMAGE_ASPECT_DEPTH_BIT)values[k].depthStencil.depth=a.clearValue.depthStencil.depth;if(a.aspectMask&VK_IMAGE_ASPECT_STENCIL_BIT)values[k].depthStencil.stencil=a.clearValue.depthStencil.stencil;}}
+    VkRenderPass twin=ok?lazy_twin(lazy.pass.pass,mask):VK_NULL_HANDLE;
+    if(!twin){lazy_clear_flush();return;}
+    lazy_pending=false;lrz_touch_before(p,cmd);pass_prof_begin(p,cmd);VkRenderPassBeginInfo b{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};b.renderPass=twin;b.framebuffer=p.framebuffer;b.renderArea.extent={p.width,p.height};b.clearValueCount=n;b.pClearValues=values;
+    vkCmdBeginRenderPass(cmd,&b,VK_SUBPASS_CONTENTS_INLINE);++lazy_folded;}
 void capture_pass(Pass &pass){
     if(!capture.active)return;
     capture_log("PASS width=%u height=%u samples=%u viewport=%g,%g,%g,%g scissor=%d,%d,%u,%u mask=%#x blendEnable=%#x cull=%u front=%u depthTest=%u depthWrite=%u depthFunc=%u stencil=%u",pass.width,pass.height,unsigned(pass.samples),state.viewport.x,state.viewport.y,state.viewport.width,state.viewport.height,state.scissor.offset.x,state.scissor.offset.y,state.scissor.extent.width,state.scissor.extent.height,state.mask.mask,state.color.blend_en,state.poly.cull,state.poly.front,unsigned(state.ds.dt),unsigned(state.ds.dw),unsigned(state.ds.df),unsigned(state.ds.st));
@@ -4856,6 +4933,7 @@ Pass p;create_pass(p,c);
         if(!gi && p.pass_noload && quad_indices.empty() && !ab_off("noload") && ui_uy==0 && ui_vs==1 && first_draw_covers(p,prim,first,count,indexed,vertex_buffers,ib,index_type)){VkRenderPass keep=p.pass;p.pass=p.pass_noload;begin_pass(p,c);p.pass=keep;++noload_passes;}
         else begin_pass(p,c);
         open_pass.cmd=c.command;open_pass.pass=p.pass;open_pass.framebuffer=p.framebuffer;open_pass.images=p.images;open_pass.depth_attached=state.rt.depth!=nullptr;for(auto *pi:p.images)if(pi->prior_write>barrier_seq)open_pass.dirty_begin=true;++perf.passes;}
+    if(lazy_pending)lazy_clear_begin(p,c.command);   // [d3-perf] the pending pass of a lazy clear (same pass and framebuffer): begin it, clears as load ops
     if(state.ds.dt || state.ds.st || state.bounds.enable)open_pass.depth_used=true;
     if(state.rt.depth && (state.ds.dw || state.ds.st))open_pass.depth_written=true;if(active_colors)open_pass.color_targets=true;
     if(new_run){end_occlusion_query();begin_occlusion_query(c.command,occlusion,occlusion_index);}
@@ -5082,9 +5160,15 @@ void clear_attachment(const p_clear_color *color,const p_clear_ds *depth,int sca
         if(!needs_preserve || ti.gpu_written || ti.uploaded){
             Commands c(true);Pass p;
             if(create_pass(p,c,-1,false,true)){
-                if(open_pass.cmd!=c.command || open_pass.pass!=p.pass || open_pass.framebuffer!=p.framebuffer){end_open_pass();begin_pass(p,c);open_pass.cmd=c.command;open_pass.pass=p.pass;open_pass.framebuffer=p.framebuffer;open_pass.images=p.images;open_pass.depth_attached=state.rt.depth!=nullptr;++perf.passes;}
-                if(depth){open_pass.depth_used=true;open_pass.depth_cleared=true;}
-                VkClearRect r{scissor(p),0,1};if(r.rect.extent.width && r.rect.extent.height)vkCmdClearAttachments(c.command,1,&a,1,&r);
+                // [d3-perf] DM_GFX_LAZY_CLEAR: a clear of the whole framebuffer that would begin its own pass keeps it pending (see lazy_pending)
+                VkClearRect r{scissor(p),0,1};const bool whole=r.rect.offset.x==0 && r.rect.offset.y==0 && r.rect.extent.width==p.width && r.rect.extent.height==p.height;
+                const bool lazy_ok=lazy_clear_on && whole && lazy_clear_known(p);
+                if(open_pass.cmd!=c.command || open_pass.pass!=p.pass || open_pass.framebuffer!=p.framebuffer){end_open_pass();if(lazy_ok)lazy_clear_open(p);else begin_pass(p,c);open_pass.cmd=c.command;open_pass.pass=p.pass;open_pass.framebuffer=p.framebuffer;open_pass.images=p.images;open_pass.depth_attached=state.rt.depth!=nullptr;++perf.passes;}
+                // [d3-perf] with DM_GFX_LAZY_CLEAR a stencil-only clear no longer counts as a depth clear for the depth-feedback shortcut
+                // (prepare_read): the depth aspect keeps its contents; a packed D24S8 counts it as a depth/stencil write instead (DOOM r3c).
+                if(depth){open_pass.depth_used=true;if(!lazy_clear_on || (a.aspectMask&VK_IMAGE_ASPECT_DEPTH_BIT))open_pass.depth_cleared=true;else if(ti.fmt==VK_FORMAT_D24_UNORM_S8_UINT)open_pass.depth_written=true;}
+                if(lazy_pending){if(whole){lazy_clear_add(a);++perf.folded_clears;return;}lazy_clear_flush();}   // a partial clear: the pending pass begins the old way first
+                if(r.rect.extent.width && r.rect.extent.height)vkCmdClearAttachments(c.command,1,&a,1,&r);
                 ++perf.folded_clears;return;
             }
         }
@@ -5676,6 +5760,14 @@ void execute(const uint8_t *pc,unsigned depth,uint64_t &budget){
                 // Samples reports keep the pass end below: it closes the occlusion run they sum.
                 timestamp_query(r.ts,r.ts_index,r.slot);   // a new pool is reset outside the pass first
                 Slot &ts=recording_slot();++ts.ops;++perf.ops;vkCmdWriteTimestamp(ts.cmd,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,r.ts,r.ts_index);}
+            else if(type==NVN_COUNTER_TYPE_SAMPLES_PASSED && report_inpass){
+                // [d3-perf] DM_GFX_REPORT_INPASS=1: D3 records ~16 samples-passed reports a frame between draws of one pass (reset,
+                // box draw, report); each ended the pass and cost two full barriers (NVN PERF pass_ends op5=16, barriers op5=32).
+                // The report only needs its occlusion run closed (vkCmdEndQuery is legal inside a pass; the next counted draw opens
+                // a new run in the same pass) and a bottom-of-pipe timestamp (as the timestamp fast path above); the sum is read on
+                // the CPU from the query results when the slot retires (resolve_known_reports), so no GPU memory hazard is ordered here.
+                end_occlusion_query();timestamp_query(r.ts,r.ts_index,r.slot);   // a new timestamp pool still ends the pass first
+                Slot &ts=recording_slot();++ts.ops;++perf.ops;vkCmdWriteTimestamp(ts.cmd,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,r.ts,r.ts_index);++inpass_reports;}
             else{Commands c;timestamp_query(r.ts,r.ts_index,r.slot);vkCmdWriteTimestamp(c.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,r.ts,r.ts_index);c.finish();}
             pending_reports.push_back(r);break;}
         default:xbg_fatalf("NVN opcode %u at %#llx not implemented",h.op,(unsigned long long)uintptr_t(pc));
@@ -5794,6 +5886,10 @@ extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t b
     {std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');std::string base=cut==std::string::npos?dir:dir.substr(0,cut);
      auto dm=[&](const char *marker,const char *env){FILE *q=fopen((base+marker).c_str(),"rb");bool on=false;if(q){on=fgetc(q)!='0';fclose(q);}else if(const char *e=getenv(env))on=atoi(e)!=0;return on;};
      ldc_fold=dm("/gfx-ldc-fold","DM_GFX_LDC_FOLD");forward_temps=dm("/gfx-forward-temps","DM_GFX_FORWARD_TEMPS");nan_minmax=dm("/gfx-nan-minmax","DM_GFX_NAN_MINMAX");
+     {auto env_on=[](const char *env,int def){const char *e=getenv(env);return e&&*e?atoi(e)!=0:def!=0;};   // [d3-perf] all off unless dm/env sets them
+      report_inpass=env_on("DM_GFX_REPORT_INPASS",0);lazy_clear_on=env_on("DM_GFX_LAZY_CLEAR",0);xbg_logf("NVN d3-perf pass switches: DM_GFX_REPORT_INPASS=%d DM_GFX_LAZY_CLEAR=%d",int(report_inpass),int(lazy_clear_on));
+      nan_sat=env_on("DM_GFX_NAN_SAT",0);ldc_canon=env_on("DM_GFX_LDC_CANON",0);f2i_notrunc=env_on("DM_GFX_F2I_NOTRUNC",0);texcoord_unguard=!env_on("DM_GFX_TEXCOORD_NAN",1);
+      xbg_logf("NVN d3-perf shader switches: DM_GFX_NAN_SAT=%d DM_GFX_LDC_CANON=%d DM_GFX_F2I_NOTRUNC=%d DM_GFX_TEXCOORD_NAN=%d (texcoord NaN guard kept)",int(nan_sat),int(ldc_canon),int(f2i_notrunc),int(!texcoord_unguard));}
      xbg_logf("NVN NaN-ignoring min / max / clamp like Maxwell=%d (marker gfx-nan-minmax)",int(nan_minmax));
      xbg_logf("NVN translator output clean-up: component fold=%d (marker gfx-ldc-fold) forwarded temporaries=%d (marker gfx-forward-temps)",int(ldc_fold),int(forward_temps));
      {FILE *q=fopen((base+"/gfx-shader-reuse").c_str(),"rb");shader_reuse=0;if(q){int c=fgetc(q);shader_reuse=c=='0'?0:c=='2'?2:1;fclose(q);}else if(const char *e=getenv("DM_GFX_SHADER_REUSE"))shader_reuse=atoi(e);
