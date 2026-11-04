@@ -22,7 +22,7 @@ import java.util.Map;
 //   gamepad ("gamepad", default): the Joy-Con-like pad of commit abf0b6a, unchanged in behaviour: floating left stick + d-pad below,
 //     A/B/X/Y + right stick (D3: evade toward the tilt) below them, L/ZL R/ZR in the top corners, "-" ⚙ "+" on top; a short tap on a
 //     stick's knob is L3 / R3.
-//   touch ("touch"): phase 1 of docs/TOUCH_DESIGN.md (front end only, no game hooks):
+//   touch ("touch"): phase 1 of docs/d3/TOUCH_DESIGN.md (front end only, no game hooks):
 //     * floating left stick in the lower left (tap on its home knob = L3);
 //     * touch and hold the world (any free spot below the top strip) = walk toward that point: the left stick points from the hero's
 //       on-screen spot (HERO_FX, "d3_hero_y") to the finger, the vertical part divided by the camera's depth squeeze ("d3_depth");

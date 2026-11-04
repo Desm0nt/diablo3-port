@@ -25,8 +25,10 @@ def generateStartupStrings = tasks.register('generateStartupStrings', Exec) {
 // Reuse the existing iOS icon as a generated Android resource without duplicating the image.
 def launcherIcon = layout.buildDirectory.dir('generated/launcherIcon')
 def generateLauncherIcon = tasks.register('generateLauncherIcon', Copy) {
-    // [DOOM] its own icon (src/dm/android/doom/icon.png); D2R keeps the iOS one
-    from(project.findProperty('dmGame') == 'doom' ? '../doom/icon.png' : project.findProperty('dmGame') == 'eternal' ? '../eternal/icon.png' : project.findProperty('dmGame') == 'xc2' ? '../xc2/icon.png' : project.findProperty('dmGame') == 'd3' ? '../d3/icon.png' : '../../ios/Assets.xcassets/AppIcon.appiconset/AppIcon1024.png')
+    // [DOOM / D3] the game's own launcher icon dm/android/<dmGame>/icon.png when the tree has one (original art, no game artwork);
+    // otherwise (D2R, or a port whose icon is not in this repository) the iOS icon
+    def gameIcon = file("../${project.findProperty('dmGame') ?: 'd2r'}/icon.png")
+    from(gameIcon.isFile() ? gameIcon : '../../ios/Assets.xcassets/AppIcon.appiconset/AppIcon1024.png')
     inputs.property('dmGame', project.findProperty('dmGame') ?: 'd2r')
     into(launcherIcon.map { it.dir('mipmap-nodpi') })
     rename { 'ic_launcher.png' }

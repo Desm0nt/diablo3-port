@@ -1,0 +1,140 @@
+# Diablo III: Eternal Collection (Switch) → нативный Android: состояние и журнал
+
+Подход тот же, что у DOOM 2016 / DOOM Eternal / Xenoblade 2 (журнал DOOM Mobile — `docs/doom/PORT_JOURNAL.md` в репозитории github.com/Desm0nt/doom-port,
+журналы портов DOOM Eternal и Xenoblade 2 не опубликованы): ARM64-код игры исполняется напрямую, NSO патчится
+офлайн (x18/TLS/SVC/cntpct), `nn::` — HLE, NVN → Vulkan, шейдеры офлайн. Хост — клон дерева XC2 (`dm/`, ветка `d3`, от
+`6202ff6`), сборка `DM_GAME=d3` = «тонкое» ядро DOOM (`DM_GAME_DOOM`) + `DM_GAME_D3`. Главный референс по SDK 8.2 —
+nxnative (seedds, MIT), профиль Link's Awakening `work/reference/nxnative/dm/games/01006BB00C6F0000` (**тот же билд sdk
+`3ae34e68…`**).
+
+## Вход
+| Файл | Что |
+|---|---|
+| `Diablo III Eternal Collection [01001B300B9BE000][v0].nsp` (14.3 ГБ) | база |
+| `...[01001B300B9BE800][v1441792].nsp` (3.6 ГБ) | апдейт (патчи до 2.7.7) |
+| `...[DLC Russian Language Pack] [01001B300B9BF00A]` (6.0 ГБ), `Additional Language Packs DLC\...UK English [..BF001]` | языки (AOC) |
+| `3 DLC\` 30th Anniversary [..BF064], Prime Evil [..BF065], Heritage of Arreat [..BF066] | косметика (AOC) |
+
+## Разведка (02.11.2026)
+- SDK **8.2.0** (NVN 8.2, API 53 — раскладки объектов как у DOOM 2016 / D2R, не NVN 55 Eternal), libcurl, libz.
+- Модули только `main` + `sdk` (без subsdk → GLSLC и nn::movie нет). build-id main `2607a74f…`, sdk `3ae34e68…`.
+- main: text 0xc72b90, ro @0xc73000 (0x4249c4), data @0x1098000 (0xc4a14); 550 импортов: HLE по имени 297, экспорт sdk 249,
+  остальные — `__rel_*` (закрывает загрузчик). Новое по сравнению с прошлыми портами: `nn::nfp` (amiibo), `nn::ldn`,
+  `nn::friends`, `nn::swkbd`, `nn::socket`/`nifm`/`ssl`/`nsd` (Battle.net через libcurl).
+- npdm: prio 44, core 0, **SystemResourceSize 0x1000000** → VAMM включён (как у Eternal), стек 1 МиБ.
+- RomFS (база + BKTR апдейта, IVFC ок): 37 файлов, 16.0 ГиБ — архивы Blizzard `CPKs/*.cpk` (Act1..5, Common, ClientCommon,
+  CoreCommon, ServerCommon, `enUS_*`) и `Update/CPKs/Patch2_6_5..2_7_7.cpk`. Магия `0xA1B2C3D4`, версия 7, сектор 0x4000.
+  В main пути `%s\CPKs\%s.cpk`, `%s\Locale.cpk`, `%s\Update.cpk`, `%s\CPKs\PVPCommon.cpk` (обратные слэши).
+- Консольная сборка: онлайн опционален (`PS3OfflineMessage`, `OfflineIcon`, `ConsoleBattlenetAccountLinkScreen`).
+- Патч NSO: main 4 420 сайтов, sdk 11 277 (93 гейта); `equiv.py` — **0 расхождений**, мутаций поймано 300/300 на обоих.
+
+## Как собрать и запустить
+Всё это делает `setup.bat` / `setup.sh` (`tools/setup_d3.py`, см. `docs/INSTALL.ru.md`); по шагам вручную (ключи: `NX_PROD_KEYS=<prod.keys>`):
+```
+python tools/exefs_nsp.py "<update nsp>" work/exefs-update        # main, sdk, main.npdm
+python tools/nso_symbols.py work/exefs-update main sdk              # *.raw, *.symbols.json
+python tools/romfs_d3.py list|extract "<base nsp>" "<update nsp>" work/romfs   # база + BKTR, IVFC
+DM_TARGET=android PYTHONUTF8=1 python dm/tools/patch_nso.py work/exefs-update/<mod> work/patched <mod>   # main sdk
+PYTHONUTF8=1 python dm/verify/equiv.py work/patched <mod> work/exefs-update/<mod> --jobs 12
+```
+Дальше (в работе): ридер CPK и шейдеры (`docs/d3/CPK.md`, `docs/d3/SHADERS.md`), сборка `DM_GAME=d3` (`docs/d3/D3_GATES.md`).
+
+## Ночь 02.11.2026: телефон (Mi 14 Ultra, Turnip 27) — меню и геймплей
+Данные: RomFS 16 ГиБ → `/sdcard/Download/Diablo3Mobile/romfs/{CPKs,Update/CPKs}` (adb push по USB рвался broken pipe —
+дозаливка по файлам со сверкой размеров), `dm/out` = `work/patched`, `dm/shaders` = `work/shaders-vk` (1 323 `.xgs`).
+`dm/env` — ФАЙЛ (KEY=VALUE), не каталог: по ошибке был создан каталогом, и никакие DM_* не доходили до игры.
+
+| # | Симптом | Причина | Исправление |
+|---|---|---|---|
+| 1 | SIGSEGV null+0x1008 в потоке чтения (main 0x765d7c) / FORTIFY pread count<0 | игра запущена, пока CPK ещё доливались | долить данные; `DM_FS=1` теперь пишет и неудачные open/stat |
+| 2 | **AUTOSAVE висит** (3 из 5 запусков; счётчик fps на экране застывает, кадры игры прекращаются через ~4 с) | поток логики крутит `nn::os::YieldThread`, пока NVN counter report кадра N−3 (main 0xe72b0) = 1, и NVN не вызывает; при `DM_GFX_DEFER_EVENTS=2` отчёты/события публикуются только при ретайре слота, который запускает следующий NVN-вызов → взаимная блокировка. На Switch GPU пишет отчёт сам | для D3 `DM_GFX_DEFER_EVENTS=0` по умолчанию (`jni_android.c`): 0 зависаний из 6+, fps тот же. Правильный фикс (ретайр слотов по таймеру в потоке трансляции, чтобы вернуть перекрытие) — в работе |
+| 3 | геймплей 34 fps | 12.5 МБ снапшотов буферов на кадр | zero-copy для D3 по умолчанию: **45 fps** (снапшоты 2.4 МБ/кадр), UBO по-прежнему снапшотятся |
+
+Итог ночи: AUTOSAVE → «PRESS ANY BUTTON» → главное меню (**60 fps**, GPU ~5–8 мс) → сложность → загрузка → ACT I →
+геймплей на дороге к Новому Тристраму (**~45 fps**, GPU ~10 мс, CPU трансляции ~17 мс, одна синхронизация GPU на кадр `sync_q`),
+персонаж ходит/бьёт, крэшей при входе на карту в 5 прогонах нет. Без `DM_GFX_DEFER_EVENTS=0` прогон, в котором автор видел
+крэш при загрузке, не воспроизводился.
+
+Инструменты: `tools/hangcheck.sh <имя> [сек] [ENV…]` (идут ли кадры до конца), `tools/gp_ab.sh <имя> [ENV…]` (скриптом в геймплей
+Акта 1 существующим героем, медиана последних 15 PERF), `tools/shots.sh`. Маршрут клавишами: `DM_KEYS=A@18,A@26,A@34,A@42,A@50,A@58`
+(+ `LSU@72+3` и т. п. — левый стик). A/B без эффекта в геймплее: `DM_NVN_SYNC_LAG=1`, `DM_GFX_SUBMIT_CHUNK_US=1000`.
+Пад: раскладка Joy-Con для D3 (без FIRE/обзора DOOM). Тап по UI как в d2r-mobile невозможен напрямую: main D3 не импортирует
+тач/мышь/клавиатуру (только npad) — нужен отдельный реверс фокуса UI.
+
+### Под утро 02.11: 60 fps в геймплее, тестовый герой
+| # | Симптом | Причина | Исправление |
+|---|---|---|---|
+| 4 | геймплей 45 fps, `sync_q` 60/с | единственный командный буфер кадра заканчивается `nvnCommandBufferSignalEvent`; при defer 0 он делает `complete_all` → GPU стартует только после трансляции всего кадра (кадр ≈ трансляция + GPU); при defer 2 синхронизацию делал `nvnEventGetValue` | `DM_GFX_IDLE_RETIRE` (субагент, a65c80d): поток nvn-translate по таймауту 1 мс ретайрит готовые слоты и пишет отчёты/события в память гостя сам (как GPU Switch), =2 — `nvnEventGetValue` не ждёт. D3 по умолчанию: `DEFER_EVENTS=2 IDLE_RETIRE=2 SUBMIT_CHUNK_US=0` (c3576b8): **60 fps**, CPU 17 → 5 мс, `sync_q` 0, AUTOSAVE 0 зависаний из 9 |
+| 5 | через ~7 мин игры (present #26100) `FATAL SVC 0x2c mprotect …+0x20000 errno=12` (MapPhysicalMemory); перед этим `写保护缺页 54970 次` | исчерпан `vm.max_map_count` (65530 VMA). Трекер грязных страниц (`nvn_dirty.c`: текстуры `DM_GFX_TEX_DIRTY`, vcache) ставит пулы RO, а каждый write-fault снимал защиту с **одной страницы** посреди RO-участка → VMA режется на три (**+2 VMA на fault**); страницы текстур, которые больше не проверяются, остаются дырами навсегда. Ошибки `mprotect` трекер игнорировал (RO-страница с состоянием NONE → вечный цикл fault). Доп. источник: резерв гостевого AS без `MAP_NORESERVE` — RW-коммит ставит `VM_ACCOUNT`, обратный `PROT_NONE` его не снимает, и соседние `---` участки alias-региона (VAMM map/unmap) больше не сливаются. zero-copy ≤ 512 чанков (≤ ~1 тыс. VMA), wtrack ≤ 8 регионов — не причина | `nvn_dirty.c`: write-fault снимает защиту со всего выровненного блока (`DM_DIRTY_UNPROT_KB`, D3 = **64** КБ, 0 = страница) — потоковая запись = 1 fault на блок, дыры ≥ 64 КБ; `prep_write` — одним `mprotect` на участок; при ENOMEM fault/prep снимают защиту со всего RO-участка (без split), неудачный protect оставляет страницы RW и «всегда грязными» (`GEN_STICKY`); `nvn_dirty_relieve` — снять защиту со всех RO-участков (по `mprotect` на участок, VMA сливаются, страницы считаются записанными → текстуры перехешируются). Новый `hle_vma.c`: поток `dm-vma` раз в 5 с считает `/proc/self/maps`, строка `[vma] maps N / max …` раз в `DM_VMA_LOG` с (60; 0 — только события), при ≥ `DM_VMA_RELIEVE_PCT` % (75) — relief; `DM_VMA_WATCH=0` выключает поток. `hle_svc.c`: `MAP_NORESERVE` для резерва (`DM_AS_NORESERVE`, D3 = 1); Map/UnmapPhysicalMemory, MapMemory, SetHeapSize при ENOMEM → relief + повтор, затем `ResultOutOfMemory` 0xD001 вместо abort (Unmap — `MADV_DONTNEED`, страницы остаются доступными). Логика трекера проверена Linux-тестом (WSL): блок-дыры, fallback при ENOMEM, sticky, relief → 1 VMA. На телефоне не мерено |
+
+Создание героя скриптом: титул A, главное меню X (Switch Hero), в выборе героя X (Create Hero, нужен второй X после анимации:
+`DM_KEYS=A@18,X@38,X@55+0.3,X@64+0.3,A@74`), имя — диалог приложения «Hero Name» (swkbd → Android; игра сама предлагает имя),
+на IME «DONE» (tap 2263,214), затем «OK» (tap 1883,723). Создана Danna (монах), вошла в Акт 1: 60 fps, GPU ~10–11 мс.
+Внимание: не запускать новый `run.sh`, пока жив предыдущий фоновый — его таймер force-stop убивает следующий прогон.
+Дальше: русский язык (AOC RU Language Pack 6 ГБ → монтирование AOC), A/B `DM_GFX_ZC_UBO_MIN=0`, порт DOOM-шных GPU-оптимизаций
+(раунд 3 SPIR-V, NAN_SAT, DIRTY_BLOCKS), долгий прогон на нагрев/стабильность, удобное тач-управление.
+
+## Меню ⚙ (настройки) для D3 — 02.11.2026
+Перенесено из обновлённого меню DOOM 2016 (рабочее дерево DOOM Mobile на тот момент) то, что имеет смысл для D3. Отдельный диалог
+`DmActivity.showD3Settings()` (у DOOM/Eternal/XC2 старый диалог не тронут); тексты — ресурсы `res/values/d3_settings.xml` (англ.)
+и `res/values-ru/d3_settings.xml`. Настройки — `SharedPreferences "doom_graphics"` (графика/запуск) и `"doom_controls"` (пад);
+«со следующего запуска» = переменные окружения до загрузки `libdm.so` (`applyDoomSettings`), `dm/env` по-прежнему главнее.
+
+| Опция | Когда | Как доходит до игры |
+|---|---|---|
+| Язык этого меню (Как в системе / Русский / English) | сразу (диалог переоткрывается) | pref `ui_lang`, локализованный `Context` |
+| Язык игры (система / ru / en-US / en-GB) | след. запуск | `DM_LANG` → `hle_oe.c GetDesiredLanguage`; язык ≠ en-US принимается, только если есть `<loc>_Common.cpk` в `romfs/CPKs` или в `aoc/<индекс>` (иначе en-US) |
+| Разрешение игры = режим Switch: в доке 1600×900 / в руках 720p | след. запуск | `DM_OPMODE=1/0` → `GetOperationMode/GetPerformanceMode` (игра сама выбирает разрешение; в руках — ещё и handheld-стиль npad). **Режим «в руках» на телефоне ещё не проверялся** |
+| Формат картинки: 16:9 с полосами (по умолчанию) / растянуть | сразу | размер `SurfaceView` (`applyAspectLayout`, как XC2); буфер 1600×900 масштабирует дисплейный контроллер (`gfx-present-native`) |
+| Резкость FSR RCAS: выкл/слабая/средняя/сильная | след. запуск | `DM_GFX_SHARPEN` = 1.0 / 0.5 / 0.2 → `rcas.comp` в `vulkan_present.cpp` |
+| Ограничение FPS: 30 / 60 (по умолч. 60) | след. запуск | `DM_PRESENT_MAX_HZ` → `hle_nvn.c present_cap_hz` + `nvn_pace_cap_hz` (наибольшая целая доля частоты экрана ≤ лимита; без переменной — старое правило «не ниже 60», другие игры не затронуты) |
+| Драйвер Vulkan: системный / Turnip 27 (встроен) / пакеты из `Download/Diablo3Mobile/drivers/<имя>/` или `.zip` | след. запуск | `DM_VK_DRIVER` → `vk_driver.c`; строка «Сейчас используется» = `nativeDriverStatus` (`dm_vk_driver_status`); страховка от краша: `files/driver-trying`, после 2 запусков без первого кадра — системный драйвер + тост |
+| Вибрация | след. запуск | `DM_RUMBLE` |
+| Счётчик FPS, компенсация мёртвой зоны стиков | сразу | `doom_controls` `fps`, `move_dz` |
+| Кнопка настроек: обычная / прозрачная + ползунок непрозрачности 1–100 % | сразу | `doom_controls` `gear_mode`, `gear_alpha` → `DoomPadView.drawBtn` (при нажатии — полная яркость) |
+
+Чего нет и почему:
+- **FPS > 60** — не предлагается: игра ставит present interval 1 при 60 Гц, логика интерфейса может считать кадры; без проверки
+  на телефоне не включаем (вручную: `DM_PRESENT_MAX_HZ=120` в `dm/env`, плюс голос частоты в `vulkan_present.cpp` нужен свой).
+  **30 fps не проверены на телефоне**: убедиться, что скорость игры нормальная (движок D3 считает время по часам, но не доказано).
+- **Своё разрешение рендера / широкий формат** (как `DM_XC2_WIDE`) — нужен реверс создания render target'ов D3; не сделано.
+- **3D-масштаб / DRS DOOM** (`DM_DOOM_RES`, `rs_*`) — это cvar'ы id Tech, к D3 не относятся.
+- Отдельный выходной размер swapchain — бессмысленен: финальное масштабирование уже делает дисплейный контроллер (`gfx-present-native`;
+  маркер `=0` вернёт GPU-blit nearest).
+
+### Русский язык (AOC-пакет)
+- Пакет RU `01001B300B9BF00A` = AOC-индекс **10**: 14 файлов в корне RomFS, 5.6 ГиБ — `ruRU_{Act1..5, Act1..5Cutscene, ClientCommon,
+  Common, CommonCutscene, CoreCommon}.cpk` (те же имена, что `CPKs/enUS_*`). UK English `..BF001` = индекс **1**, `enGB_*.cpk`, 5.0 ГиБ.
+  Строки/шрифты ruRU уже есть в патч-CPK апдейта.
+- Игра (main+0x73140): `aoc::CountAddOnContent/ListAddOnContent` → для каждого индекса монтирует `"aoc_%d"` через
+  `fs::MountAddOnContent`; таблица индексов main 0x1099aa0 (1 english_eu … 10 russian … 17 english_us, 100–102 косметика).
+  main+0x738e0 ищет `data:/CPKs/<loc>_Common.cpk`, а при отсутствии — `aoc_<индекс>:/<loc>_Common.cpk`.
+- Хост: `hle_fs.c h_fs_MountAoc` (`DM_AOC/<индекс>`) уже был; добавлено для D3: `jni_android.c` ставит `DM_AOC=<Download/Diablo3Mobile>/aoc`,
+  `hle_misc.c` перечисляет индексы 1..17, в папке которых есть `*_Common.cpk` (`DM_AOC_OWNED=0` — ничего), `hle_oe.c` пропускает `ru`/`en-GB`
+  (и др. по таблице; подтверждены только ruRU/10 и enGB/1), только если архивы есть.
+- Подготовка: `python tools/d3_dlc_romfs.py extract "<RU nsp>"` → `work/romfs-dlc/10/` (уже извлечено, 5.6 ГиБ, хэши ок); на телефон:
+  `adb push work/romfs-dlc/10 /sdcard/Download/Diablo3Mobile/aoc/10`, затем в ⚙ «Язык игры: Русский» и перезапуск.
+- Не проверено: монтируется ли AOC раньше первого чтения языка; язык, сохранённый в профиле (`SelectedTextLocale` /
+  `TextLocaleOverride`), может перекрыть `GetDesiredLanguage` — тогда переключить в опциях игры.
+
+## Тач-управление, фаза 1 (фронтенд, без хуков) — 02.11.2026
+
+План — `docs/d3/TOUCH_DESIGN.md` §3 A/B0/C1. Код: `dm/android/.../D3PadView.java` (новый; DmActivity создаёт его вместо
+`DoomPadView` только при `D3`, остальные игры не затронуты), ⚙ — `DmActivity.showD3Settings()`, тексты — `res/values{,-ru}/d3_settings.xml`.
+Выход — тот же канал пада (`nativePadKey/nativePadAxes`, устройство 0x7d00), C-код не менялся.
+
+* **⚙ «Раскладка управления»**: «Сенсорная» / «Геймпад (Joy-Con)» (pref `doom_controls:d3_layout` = `touch`/`gamepad`, по умолчанию
+  `gamepad` = прежний пад abf0b6a без изменений поведения), применяется сразу при выборе.
+* **Общее для обеих**: непрозрачность 10–100 % (`d3_opacity`, по умолч. 100), размер 60–160 % (`d3_scale`, 100) — ползунки, живые;
+  «Расставить кнопки…» сохраняет диалог и включает режим правки: перетаскивание любого контрола (крестовина и ромб ABXY — целиком),
+  «Сбросить» / «Готово»; позиции `d3_pos_<layout>_<group>` = доли экрана. Кнопка ⚙ — своя прозрачность (`gear_mode/gear_alpha`), как было.
+* **Сенсорная**: плавающий левый стик внизу слева (тап по «дому» = L3); держать палец в мире = идти к точке (стик от героя к пальцу,
+  вертикаль / `s`, сила по расстоянию: 0 до 36 dp, далее 0.35 → 1.0 к 160 dp; стик важнее); двойной тап (≤ 300 мс, ≤ 90 dp) = уклон —
+  правый стик в сторону точки на 120 мс; A (крупная, в углу) + дуга B Y X R ZR, L (зелье) слева от дуги; ZL и мини-крестовина слева
+  вверху, «−» ⚙ «+», «МЕНЮ» и R3 справа вверху. Верхняя полоса 14 % высоты ход не запускает.
+* **Режим меню** (кнопка «МЕНЮ», ручной; авто — фаза 2): прячутся A/X/Y/R3/стик; свайп = левый стик (или крестовина, `d3_menu_swipe`),
+  держится ≥ 90 мс; тап = A (100 мс), долгое (450 мс) = удержание A; B, L/R, ZL/ZR, крестовина, −/+ остаются.
+* **Калибровка** (⚙, живые ползунки; константы в начале `D3PadView`): высота героя `d3_hero_y` = 53 % высоты картинки (40–65),
+  поправка глубины `d3_depth` = 0.72 (0.40–1.00; `s = tan(экранный угол хода при стике 45°)`). Учитывается формат картинки
+  (16:9 с полосами / растянуто).
+* Не проверено на устройстве: значения `hy`/`s`, срабатывает ли уклон от 120-мс флика, ходит ли меню D3 от левого стика.

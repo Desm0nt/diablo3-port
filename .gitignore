@@ -25,3 +25,42 @@ dm/android/.cxx/
 /private/
 /artifacts/
 dm/android/local.env
+# Diablo III Mobile: everything local stays out of Git -- build trees, logs, the player's game files and anything derived from
+# them (ExeFS, patched modules, RomFS, CPK archives, extracted shaders and shader jobs, UI tables), console keys, saves, drivers
+# and validation layers.
+/work/
+__pycache__/
+*.pyc
+local.properties
+*.idsig
+*.so
+*.nsp
+*.nsz
+*.nca
+*.ncz
+*.xci
+*.xcz
+*.nso
+*.npdm
+*.cpk
+*.shd
+*.rec
+*.patched.bin
+*.raw
+*.spv
+*.pftrace
+*.keys
+prod.keys
+title.keys
+dev.keys
+*.tik
+*.sav
+*.log
+/saves/
+/save/
+dm/gfx/tools/dmsh_xlate_*/bin/
+dm/gfx/tools/dmsh_xlate_*/obj/
+# Setup: private Python / .NET runtimes (setup.bat / setup.sh) and the player's game-file drop folder.
+/tools/.runtime/
+/put-game-files-here/*
+!/put-game-files-here/README.txt

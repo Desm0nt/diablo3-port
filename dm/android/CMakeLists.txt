@@ -19,7 +19,7 @@ set_property(CACHE DM_GAME PROPERTY STRINGS d2r doom eternal xc2 d3)
 # [ETERNAL] DOOM Eternal (id Tech 7, same Switch port family) builds on the DOOM code base plus DM_GAME_ETERNAL for its differences.
 # [XC2] Xenoblade Chronicles 2 (Monolith engine, SDK 3.5.0) uses the same lean DOOM core (no D2R feature code) plus DM_GAME_XC2;
 # the Eternal-era generic parts are gated "DM_GAME_ETERNAL || DM_GAME_XC2", NVN 55 layouts / id Tech 7 bindless stay Eternal-only.
-# [D3] Diablo III: Eternal Collection (SDK 8.2.0, NVN API 53) = the lean DOOM core plus DM_GAME_D3; gate decisions in docs/D3_GATES.md.
+# [D3] Diablo III: Eternal Collection (SDK 8.2.0, NVN API 53) = the lean DOOM core plus DM_GAME_D3; gate decisions in docs/d3/D3_GATES.md.
 if(DM_GAME STREQUAL "doom" OR DM_GAME STREQUAL "eternal" OR DM_GAME STREQUAL "xc2" OR DM_GAME STREQUAL "d3")
   set(DM_GAME_DOOM ON)
   add_compile_definitions(DM_GAME_DOOM=1)
@@ -34,7 +34,7 @@ if(DM_GAME STREQUAL "doom" OR DM_GAME STREQUAL "eternal" OR DM_GAME STREQUAL "xc
   endif()
   # Empty stand-in gen dir (no game content); only needed so the include path / prefix map stay valid.
   if(NOT DM_GEN_DIR)
-    get_filename_component(DM_GEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../work/gen-doom ABSOLUTE)
+    get_filename_component(DM_GEN_DIR ${CMAKE_BINARY_DIR}/gen-doom ABSOLUTE)
   endif()
   file(MAKE_DIRECTORY ${DM_GEN_DIR})
 elseif(NOT DM_GAME STREQUAL "d2r")
@@ -173,7 +173,7 @@ target_compile_options(dmcore PUBLIC $<$<COMPILE_LANGUAGE:C>:${DM_CFLAGS} -std=g
 # libadrenotools (BSD-2, third_party/libadrenotools); its hook libraries are packaged next to libdm.so (tools/build_apk.ps1).
 set(BUILD_SHARED_LIBS_SAVED ${BUILD_SHARED_LIBS})
 set(BUILD_SHARED_LIBS OFF)
-add_subdirectory(${DM_PATH_ROOT}/../third_party/libadrenotools ${CMAKE_CURRENT_BINARY_DIR}/adrenotools)
+add_subdirectory(${DM_PATH_ROOT}/third_party/libadrenotools ${CMAKE_CURRENT_BINARY_DIR}/adrenotools)
 set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVED})
 target_compile_definitions(dmcore PRIVATE DM_ADRENOTOOLS=1)
 target_link_libraries(dmcore PUBLIC dm_vulkan_engine adrenotools aaudio android log m dl)

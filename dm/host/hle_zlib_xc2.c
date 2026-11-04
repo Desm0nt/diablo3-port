@@ -1,6 +1,6 @@
 // [XC2] nn::util::DecompressZlib (the SDK's zlib 1.2.8, one buffer -> one buffer) answered by libdeflate (MIT, third_party/libdeflate;
 // NEON adler32, a decoder built for whole buffers). main imports it once (XBC1 containers of the .ard / .wismt / .wilay data);
-// main's own inflate copy (no version string) is not touched. Same idea as the DOOM branch's zlib-ng gate (doom-port-repo c48e3d8,
+// main's own inflate copy (no version string) is not touched. Same idea as the DOOM branch's zlib-ng gate (DOOM Mobile repository, c48e3d8,
 // hle_zlib.c), simpler here because the SDK call is one-shot: no z_stream state to mirror.
 //
 // Switches (read once):

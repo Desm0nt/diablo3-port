@@ -2664,7 +2664,7 @@ bool ldc_fold=false,forward_temps=false;std::atomic<uint64_t> ldc_folds{0},temps
 // pass the NaN on, and written to a UNORM target it comes out black. DM_GFX_NAN_MINMAX (marker gfx-nan-minmax) swaps them in
 // place for NMin / NMax / NClamp: the same operands, the same result for values that are not NaN, and Maxwell's result for NaN.
 bool nan_minmax=false;std::atomic<uint64_t> nan_minmax_swaps{0};
-// [d3-perf] Shader switches ported from the DOOM branch (docs/D3_PERF_CANDIDATES.md), all off unless set in dm/env:
+// [d3-perf] Shader switches ported from the DOOM branch (docs/d3/D3_PERF_CANDIDATES.md), all off unless set in dm/env:
 // - DM_GFX_NAN_SAT=1 (DOOM perf6, 30.10): with DM_GFX_NAN_MINMAX keep FClamp(x, 0.0, 1.0) (Maxwell .SAT) instead of NClamp.
 //   NIR makes it fsat (NaN -> 0 like .SAT; a free (sat) modifier on ir3); NClamp expands to NaN checks + max + min. Exact.
 //   D3 offline: all 6,690 FClamp of the 1,323 bundles are saturates (1,113 modules; 3,149 in pixel shaders).

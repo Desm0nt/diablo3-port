@@ -1,24 +1,13 @@
-# Game-related material in this repository: what is here and what is not
+# D2R-derived records in the base tree (from d2r-mobile)
 
-中文: [DERIVED.zh-CN.md](DERIVED.zh-CN.md)
-
-The front page says the project "contains none and distributes none" of the game's content. This page makes that statement precise: what is truly absent, and which game-related records are in the repository, what each one is, and why it has to be there.
-
-## Not in the repository
-
-- The game program (not a single piece of code from the main executable or the system libraries)
-- Art, audio, cinematics
-- The game's text (the string tables for item names, skill names, dialogue and so on, in any language) and its data tables
-- Shaders (the original shader packages, and the Metal source and compiled libraries translated from them)
-- Saves
-
-All of these are generated on your own machine from your own game files. Every time the public repository is exported, a tool takes the real game files and searches the whole tree for them byte by byte; a hit blocks the export.
-
-A few things derived from the game files are used internally but are not shipped here: the startup prefetch list (each line carries the first bytes of an original resource block — without it, launch skips one ahead-of-time decode step: measured with the iOS package running on a Mac, the character select screen is reached in 3.3–4.0 s versus 2.8 s with the list, two runs each; not measured on a phone), the seed save for the shared stash (without it, the game creates an empty one itself as the original does), and two fixtures for the interface-binding tests (captured from the memory of the running game — without them, the three tests that read them are skipped automatically).
+Diablo III Mobile is built on d2r-mobile, a native port of Diablo II: Resurrected (by way of the DOOM Mobile port). Its tree still carries some records of
+facts about *that* game, written by the d2r-mobile authors; apart from `nvn.h` they serve only the D2R build (the Diablo III build, `DM_GAME=d3`, does not use them). This page is
+d2r-mobile's own description of them, kept so their nature and the credit for the offline rewrites stay on record.
+The Diablo III-derived information is listed in [d3/DERIVED.md](d3/DERIVED.md).
 
 ## In the repository
 
-These are records of facts about the game, not game content: without them, you could not produce a working package even from your own game files.
+These are records of facts about Diablo II: Resurrected, not game content: d2r-mobile needs them to produce a working package from the player's own D2R files.
 
 | Where | Size | What it is | Why it has to be here |
 |---|---|---|---|
@@ -36,4 +25,4 @@ These are records of facts about the game, not game content: without them, you c
 
 ### About the 7 rewrites for offline play
 
-Seven of the rewrite rules in `dm/tools/patch_nso.py` exist to let the game run without a network connection (the original checks online at startup). **These 7 are taken from an existing community offline fix** (LFS Mod Offline Fix); they are not our original work. We have no reliable record of where it was first published or who wrote it — if you know, please open an issue and we will add the credit. This project is fully offline and has nothing to do with online play.
+Seven of the rewrite rules in `dm/tools/patch_nso.py` exist to let the game run without a network connection (the original checks online at startup). **These 7 are taken from an existing community offline fix** (LFS Mod Offline Fix); they are not our original work. We have no reliable record of where it was first published or who wrote it — if you know, please open an issue and we will add the credit. These D2R rewrites are not applied to Diablo III (they are tied to the D2R build id). Diablo III Mobile is fully offline and has nothing to do with online play.

@@ -25,7 +25,7 @@ import java.util.Map;
 //   potion slot centre (85, 834.5), letter "R" columns 79..86; skill slot "A" centre (142.5, 834.5), letter "A" columns 138..147;
 //   letters on rows 851..863 (centre 857, 13 px high); the round icon art has a radius of ~18 px; the slots are 57 px apart and the
 //   XP bar above them runs to x ~456, room for the potion + 6 skill slots (142.5 + 5 x 57 = 427.5).
-// The HUD sits outside the centred 4:3 UI region (x0 = 200 at 1600x900, docs/WIDESCREEN.md) and is anchored to the left and bottom
+// The HUD sits outside the centred 4:3 UI region (x0 = 200 at 1600x900, docs/d3/WIDESCREEN.md) and is anchored to the left and bottom
 // edges of the real window, at the console UI scale height / 900: so all positions here are game pixels at height 900 measured from
 // the frame's left / bottom edge, and they hold for docked 1600x900, handheld 1280x720 (x 0.8) and widescreen W x 900 alike.
 // PixelCopy copies the SurfaceView's buffer, which is the game's output size (vulkan_present.cpp present_native sets the buffer

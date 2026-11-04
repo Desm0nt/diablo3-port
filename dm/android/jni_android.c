@@ -270,7 +270,7 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     setenv("DM_GFX_DEFER_EVENTS", "2", 0);
     setenv("DM_GFX_IDLE_RETIRE", "2", 0);
     setenv("DM_GFX_SUBMIT_CHUNK_US", "0", 0);
-    // [D3] exact GPU switches on by default at the owner's request (docs/D3_PERF_CANDIDATES.md; not A/B'd on the phone yet):
+    // [D3] exact GPU switches on by default at the owner's request (docs/d3/D3_PERF_CANDIDATES.md; not A/B'd on the phone yet):
     // samples-passed reports inside the pass (16 pass ends + 32 barriers a frame), saturating clamps without NaN checks,
     // clears folded into the pass load op, canonical LDC, float-to-int without the trunc. DM_GFX_*=0 in dm/env turns each off.
     setenv("DM_GFX_REPORT_INPASS", "1", 0);
@@ -466,7 +466,7 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativePadRemoved(JNIEnv
     (void)env; (void)cls;
     front_android_pad_removed(device);
 }
-// [D3] Tap on a UI element (touch phase 3, hle_d3_ui.c, docs/TOUCH_DESIGN.md §7): x / y = fractions of the game picture (0..1, top left
+// [D3] Tap on a UI element (touch phase 3, hle_d3_ui.c, docs/d3/TOUCH_DESIGN.md §7): x / y = fractions of the game picture (0..1, top left
 // origin). Queued only; the next npad poll (game thread) focuses the topmost visible activatable control under the point and presses A.
 // Java: `static native boolean nativeD3UiTap(float x, float y);` -> false when DM_D3_UITAP is off or the point is outside 0..1.
 JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiTap(JNIEnv *env, jclass cls, jfloat x, jfloat y) {

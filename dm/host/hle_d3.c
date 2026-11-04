@@ -119,7 +119,7 @@ HLE_FORCE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoEPNS0_16NodeLatestUpdate
 HLE_FORCE("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", "local wireless (cut)", Result, h_ldn_Ip, uint32_t *a, uint32_t *m) { if (a) *a = 0; if (m) *m = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless (cut)", Result, h_ldn_Adv, const void *d, uint64_t n) { (void)d; (void)n; return RES_FAIL; }
 
-// ---- Widescreen (DM_D3_WIDE, default off until tested on the phone; docs/WIDESCREEN.md)
+// ---- Widescreen (DM_D3_WIDE, default off until tested on the phone; docs/d3/WIDESCREEN.md)
 // D3 never asks the system for a display size. NX64NVNCore's init (update 2.7.7 main 0xe7830, called once from the Gfx window open
 // 0x29a12c) fills its global (GOT 0x114c970 -> 0x179bc58) with constants:
 //   0xe7858 mov x8,#1600 / 0xe7860 movk x8,#900,lsl#32  -> +0x00 docked window size 1600x900
@@ -158,7 +158,7 @@ static int dw_poke(module_t *m, uint32_t off, const uint32_t *w, int n) {
     __builtin___clear_cache((char *)at, (char *)end);
     return 0;
 }
-// ---- Loading screens stretched to the screen in widescreen (DM_D3_WIDE_STRETCH_LOADING, default 1 with DM_D3_WIDE; docs/WIDESCREEN.md)
+// ---- Loading screens stretched to the screen in widescreen (DM_D3_WIDE_STRETCH_LOADING, default 1 with DM_D3_WIDE; docs/d3/WIDESCREEN.md)
 // The loading screen is not a UI control: the main loop (0x40810 -> 0x41418 / 0x408dc, also 0x3d37c / 0x3d510 from blocking loads) calls
 // LoadingScreen_Frame 0x3ebc0 with st = *(*(g + 0x10) + 0x800) (g = main+0x1905610):
 //   st+0x6c  1 = loading screen up (set at 0x3ecf8 on its first frame, cleared only by 0x3dbd0 at 0x3dc9c when the loop sees loading over)

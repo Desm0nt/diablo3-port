@@ -1,189 +1,189 @@
 #!/bin/bash
-# 一条命令把工作区准备好：检查依赖 → Python 环境 → 改写主程序 → 取着色器包 → 编译翻译工具 → 翻译全部着色器。
-# 做完之后出 App：cd dm/ios && ./run.sh build
-# 用法：./setup.sh                 准备工作区
-#       ./setup.sh check           体检：逐项报告缺什么、去哪拿、下一步命令，不动任何东西
-#       ./setup.sh <游戏包 .xci 或 .nsp> <prod.keys>    先从你自己的游戏包里取出游戏文件，再准备工作区
-# 报告的语言跟系统语言走，也可用 DM_LANG=zh / en 指定。
-# 工作区根目录 DM_ROOT（缺省 ~/dm-work）：游戏文件放在 $DM_ROOT/data/switch/3.3.94012/Update/{ExeFS,RomFS}，产物与缓存也都在它下面。
-# 每一步做过就跳过；想重做某一步，删掉它的产物目录再跑。依赖说明与官方链接见 docs/DEPENDENCIES.zh-CN.md。
+# Diablo III Mobile setup for Linux / macOS: prepares the game folder for the phone from your own Diablo III (Switch) dumps.
+#   ./setup.sh                  finds the base game, the update v1441792, language-pack DLC and prod.keys in put-game-files-here/ (or the
+#                               current folder), under any names, and prepares everything
+#   ./setup.sh FILES...         the same with explicit files (NSP / NSZ / XCI / XCZ + prod.keys), in any order
+#   ./setup.sh check            what is installed / found / prepared, and the next step (changes nothing)
+#   ./setup.sh push [serial]    copy the prepared folder to the phone over adb
+#   more options: ./setup.sh --help
+# Python packages go into a private virtual environment (tools/.runtime/venv), the .NET 10 SDK into tools/.runtime/dotnet
+# when it is missing (asked first; D3_SETUP_YES=1 answers yes). Nothing is installed system-wide.
+# All the work is done by tools/setup_d3.py (it also runs directly: python3 tools/setup_d3.py ...); guide: docs/INSTALL.md.
+# Started from a file manager (double-click), setup opens a terminal window and keeps it open at the end ("Press Enter");
+# D3_SETUP_PAUSE=0 turns that off, D3_SETUP_PAUSE=1 forces the pause. D3_SETUP_YES=1 and CI never pause.
+#
+# The next two lines run under sh / dash / zsh too and end with '#' so that Windows line endings (CRLF) do not break them:
+# they restart the script with bash, and remove CRLF from this file (a ZIP copied through a Windows editor or tool).
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@" #
+if [ -f "$0" ] && grep -q "$(printf '\r')" "$0" 2> /dev/null; then echo "setup.sh: removing Windows line endings (CRLF) from $0" >&2; tr -d '\r' < "$0" > "$0.lf.tmp" && cat "$0.lf.tmp" > "$0"; rm -f "$0.lf.tmp"; if grep -q "$(printf '\r')" "$0"; then echo "STOP: could not fix $0; run:  sed -i 's/\r\$//' setup.sh   and start it again" >&2; exit 1; fi; exec bash "$0" "$@"; fi #
 set -u
-HERE=$(cd "$(dirname "$0")" && pwd); export DM_ROOT=${DM_ROOT:-$HOME/dm-work}
-GAME=$DM_ROOT/data/switch/3.3.94012/Update; PY=$DM_ROOT/build/cache/dm/venv/bin/python3
-say() { echo "[$(date +%T)] $*"; }
-die() { echo "✗ $*" >&2; exit 1; }
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+RT="$HERE/tools/.runtime"
+VENV="$RT/venv"
+PKGS=(cryptography zstandard lz4 'capstone<6' 'unicorn<3')
+NEED_VER='import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'
+NEED_ALL='import sys; assert sys.version_info >= (3, 10); import cryptography, zstandard, lz4, capstone, unicorn'
 
-# 说话用中文还是英文：DM_LANG=zh / en，没设就看系统语言
-case "${DM_LANG:-${LC_ALL:-${LANG:-}}}" in zh*) ZH=1;; *) ZH=0;; esac
-m() { if [ "$ZH" = 1 ]; then echo "$1"; else echo "$2"; fi; }
+venv_py() {   # Scripts/python.exe only for Git Bash / MSYS (under WSL a venv made by setup.bat must not be used)
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) if [ -x "$VENV/Scripts/python.exe" ]; then echo "$VENV/Scripts/python.exe"; return; fi;;
+  esac
+  echo "$VENV/bin/python"
+}
 
-# 给了游戏包与密钥：先把游戏文件取出来放到位（dm/tools/extract_game.sh），再接着往下做。本体与更新可以是分开的两个包：先给所有游戏包，最后给 prod.keys
-# Given game packages and keys: first extract the game files into place (dm/tools/extract_game.sh), then carry on. The base game and the update may be separate packages: all game packages first, prod.keys last
-case "${1:-}" in
-  *.xci|*.XCI|*.nsp|*.NSP)
-    PKGS=(); while [ $# -gt 0 ]; do case "$1" in *.xci|*.XCI|*.nsp|*.NSP) PKGS+=("$1"); shift;; *) break;; esac; done
-    [ $# -ge 1 ] || die "$(m "用法：./setup.sh <游戏包 .xci 或 .nsp> [<游戏包> …] <prod.keys>" "Usage: ./setup.sh <game package .xci or .nsp> [<game package> ...] <prod.keys>")"
-    if [ -d "$GAME" ]; then say "$(m "已有游戏文件目录 ${GAME}，不再解包" "Game files directory $GAME already exists; skipping extraction")"
-    else bash "$HERE/dm/tools/extract_game.sh" "${PKGS[@]}" "$1" || exit 1; fi
-    shift;;
+# ---------------------------------------------------------------- terminal window: open one, keep it open
+parent_name() {   # name of the process that started this script (bash, zsh, konsole, dolphin, ...)
+  local n=
+  [ -r "/proc/$PPID/comm" ] && n=$(cat "/proc/$PPID/comm" 2> /dev/null)
+  [ -n "$n" ] || n=$(ps -o comm= -p "$PPID" 2> /dev/null)
+  [ -n "$n" ] || n=$(ps -p "$PPID" 2> /dev/null | awk 'NR == 2 { print $NF }')   # Git Bash / MSYS ps
+  n=${n##*/}; n=${n#-}; echo "${n%.exe}"
+}
+
+from_shell() {   # typed into a shell (or sudo / tmux / ...), not started by a file manager or a terminal emulator
+  case "$(parent_name)" in
+    bash|sh|dash|zsh|fish|ksh|ksh93|mksh|oksh|pdksh|yash|ash|busybox|tcsh|csh|nu|xonsh|elvish|pwsh|powershell|\
+    sudo|doas|su|tmux*|screen|script|make|xargs|env|nohup|timeout|time|watch|strace|python*) return 0;;
+  esac
+  return 1
+}
+
+PAUSE=0
+case "${D3_SETUP_PAUSE:-}" in
+  1) PAUSE=1;;
+  0) ;;
+  *) if [ "${D3_SETUP_YES:-}" != 1 ] && [ -z "${CI:-}" ] && [ -t 0 ] && [ -t 1 ] && ! from_shell; then PAUSE=1; fi;;
 esac
 
-# 体检：逐项报「状态 / 缺的话去哪拿 / 下一步命令」。./setup.sh check 只做这一段，不动任何东西
-missing=0; NEXT=
-ok()  { echo "  ✓ $1"; }
-bad() { echo "  ✗ $1"; echo "      → $2"; missing=$((missing+1)); [ -n "$NEXT" ] || NEXT=$2; }
-note() { echo "  · $1"; }
-tool() {   # 命令  中文用途  英文用途  安装办法
-  if command -v "$1" > /dev/null 2>&1; then ok "$1"; else bad "$(m "缺 $1（$2）" "$1 is missing ($3)")" "$4"; fi
+finish() {   # exit with code $1; a window opened by a double-click stays until Enter
+  if [ "$PAUSE" = 1 ]; then
+    echo
+    [ "$1" = 0 ] || echo "Setup did not finish (exit code $1): read the message above." >&2
+    read -r -p "Press Enter to close this window. " _ || true
+  fi
+  exit "$1"
 }
-say "$(m "一、这台电脑" "1. This computer")"
-OSV=$(/usr/libexec/PlistBuddy -c "Print ProductVersion" /System/Library/CoreServices/SystemVersion.plist 2> /dev/null)
-if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then ok "$(m "Apple 芯片的 Mac，macOS $OSV" "Apple silicon Mac, macOS $OSV")"
-else bad "$(m "需要 Apple 芯片的 Mac（这台是 $(uname -s) $(uname -m)）" "An Apple silicon Mac is required (this is $(uname -s) $(uname -m))")" "$(m "换一台 Apple 芯片的 Mac 再来" "Use an Apple silicon Mac")"; fi
-# 图形层整个建在 macOS 26 / iOS 26 才有的图形接口（Metal 4）上：macOS 低于 26 时，在这台 Mac 上运行的那几样（Mac App、宿主、图形层单测、Mac 冒烟）编不过也跑不了
-# The graphics layer is built entirely on a graphics interface that exists only from macOS 26 / iOS 26 on (Metal 4): below macOS 26, the things that run on this Mac (the Mac App, the host, the graphics unit tests, the Mac smoke run) neither build nor run
-case "${OSV%%.*}" in ''|*[!0-9]*) ;; *) [ "${OSV%%.*}" -ge 26 ] || note "$(m "这台 Mac 是 macOS ${OSV}：低于 26。Mac App（dm/tools/mac_app.sh）、宿主与图形层单测、Mac 冒烟需要 macOS 26 及以上（用到了 macOS 26 才有的图形接口）。要在这台 Mac 上玩，出旧接口版：DM_MAC_M3=1 dm/tools/mac_app.sh（最低 macOS 15.0，见 docs/OLDER_SYSTEMS.zh-CN.md）" "This Mac runs macOS ${OSV}, below 26. The Mac App (dm/tools/mac_app.sh), the host and graphics unit tests and the Mac smoke run need macOS 26 or later (they use a graphics interface that exists only from macOS 26 on). To play on this Mac, build the older-API version: DM_MAC_M3=1 dm/tools/mac_app.sh (minimum macOS 15.0, see docs/OLDER_SYSTEMS.md)")";; esac
-DK=$DM_ROOT; while [ ! -d "$DK" ] && [ "$DK" != / ]; do DK=$(dirname "$DK"); done; FREE=$(df -g "$DK" 2> /dev/null | awk 'NR==2 {print $4}'); WANT=30; [ -d "$GAME" ] && WANT=15
-if [ -n "$FREE" ] && [ "$FREE" -ge "$WANT" ]; then ok "$(m "磁盘剩余 $FREE GB（至少要 $WANT GB）" "$FREE GB free disk space (at least $WANT GB needed)")"
-else bad "$(m "磁盘剩余 ${FREE:-?} GB，不够：工作区要约 12 GB，解游戏包另要约 20 GB" "Only ${FREE:-?} GB free: the workspace needs about 12 GB, extracting the game package about 20 GB more")" "$(m "腾出空间，或用 DM_ROOT=<别的盘上的目录> 换位置" "Free up space, or point DM_ROOT=<a directory on another disk> elsewhere")"; fi
 
-say "$(m "二、工具" "2. Tools")"
-if command -v xcodebuild > /dev/null 2>&1 && XV=$(xcodebuild -version 2> /dev/null | head -1) && [ -n "$XV" ]; then
-  ok "$XV"
-  if xcrun -sdk iphoneos metal --version > /dev/null 2>&1; then ok "$(m "Metal 着色器编译器" "Metal shader compiler")"
-  else bad "$(m "Xcode 里没有 Metal 着色器编译器（翻译着色器要用）" "Xcode has no Metal shader compiler (needed to translate shaders)")" "xcodebuild -downloadComponent MetalToolchain"; fi
-else bad "$(m "缺 Xcode（编译 App 与着色器）" "Xcode is missing (builds the app and the shaders)")" "$(m "从 App Store 安装 Xcode，装完打开一次；再执行 sudo xcode-select -s /Applications/Xcode.app" "Install Xcode from the App Store and open it once; then run sudo xcode-select -s /Applications/Xcode.app")"; fi
-command -v brew > /dev/null 2>&1 || note "$(m "没有 Homebrew：下面几个工具用它装最省事，见 https://brew.sh" "Homebrew not found: it is the easiest way to install the tools below, see https://brew.sh")"
-tool xcodegen    "生成 Xcode 工程" "generates the Xcode project" "brew install xcodegen"
-tool spirv-cross "着色器转 Metal 着色语言" "converts shaders to Metal Shading Language" "brew install spirv-cross"
-# spirv-cross 换个版本，翻译出的着色器源码就可能不同（实测最新源码版与 1.4.357.0 差 231 个着色器）。自己整条构建时前后自洽，不受影响；
-# 用发布的壳做包（docs/NO_XCODE）时要与壳一致，对不上 d2rm_pack.py 会停下来。这里把版本报出来，不拦。
-# A different spirv-cross version may translate shaders differently (231 shaders differ between the latest source and 1.4.357.0). A full build
-# of your own stays self-consistent; packing into a released shell (docs/NO_XCODE) must match the shell, and d2rm_pack.py stops if it does not.
-SC_WANT=1.4.357.0
-if command -v spirv-cross > /dev/null 2>&1; then
-  SC_HAVE=$(brew list --versions spirv-cross 2> /dev/null | awk '{print $2}')
-  if [ "$SC_HAVE" = "$SC_WANT" ]; then ok "$(m "spirv-cross 的版本是验过的 $SC_WANT" "spirv-cross is the verified version $SC_WANT")"
-  elif [ -n "$SC_HAVE" ]; then note "$(m "spirv-cross 是 ${SC_HAVE}，验过的是 ${SC_WANT}：自己整条构建不受影响；往发布的壳里做包时翻译结果可能对不上（工具会报）" "spirv-cross is $SC_HAVE, the verified version is $SC_WANT: a full build of your own is unaffected; packing into a released shell may not match (the tool will say so)")"
-  else note "$(m "读不到 spirv-cross 的版本（不是用 Homebrew 装的）；验过的是 $SC_WANT" "Cannot read the spirv-cross version (not installed with Homebrew); the verified version is $SC_WANT")"; fi
-fi
-tool python3     "生成与验证脚本" "generation and verification scripts" "brew install python"
-DOTNET=$(command -v dotnet || { [ -x "$HOME/.dotnet/dotnet" ] && echo "$HOME/.dotnet/dotnet"; } || true)
-if [ -n "$DOTNET" ]; then ok "dotnet"; else bad "$(m "缺 dotnet（编译着色器翻译工具）" "dotnet is missing (builds the shader translation tool)")" "brew install dotnet"; fi
-# 编出来的翻译工具是个独立的小程序，启动时要自己找 .NET 运行时：只认 DOTNET_ROOT 和几个固定位置，Homebrew 装的不在其中，找不到就起不来
-#（那时后面会报成「翻译器不是用仓内源编的」，其实是它没跑起来）。没设 DOTNET_ROOT 时，按 dotnet 自己报的运行时位置设上。
-# The translation tool that gets built is a standalone program that has to locate the .NET runtime itself at startup: it only looks at DOTNET_ROOT and a few fixed locations, and a Homebrew install is not among them, so it cannot start
-# (which would later be reported as "the translator was not built from the in-repo source" although it simply did not run). When DOTNET_ROOT is not set, set it from the runtime location dotnet itself reports.
-if [ -n "$DOTNET" ] && [ -z "${DOTNET_ROOT:-}" ]; then
-  DOTNET_ROOT=$("$DOTNET" --list-runtimes 2> /dev/null | sed -n 's/^Microsoft\.NETCore\.App [^ ]* \[\(.*\)\/shared\/Microsoft\.NETCore\.App\]$/\1/p' | head -1)
-  [ -n "$DOTNET_ROOT" ] && export DOTNET_ROOT || unset DOTNET_ROOT
-fi
-
-say "$(m "三、游戏文件（${GAME}）" "3. Game files ($GAME)")"
-gf=0
-while read -r want name; do
-  if [ ! -f "$GAME/ExeFS/$name" ]; then echo "  ✗ $(m "缺 ExeFS/$name" "ExeFS/$name is missing")"; gf=$((gf+1))
-  elif [ "$(shasum -a 256 "$GAME/ExeFS/$name" | cut -c1-64)" = "$want" ]; then ok "ExeFS/${name}（3.3.94012）"
-  else echo "  ✗ $(m "ExeFS/$name 不是 3.3.94012 这一版的" "ExeFS/$name is not from version 3.3.94012")"; gf=$((gf+1)); fi
-done <<SUMS
-55fd909bb7230b002357e5b0d8499c11f06888f345c49e69eb4734df44a27d0e main
-1c9f198a91c0bcfee5cf8f5b53fb941895e91334dfb766ce79fc68576797f017 sdk
-67a38fcf89cd13e040a021eb3d157072f38ebf6680a907874c35c7b231b5d4e2 subsdk0
-SUMS
-if [ -f "$GAME/RomFS/data/build_manifest.psv" ]; then ok "RomFS/data/build_manifest.psv"; else echo "  ✗ $(m "缺 RomFS/data/build_manifest.psv" "RomFS/data/build_manifest.psv is missing")"; gf=$((gf+1)); fi
-arc=0; for a in 00-00000001 00-00000002 00-00000003 00-00000004 00-00000005 00-00000006 01-00000001 01-00000002 02-00000001 02-00000002 03-00000001 03-00000002 04-00000001 04-00000002 05-00000001 05-00000002 17-00000001 17-00000002; do [ -f "$GAME/RomFS/data/$a.data" ] && arc=$((arc+1)); done
-if [ "$arc" = 18 ]; then ok "$(m "手机上要用的 18 个资源档案都在" "All 18 resource archives needed on the phone are present")"; else echo "  ✗ $(m "手机上要用的 18 个资源档案只有 $arc 个" "Only $arc of the 18 resource archives needed on the phone are present")"; gf=$((gf+1)); fi
-if [ "$gf" != 0 ]; then
-  missing=$((missing+gf))
-  if command -v "${HACTOOL:-hactool}" > /dev/null 2>&1; then G="./setup.sh $(m "<你的游戏包 .xci 或 .nsp> <你的 prod.keys>" "<your game package .xci or .nsp> <your prod.keys>")"
-  else G="$(m "先装 hactool（https://github.com/SciresM/hactool ，按它的说明编译，放进 PATH），再执行 ./setup.sh <你的游戏包> <你的 prod.keys>" "Install hactool first (https://github.com/SciresM/hactool, build it per its instructions and put it in PATH), then run ./setup.sh <your game package> <your prod.keys>")"; fi
-  echo "      → $G"; echo "      → $(m "游戏文件只能从你自己买的 Switch 版导出，怎么导出见 docs/GAME_FILES.zh-CN.md" "Game files can only come from the Switch copy you own; see docs/GAME_FILES.md for how to export them")"; [ -n "$NEXT" ] || NEXT=$G
-fi
-
-say "$(m "四、签名（出 App 时才用，现在缺也不拦）" "4. Signing (only needed when building the app; not blocking now)")"
-LE=; for f in "${DM_LOCAL_ENV:-}" "$HERE/dm/ios/local.env" "$HOME/.config/dm-ios/local.env"; do [ -n "$f" ] && [ -f "$f" ] && { LE=$f; break; }; done
-if [ -z "$LE" ]; then note "$(m "还没有签名配置：cp dm/ios/local.env.example dm/ios/local.env，填 DM_TEAM_ID 与 DM_BUNDLE_ID" "No signing configuration yet: cp dm/ios/local.env.example dm/ios/local.env, then fill in DM_TEAM_ID and DM_BUNDLE_ID")"
-else
-  tid=$(. "$LE" > /dev/null 2>&1; echo "${DM_TEAM_ID:-}"); bid=$(. "$LE" > /dev/null 2>&1; echo "${DM_BUNDLE_ID:-}"); fa=$(. "$LE" > /dev/null 2>&1; echo "${DM_FREE_ACCOUNT:-}")
-  if [ -n "$tid" ] && [ -n "$bid" ]; then ok "$(m "团队号与包名已填（${LE}）" "Team ID and bundle ID are set ($LE)")"; else note "$(m "$LE 里 DM_TEAM_ID / DM_BUNDLE_ID 还没填全" "DM_TEAM_ID / DM_BUNDLE_ID are not both set in $LE")"; fi
-  if [ "$fa" = 1 ]; then note "$(m "免费账号档：没有 iCloud 存档同步，App 每 7 天要重新构建重装" "Free account mode: no iCloud save sync; the app must be rebuilt and reinstalled every 7 days")"; fi
-fi
-
-if [ "$missing" != 0 ]; then
-  echo; m "还差 $missing 项。先做这一步：" "$missing item(s) still missing. Do this first:"; echo "    $NEXT"; m "做完再运行 ./setup.sh check。" "Then run ./setup.sh check again."; exit 1
-fi
-if [ "${1:-}" = check ]; then echo; m "体检通过。下一步：./setup.sh（首次约 11 分钟）；做完后 cd dm/ios && ./run.sh build" "All checks passed. Next: ./setup.sh (about 11 minutes the first time); then cd dm/ios && ./run.sh build"; exit 0; fi
-
-step() { local name=$1; shift; local t0; t0=$(date +%s); say "$name"; "$@" || die "$name 没成功"; say "$name 完成（$(( $(date +%s) - t0 )) 秒）"; }
-
-py_env() { python3 -m venv "$DM_ROOT/build/cache/dm/venv" && "$PY" -m pip install -q pillow numpy lz4 capstone unicorn; }
-[ -x "$PY" ] && "$PY" -c 'import PIL, numpy, lz4, capstone, unicorn' 2> /dev/null || step "Python 环境与包" py_env
-
-P=$(head -1 "$HERE/dm/PRODUCT")
-[ -f "$DM_ROOT/build/cache/dm/out/$P-touch/main.patched.bin" ] || step "改写主程序（三种产物）" env DM_PY="$PY" bash "$HERE/dm/tools/product.sh" build
-
-packs() {
-  mkdir -p "$DM_ROOT/build/cache/dm/dmsh" && cd "$DM_ROOT/build/cache/dm/dmsh" || return 1
-  DMX_ROOT="$GAME/RomFS/data" "$PY" "$HERE/dm/tools/dmx.py" list 'data:data/hd/shaders/*.bin' | cut -f1 | while read -r p; do
-    DMX_ROOT="$GAME/RomFS/data" "$PY" "$HERE/dm/tools/dmx.py" get "$p" "$(basename "$p")" > /dev/null || exit 1; done
-  [ "$(ls | wc -l | tr -d ' ')" = 162 ]
+open_terminal() {   # no terminal at all (a file manager's "Run" / "Execute"): show setup in a terminal window instead
+  local t rc mark="${TMPDIR:-/tmp}/d3-setup-started.$$"   # the copy in the terminal creates it: started, whatever its exit code
+  local cmd=(env D3_SETUP_IN_TERMINAL="$mark" D3_SETUP_PAUSE=1 bash "$HERE/setup.sh" "$@")
+  rm -f "$mark"
+  for t in ${TERMINAL:-} x-terminal-emulator konsole gnome-terminal xfce4-terminal mate-terminal terminator ptyxis kgx \
+           alacritty kitty foot wezterm xterm; do
+    command -v "$t" > /dev/null 2>&1 || continue
+    case "$t" in
+      gnome-terminal|ptyxis|kgx) "$t" -- "${cmd[@]}";;
+      xfce4-terminal|mate-terminal|terminator) "$t" -x "${cmd[@]}";;
+      kitty|foot) "$t" "${cmd[@]}";;
+      wezterm) "$t" start -- "${cmd[@]}";;
+      *) "$t" -e "${cmd[@]}";;
+    esac > /dev/null 2>&1
+    rc=$?
+    if [ "$rc" = 0 ] || [ -e "$mark" ]; then rm -f "$mark"; exit 0; fi
+  done
 }
-[ "$(ls "$DM_ROOT/build/cache/dm/dmsh" 2> /dev/null | wc -l | tr -d ' ')" = 162 ] || step "取着色器包（162 个）" packs
+case "${D3_SETUP_IN_TERMINAL:-}" in /*) : > "$D3_SETUP_IN_TERMINAL" 2> /dev/null;; esac
 
-xlate() {
-  "$DOTNET" publish "$HERE/dm/gfx/tools/dmsh_xlate" -c Release -o "$DM_ROOT/build/gfx/dmsh_xlate" -v quiet || return 1
-  # 编完当场跑一下：起不来（找不到 .NET 运行时等）就在这里把它自己的报错打出来，不留到后面被报成别的事
-  "$DM_ROOT/build/gfx/dmsh_xlate/dmsh_xlate" --source-sha > /dev/null 2>&1 && return 0
-  echo "  $(m "翻译工具编出来了但起不来，它自己的报错：" "the translation tool was built but does not start; its own error:")"; "$DM_ROOT/build/gfx/dmsh_xlate/dmsh_xlate" --source-sha 2>&1 | head -6 | sed 's/^/    /'
-  echo "  $(m "多半是找不到 .NET 运行时：设 DOTNET_ROOT=<.NET 安装目录> 后重跑（Homebrew：export DOTNET_ROOT=\"\$(brew --prefix dotnet)/libexec\"）" "most likely the .NET runtime was not found: set DOTNET_ROOT=<.NET install directory> and rerun (Homebrew: export DOTNET_ROOT=\"\$(brew --prefix dotnet)/libexec\")")"; return 1
-}
-[ -x "$DM_ROOT/build/gfx/dmsh_xlate/dmsh_xlate" ] || step "编译着色器翻译工具" xlate
-
-# 翻译链版本由源码与工具指纹共同决定。本机工具与仓内登记的不一样（别的 Xcode / spirv-cross 版本、自己编的翻译工具）是正常的：
-# 按本机工具重新登记，着色器库就按这套工具出，宿主也只认这一版。
-T=$HERE/dm/gfx/tools
-"$PY" "$T/dmsh_chain.py" --check-tools > /dev/null 2>&1 || step "按仓内源码重编着色器翻译工具" xlate   # 翻译工具的源码改过（拉了新提交）：旧的二进制不算数
-if ! "$PY" "$T/dmsh_chain.py" --check-tools > /dev/null 2>&1; then
-  say "本机工具与仓内登记的不同：按本机工具重新登记翻译链"
-  "$PY" "$T/dmsh_chain.py" --update-lock > /dev/null && "$PY" "$T/dmsh_chain.py" --header > /dev/null || die "翻译链登记没成功"
+if [ ! -t 0 ] && [ ! -t 1 ] && [ -z "${D3_SETUP_IN_TERMINAL:-}" ] && [ "${D3_SETUP_PAUSE:-}" != 0 ] \
+   && [ "${D3_SETUP_YES:-}" != 1 ] && [ -z "${CI:-}" ] && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; } \
+   && ! from_shell; then
+  open_terminal "$@"   # returns only when no terminal emulator could be started: continue without one
 fi
-V=$("$PY" "$T/dmsh_chain.py")
-# 翻译这一步做没做全，只认完成标记里的逐个结果：标记 _b_build.json（写在 Mac 侧缓存目录）里每个着色器都是 ok，并且 iOS 库目录里每个都有对应的库文件。
-# 只看「标记在、库目录里至少有一个文件」不够：翻译脚本即使全部失败也会写标记并正常退出，那样会把一个空的或缺了几千个的库当成做完。
-# Whether this step is complete is decided only by the per-shader results in the completion marker: every shader in _b_build.json (in the Mac-side cache directory) is ok, and every one has its library file in the iOS library directory.
-# "The marker exists and the directory holds at least one file" is not enough: the translation script writes the marker and exits normally even when everything failed, which would accept an empty library or one missing thousands of shaders.
-shaders_ok() {   # [say] = 把统计打印出来 | print the tally
-  "$PY" - "$DM_ROOT/build/cache/metal_shader_cache/b-$V/_b_build.json" "$DM_ROOT/build/ios/dmsh_b/b-$V" "${1:-}" <<'PYEOF'
-import collections, json, os, sys
-marker, ios, say = sys.argv[1:4]
-try: res = json.load(open(marker, encoding='utf-8'))
-except (OSError, ValueError): sys.exit(1)
-st = collections.Counter(r['st'] for r in res)
-have = set(os.listdir(ios)) if os.path.isdir(ios) else set()
-miss = [r['key'] for r in res if r['st'] == 'ok' and r['key'] + '_b.metallib' not in have]
-good = bool(res) and set(st) == {'ok'} and not miss
-if say:
-    print('  着色器 %d：成功 %d%s；iOS 库里缺 %d 个 | shaders %d: ok %d%s; missing from the iOS library: %d' % (
-        len(res), st['ok'], ''.join('，%s %d' % kv for kv in st.items() if kv[0] != 'ok'), len(miss),
-        len(res), st['ok'], ''.join(', %s %d' % kv for kv in st.items() if kv[0] != 'ok'), len(miss)))
-sys.exit(0 if good else 1)
-PYEOF
-}
-shaders() {
-  local log="$DM_ROOT/build/cache/dm/shaders.log" rc
-  J=${J:-6} IOSOUT="$DM_ROOT/build/ios/dmsh_b" "$PY" "$T/dmsh_build.py" "$DM_ROOT/build/cache/dm/dmsh" "$DM_ROOT/build/cache/metal_shader_cache" > "$log" 2>&1; rc=$?
-  tail -12 "$log"
-  [ $rc = 0 ] || { echo "  $(m "翻译脚本退出码 ${rc}，完整输出在 ${log}" "the translation script exited with ${rc}; full output in ${log}")"; return 1; }
-  shaders_ok say || { echo "  $(m "有着色器没翻译成功或库文件不全，完整输出在 ${log}" "some shaders failed or library files are missing; full output in ${log}")"; return 1; }
-}
-shaders_ok || step "翻译全部着色器（首次较久）" shaders
-# 随着色器库走的清单：哪些着色器的运行时下标没能证明有界（宿主按库版本核对这份清单，版本对不上会报红并退回保守做法）
-head -1 "$HERE/dm/gfx/nvn/c1_full.tsv" 2> /dev/null | grep -q "b-$V " || step "出着色器下标清单" "$PY" "$T/c1_guard.py" "$DM_ROOT/build/cache/metal_shader_cache/b-$V" "$HERE/dm/gfx/nvn/c1_full.tsv"
 
-say "工作区就绪：${DM_ROOT}。"
-echo "  下一步先进入 setup 准备好的 Python 环境（构建与测试的脚本要用里面装的包）："
-echo "      source $DM_ROOT/build/cache/dm/venv/bin/activate"
-echo "  然后出 App：cd dm/ios && ./run.sh build（先在 dm/ios/local.env 里填 DM_TEAM_ID 与 DM_BUNDLE_ID；缺省同时面向 iPhone 与 iPad，只要 iPhone 加 DM_DEVICE_FAMILY=1）"
-echo "  Next, enter the Python environment setup prepared (the build and test scripts need the packages in it):  source $DM_ROOT/build/cache/dm/venv/bin/activate"
-echo "  Then build the app:  cd dm/ios && ./run.sh build   (fill DM_TEAM_ID and DM_BUNDLE_ID in dm/ios/local.env first; it targets both iPhone and iPad by default, add DM_DEVICE_FAMILY=1 for iPhone only)"
-echo "  $(m "想在这台 Mac 上直接玩：dm/tools/mac_app.sh 出一个 macOS App（见 docs/MAC.zh-CN.md）" "To play on this Mac directly: dm/tools/mac_app.sh builds a macOS App (see docs/MAC.md)")"
+run_setup() {   # $1 = Python; the rest goes to tools/setup_d3.py
+  local py=$1; shift
+  if [ "$PAUSE" = 1 ]; then "$py" "$HERE/tools/setup_d3.py" "$@"; finish $?; fi
+  exec "$py" "$HERE/tools/setup_d3.py" "$@"
+}
+
+# ---------------------------------------------------------------- Python
+ask() {
+  if [ "${D3_SETUP_YES:-}" = 1 ]; then echo "$1 [Y/n] y (D3_SETUP_YES=1)"; return 0; fi
+  local a
+  if ! { read -r -p "$1 [Y/n] " a < /dev/tty; } 2> /dev/null; then echo "$1 [Y/n] -> no (no terminal; D3_SETUP_YES=1 accepts)"; return 1; fi
+  case "$a" in ''|y|Y|yes|Yes|YES) return 0;; *) return 1;; esac
+}
+
+py_version() { "$1" -c 'import sys; print(sys.version.split()[0])' 2> /dev/null; }
+
+hint() {   # how to get Python 3.10+ with venv on this system
+  local v
+  echo "Install Python 3.10 or newer with its venv module, then run ./setup.sh again:" >&2
+  if [ "$(uname -s)" = Darwin ]; then
+    echo "  brew install python@3.12        (or the installer from https://www.python.org/downloads/macos/)" >&2
+  elif command -v apt-get > /dev/null 2>&1; then
+    v=$(${PY:-python3} -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2> /dev/null)
+    echo "  sudo apt install python3 python3-venv python3-pip${v:+   (for Python $v: python$v-venv)}" >&2
+  elif command -v dnf > /dev/null 2>&1; then echo "  sudo dnf install python3 python3-pip" >&2
+  elif command -v pacman > /dev/null 2>&1; then echo "  sudo pacman -S python python-pip" >&2
+  elif command -v zypper > /dev/null 2>&1; then echo "  sudo zypper install python3 python3-pip" >&2
+  else echo "  use your system's package manager, or https://www.python.org/downloads/" >&2
+  fi
+  echo "  (or point PYTHON=/path/to/python3 at one you already have)" >&2
+}
+
+PY= OLD=
+find_python() {   # sets PY: the first Python 3.10+, one with venv + ensurepip preferred (Windows' python3 store stub fails)
+  local c v first=
+  for c in ${PYTHON:-} python3.13 python3.12 python3.11 python3.10 python3 python; do
+    command -v "$c" > /dev/null 2>&1 || continue
+    if ! "$c" -c "$NEED_VER" > /dev/null 2>&1; then
+      v=$(py_version "$c"); [ -z "$v" ] || case "$OLD" in *" $c $v,"*) ;; *) OLD="$OLD $c $v,";; esac
+      continue
+    fi
+    if [ "$c" = "${PYTHON:-}" ] || "$c" -c 'import venv, ensurepip' > /dev/null 2>&1; then PY=$c; return 0; fi
+    [ -n "$first" ] || first=$c
+  done
+  PY=$first; [ -n "$PY" ]
+}
+
+no_python() {
+  echo "STOP: Python 3.10 or newer was not found${OLD:+ (only older ones:${OLD%,})}." >&2; hint; finish 1
+}
+
+fetch() {   # url file
+  if command -v curl > /dev/null 2>&1; then curl -fsSL -o "$2" "$1" && return 0; fi
+  if command -v wget > /dev/null 2>&1; then wget -q -O "$2" "$1" && return 0; fi
+  "$PY" -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' "$1" "$2"
+}
+
+make_venv() {   # $VENV with pip; without ensurepip (Debian / Ubuntu lacking python3-venv) pip comes from get-pip.py
+  local log="$RT/venv.log"
+  rm -rf "$VENV"; mkdir -p "$RT"
+  echo "   creating a virtual environment in $VENV"
+  if "$PY" -m venv "$VENV" > "$log" 2>&1 && "$(venv_py)" -m pip --version > /dev/null 2>&1; then return 0; fi
+  rm -rf "$VENV"
+  echo "   this Python cannot make a venv with pip (no ensurepip; on Debian / Ubuntu it is the python3-venv package)"
+  echo "   trying a venv without pip + pip from https://bootstrap.pypa.io/get-pip.py"
+  if "$PY" -m venv --without-pip "$VENV" >> "$log" 2>&1 && fetch https://bootstrap.pypa.io/get-pip.py "$RT/get-pip.py" \
+     && "$(venv_py)" "$RT/get-pip.py" --disable-pip-version-check --no-warn-script-location -q >> "$log" 2>&1 \
+     && "$(venv_py)" -m pip --version > /dev/null 2>&1; then
+    rm -f "$RT/get-pip.py"; return 0
+  fi
+  rm -rf "$VENV" "$RT/get-pip.py"
+  echo "STOP: could not create the Python virtual environment in $VENV with $PY ($(py_version "$PY"))." >&2
+  echo "Python said:" >&2; tail -n 5 "$log" | sed 's/^/  /' >&2
+  hint; finish 1
+}
+
+VPY=$(venv_py)
+if "$VPY" -c "$NEED_ALL" > /dev/null 2>&1; then run_setup "$VPY" "$@"; fi
+
+case "${1:-}" in
+  check|help|-h|--help)   # report with whatever Python there is; setup itself adds what is missing
+    find_python || { echo "== Python 3.10+: not found${OLD:+ (only older ones:${OLD%,})}" >&2; hint; finish 1; }
+    echo "== Python: $(command -v "$PY") (setup will add the missing packages in tools/.runtime/venv)"
+    run_setup "$PY" "$@";;
+esac
+
+echo "== Preparing Python for setup (only the first time)"
+find_python || no_python
+echo "   found Python: $(command -v "$PY") ($(py_version "$PY"))"
+echo "   Setup needs these Python packages from PyPI (~40 MB): ${PKGS[*]}"
+echo "   They go into $VENV only."
+ask "   Install them now?" || { echo "STOP: setup cannot run without them; run ./setup.sh again and answer Y." >&2; finish 1; }
+"$(venv_py)" -c "$NEED_VER" > /dev/null 2>&1 || make_venv
+VPY=$(venv_py)
+"$VPY" -m pip install --disable-pip-version-check "${PKGS[@]}" || { echo "STOP: pip could not install the packages (see above); check the internet connection and run ./setup.sh again." >&2; finish 1; }
+"$VPY" -c "$NEED_ALL" || { echo "STOP: the packages were installed but do not import (see above)." >&2; finish 1; }
+run_setup "$VPY" "$@"

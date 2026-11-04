@@ -1,4 +1,4 @@
-// [D3] Touch phase 3 (docs/TOUCH_DESIGN.md §7): the game's console UI seen from the host, on the game thread.
+// [D3] Touch phase 3 (docs/d3/TOUCH_DESIGN.md §7): the game's console UI seen from the host, on the game thread.
 //   DM_D3_UIDUMP=1   log every change of the UI focus (UI manager +0x50) / active control (+0x28); when the file dm/ui-dump-now appears,
 //                    write dm/ui-dump.tsv (visible controls: id, name, class, flags, rect in UI units / window pixels / picture fractions,
 //                    parent, layer, sibling index, activatable, focus handler, list data) and dm/ui-dump-raw.tsv (first 0x400 bytes of each
