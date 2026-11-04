@@ -60,6 +60,10 @@ android {
     // [DOOM / XC2] -PdmDriverAssets=<dir>: bundle <dir>/drivers/<name>/ (the Turnip 27 adrenotools package) as APK assets
     def driverAssets = project.findProperty('dmDriverAssets')
     if (driverAssets) sourceSets { main { assets.srcDirs += [driverAssets] } }
+    // [front] the unified front end's gamepad themes (overlay_default.tsv, themes/<pack>/; nx2android, MIT) kept in the repository at dm/android/front-assets
+    // (a copy of frontend-common/assets); left out when -PdmDriverAssets already brings them (frontend-common/tools/build_menu_apk.sh)
+    def frontAssets = file('../front-assets')
+    if (frontAssets.isDirectory() && !(driverAssets && new File(driverAssets.toString(), 'overlay_default.tsv').isFile())) sourceSets { main { assets.srcDirs += [frontAssets] } }
     sourceSets { main { res.srcDir(startupStrings.get().asFile); res.srcDir(launcherIcon.get().asFile) } }
     packaging { jniLibs { useLegacyPackaging true;   // extracted: adrenotools loads its hooks from nativeLibraryDir
          keepDebugSymbols += ['**/*.so'] } }

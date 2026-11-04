@@ -50,7 +50,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Locale;
 
-public class DmActivity extends Activity implements SurfaceHolder.Callback, DisplayManager.DisplayListener, InputManager.InputDeviceListener {
+public class DmActivity extends Activity implements SurfaceHolder.Callback, DisplayManager.DisplayListener, InputManager.InputDeviceListener, FrontMenu.Host, FrontMenu.Owner {
     static final boolean ETERNAL = "eternal".equals(BuildConfig.DM_GAME);   // [ETERNAL] DOOM Eternal: the DOOM front end, own data folder
     static final boolean XC2 = "xc2".equals(BuildConfig.DM_GAME);   // [XC2] Xenoblade Chronicles 2: the DOOM front end, own data folder
     static final boolean D3 = "d3".equals(BuildConfig.DM_GAME);   // [D3] Diablo III: Eternal Collection: the DOOM front end, own data folder
@@ -68,6 +68,16 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native void nativeTextResult(long id, boolean accepted, String text);
     // Platform services (jni_android.c): rumble needs the application Context; the motion sensors the display rotation; game controllers
     // (gamepad / joystick / d-pad sources) go to the native side, which answers whether the game took a key.
+    // [front] The unified front end (frontend-common, docs/FRONTEND_UNIFIED.md; the same names and signatures as nx2android's front_android.c): the
+    // pause menu holds the game (nativeHold), the graceful exit (nativeQuit), the Switch operation mode live (nativeOpmode / nativeSetOpmode)
+    static native void nativeHold(boolean on);
+    static native boolean nativeLookDelta(float dxDp, float dyDp, float tiltSecPerDp);   // [front] the shared DoomPadView asks; D3 uses D3PadView (not in this library)
+    static native void nativeQuit();
+    static native int nativeOpmode();
+    static native void nativeSetOpmode(int mode);
+    static final String FRONT_DATA_DIR = "Diablo3Mobile";   // Download/<this>: the player's data folder; save exports go to its saves/
+    private FrontMenu front;
+    private SaveTransfer saves;
     static native void nativeContext(Object context);
     static native void nativeRotation(int rotation);
     static native boolean nativePadKey(int device, int keyCode, boolean down);
@@ -110,10 +120,46 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         gameFrame.addView(view, new FrameLayout.LayoutParams(-1, -1));
         if (XC2 || D3) { gameFrame.setBackgroundColor(0xff000000); gameFrame.addOnLayoutChangeListener((lv, l0, t0, r0, b0, ol, ot, or0, ob) -> { if (r0 - l0 != or0 - ol || b0 - t0 != ob - ot) applyAspectLayout(); }); }
         setContentView(gameFrame);
-        immersive();
+        immersiveBars();
+        // [front] Back (the key, the gesture) opens / closes the pause menu; targetSdk 36 delivers it only through this callback on Android 13+
+        if (DOOM && android.os.Build.VERSION.SDK_INT >= 33) getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::backPressed);
     }
 
-    private void immersive() {
+    // ---- [front] FrontMenu.Host: what the pause menu asks of this port (frontend-common, docs/FRONTEND_UNIFIED.md)
+    private void backPressed() { if (front != null && started) front.back(); else finish(); }
+    @Override public void onBackPressed() { if (DOOM) backPressed(); else super.onBackPressed(); }
+    @Override public FrontMenu frontMenu() { return front; }
+    @Override public boolean ready() { return started; }
+    @Override public void hold(boolean on) { if (!libraryLoaded) return; try { nativeHold(on); } catch (UnsatisfiedLinkError e) { android.util.Log.e("dm", "nativeHold missing: the game is not paused (" + e.getMessage() + ")"); } }
+    @Override public void gameSettings() { showDoomSettings(); }
+    @Override public FrontMenu.Saves saves() { if (saves == null) saves = SaveTransfer.forGame(this, DATA_DIR); return saves; }
+    @Override public void quit() {
+        android.util.Log.i("dm", "[java] quit from the pause menu");
+        try { if (libraryLoaded) nativeQuit(); } catch (UnsatisfiedLinkError e) { /* an older library: just end */ }
+        finishAndRemoveTask(); System.exit(0);
+    }
+    @Override public void immersive() { immersiveBars(); }
+    // a save import asked for in the pause menu: done at the start, before the library loads and the game runs (SaveTransfer.applyPending)
+    private void applyPendingImport() {
+        String imp = ((SaveTransfer) saves()).applyPending();
+        if (imp != null) android.widget.Toast.makeText(this, imp.startsWith("!") ? imp.substring(1) : imp, android.widget.Toast.LENGTH_LONG).show();
+    }
+    @Override public String gameName() { return "Diablo III"; }
+    // [D3] the mode row: the Switch operation mode, live (nativeSetOpmode -> hle_oe.c dm_set_opmode, notifications 30 / 31; the widescreen patch
+    // covers both window sizes, hle_d3.c), and kept in the gear dialog's "handheld" pref (DM_OPMODE at the next start, as before); docked = the default
+    @Override public int modeKind() { return FrontMenu.MODE_OPMODE; }
+    @Override public boolean docked() {
+        try { if (libraryLoaded && started) return nativeOpmode() != 0; } catch (UnsatisfiedLinkError e) { /* the library has no nativeOpmode */ }
+        return !doomPrefs().getBoolean("handheld", false);
+    }
+    @Override public boolean setDocked(boolean on) {
+        try { nativeSetOpmode(on ? 1 : 0); } catch (UnsatisfiedLinkError e) { android.util.Log.e("dm", "nativeSetOpmode missing: " + e.getMessage()); return false; }
+        doomPrefs().edit().putBoolean("handheld", !on).apply(); startedHandheld = !on;
+        android.util.Log.i("dm", "[java] Switch mode -> " + (on ? "docked" : "handheld"));
+        return true;
+    }
+
+    private void immersiveBars() {
         WindowInsetsController c = getWindow().getInsetsController();
         if (c != null) { c.hide(WindowInsets.Type.systemBars()); c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE); }
     }
@@ -753,13 +799,14 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             File ext = getExternalFilesDir(null), internal = new File(getFilesDir(), "dm");
             File runtime = new File(internal, "out/main.patched.bin").canRead() || ext == null ? internal : new File(ext, "dm");
             try { Os.setenv("DM_DERIVED", new File(runtime, "derived.tsv").getAbsolutePath(), true); } catch (ErrnoException e) { showStartError(getString(R.string.dmAndroidStorage)); return; }
-            if (DOOM) applyDoomSettings();
+            if (DOOM) { applyPendingImport(); applyDoomSettings(); }   // [front] a requested save import first
             try { System.loadLibrary("dm"); libraryLoaded = true; }
             catch (UnsatisfiedLinkError error) { showStartError(getString(R.string.dmAndroidLibrary)); return; }
             nativeContext(getApplicationContext());
         }
         if (D3 && d3Pad == null) { d3Pad = new D3PadView(this); gameFrame.addView(d3Pad, new FrameLayout.LayoutParams(-1, -1)); updatePadVisibility(); }   // [D3] touch / gamepad layouts
         else if (DOOM && !D3 && doomPad == null) { doomPad = new DoomPadView(this); gameFrame.addView(doomPad, new FrameLayout.LayoutParams(-1, -1)); updatePadVisibility(); }   // [DOOM] on-screen controller
+        if (front == null && (d3Pad != null || doomPad != null)) front = new FrontMenu(this, this, d3Pad != null ? d3Pad : doomPad, gameFrame);   // [front] the pause menu over the pad
         if (touchOverlay == null && !DOOM) {   // [DOOM] the D2R touch layout does not apply; a DOOM layout comes later
             int[] gameIds = {R.string.dmAndroidAttack, R.string.dmAndroidSkill1, R.string.dmAndroidSkill2, R.string.dmAndroidSkill3, R.string.dmAndroidSkill4,
                 R.string.dmAndroidPortal, R.string.dmAndroidPotion1, R.string.dmAndroidPotion2, R.string.dmAndroidPotion3, R.string.dmAndroidPotion4,
@@ -862,7 +909,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         dialog.setOnDismissListener(d -> {
             if (inputDialog == dialog) inputDialog = null;
             if (!finished[0]) { finished[0] = true; nativeTextResult(id, false, ""); }
-            if (resumed) immersive();
+            if (resumed) immersiveBars();
         });
         dialog.setOnShowListener(d -> {
             Runnable check = () -> {
@@ -941,6 +988,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             || (source & InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD;
     }
     @Override public boolean dispatchKeyEvent(KeyEvent e) {
+        if (front != null && front.key(e)) return true;   // [front] the pause menu: Back / Home / Menu, its navigation; nothing reaches a held game
         if (DOOM && e.getAction() == KeyEvent.ACTION_DOWN) android.util.Log.i("dm", "[input] java key " + e.getKeyCode() + " source 0x" + Integer.toHexString(e.getSource()) + " device " + e.getDeviceId() + " started " + started + " dialog " + (inputDialog != null));
         if (started && inputDialog == null && (e.getAction() == KeyEvent.ACTION_DOWN || e.getAction() == KeyEvent.ACTION_UP)
             && (controller(e.getDevice(), e.getSource())
@@ -953,6 +1001,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         return super.dispatchKeyEvent(e);
     }
     @Override public boolean dispatchGenericMotionEvent(MotionEvent e) {
+        if (front != null && front.motion(e)) return true;   // [front] the menu's navigation by hat / stick; a held game gets no axes
         int src = e.getSource();
         if (started && inputDialog == null && e.getAction() == MotionEvent.ACTION_MOVE && e.getDevice() != null && !e.getDevice().isVirtual()
             && (src & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) {
@@ -993,12 +1042,12 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override public void onDisplayAdded(int id) { updateRefresh(); }
     @Override public void onDisplayRemoved(int id) { updateRefresh(); }
     @Override public void onDisplayChanged(int id) { updateRefresh(); }
-    @Override protected void onResume() { super.onResume(); resumed = true; immersive(); startHost(); updateRefresh(); if (d3Pad != null) d3Pad.setHostResumed(true); if (started) { nativeFocus(3); if (touchOverlay != null && bootFailure == 0) touchOverlay.setInputEnabled(true); } }
+    @Override protected void onResume() { super.onResume(); resumed = true; immersiveBars(); startHost(); updateRefresh(); if (d3Pad != null) d3Pad.setHostResumed(true); if (started) { nativeFocus(3); if (touchOverlay != null && bootFailure == 0) touchOverlay.setInputEnabled(true); } }
     @Override protected void onPause() { resumed = false; if (d3Pad != null) d3Pad.setHostResumed(false); if (inputDialog != null) inputDialog.dismiss(); releaseTouches(); if (touchOverlay != null) touchOverlay.setInputEnabled(false); if (started) nativeFocus(0); super.onPause(); }
     @Override protected void onStart() { super.onStart(); if (started) nativeFocus(2); }
     @Override protected void onStop() { if (started) nativeFocus(1); com.xiaoboluo.d2r.widget.HeroWidgetProvider.requestUpdate(this); super.onStop(); }
     @Override protected void onDestroy() { if (displays != null) displays.unregisterDisplayListener(this); if (inputs != null) inputs.unregisterInputDeviceListener(this); if (inputDialog != null) inputDialog.dismiss(); if (current.get() == this) current.clear(); super.onDestroy(); }
-    @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) immersive(); else releaseTouches(); }
+    @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) immersiveBars(); else releaseTouches(); }
 
     @Override public void surfaceCreated(SurfaceHolder h) {}
     @Override public void surfaceChanged(SurfaceHolder h, int format, int w, int ht) {

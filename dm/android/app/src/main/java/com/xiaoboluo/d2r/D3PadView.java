@@ -40,7 +40,7 @@ import java.util.Map;
 // ("gear_mode" / "gear_alpha", as in DoomPadView). With a real controller in use only ⚙ is shown and nothing is sent.
 // Output: the native controller channel of the pad (DmActivity.nativePadKey / nativePadAxes, device PAD_DEVICE), keycodes as
 // front_android.c maps them (Enter=A, Esc=B, R=X, F=Y, Q=L, E=R, Shift=ZL, Ctrl=ZR, Tab=+, M=-, d-pad, BUTTON_THUMBL/R = L3/R3).
-public class D3PadView extends View {
+public class D3PadView extends View implements FrontMenu.Pad {
     static final int PAD_DEVICE = DoomPadView.PAD_DEVICE;
     static final int SETTINGS = -1, MENU_TOGGLE = -2;   // not keys: open the gear dialog / switch menu mode
     static final String LAYOUT_TOUCH = "touch", LAYOUT_GAMEPAD = "gamepad", LAYOUT_DEFAULT = LAYOUT_GAMEPAD;
@@ -177,7 +177,7 @@ public class D3PadView extends View {
     private String posKey(String group) { return "d3_pos_" + layout + "_" + group; }
 
     // Gear dialog options (DmActivity.showD3Settings), all "doom_controls" except the picture shape.
-    void reloadSettings() {
+    @Override public void reloadSettings() {
         Context c = getContext();
         SharedPreferences p = c.getSharedPreferences("doom_controls", Context.MODE_PRIVATE);
         Context ui = c instanceof DmActivity ? ((DmActivity) c).d3Ui() : c;
@@ -195,6 +195,7 @@ public class D3PadView extends View {
         stretched = c.getSharedPreferences("doom_graphics", Context.MODE_PRIVATE).getInt("aspect", 0) == 1;
         iconsOn = p.getBoolean("d3_icons", true);
         hideSticks = p.getBoolean("d3_hide_sticks", true);
+        skinPack = p.getString("skin", PadSkin.CLASSIC);   // [front] PadSkin pack or classic
         String want = LAYOUT_TOUCH.equals(p.getString("d3_layout", LAYOUT_DEFAULT)) ? LAYOUT_TOUCH : LAYOUT_GAMEPAD;
         if (!want.equals(layout)) {
             releaseAll(); menuMode = false; layout = want; btns.clear();
@@ -374,7 +375,7 @@ public class D3PadView extends View {
     }
 
     // Lets go of everything this pad holds (focus lost, layout / mode switch, a controller took over, edit mode).
-    void releaseAll() {
+    @Override public void releaseAll() {
         boolean any = false;
         for (Btn b : btns) if (b.pointer >= 0) { if (b.key >= 0) key(b.key, false); b.pointer = -1; any = true; }
         if (left != null && left.pointer >= 0) { release(left, false); any = true; }
@@ -388,14 +389,32 @@ public class D3PadView extends View {
         if (any && !controllerMode && !editMode) DmActivity.nativePadAxes(PAD_DEVICE, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
-    private void openSettings() { if (getContext() instanceof DmActivity) ((DmActivity) getContext()).showDoomSettings(); }
+    // [front] the gear opens the unified pause menu (FrontMenu: game settings, gamepad, saves, mode, quit)
+    private void openSettings() { if (getContext() instanceof FrontMenu.Owner && ((FrontMenu.Owner) getContext()).frontMenu() != null) ((FrontMenu.Owner) getContext()).frontMenu().open(); else if (getContext() instanceof DmActivity) ((DmActivity) getContext()).showDoomSettings(); }
+    // ---- [front] FrontMenu.Pad
+    private Runnable editDone;
+    @Override public void startEdit(Runnable done) { editDone = done; startEdit(); }
+    @Override public boolean editing() { return editMode; }
+    @Override public void endEdit(boolean save) { endEdit(); }   // D3's editor keeps every drag at once ("Reset" / "Done" on its panel)
+    @Override public void resetLayout() { resetPlaces(); }
+    @Override public String prefsName() { return "doom_controls"; }
+    @Override public String[] sliderKeys() { return new String[] {"d3_opacity", "d3_scale"}; }
+    @Override public int[] sliderDefaults() { return new int[] {OPACITY_DEFAULT, SCALE_DEFAULT}; }
+    @Override public String[] presets() { return null; }   // the touch / gamepad layouts stay in the gear dialog
+    @Override public View view() { return this; }
+    private PadSkin skin; private String skinPack = PadSkin.CLASSIC;
+    private PadSkin skin() { if (skin == null) skin = new PadSkin(getContext()); skin.select(skinPack, PadSkin.layoutFor(getWidth(), getHeight())); return skin; }
+    private static String skinName(Btn b) {
+        switch (b.label) { case "A": return "a"; case "B": return "b"; case "X": return "x"; case "Y": return "y"; case "L": return "l"; case "R": return "r";
+            case "ZL": return "zl"; case "ZR": return "zr"; case "+": return "plus"; case "-": return "minus"; case "\u2699": return "menu"; case "R3": return "rs"; default: return null; }
+    }
 
     // ---------------- edit mode ----------------
     private int editPtr = -1; private Ctl editCtl; private float editAx, editAy, editX0, editY0;
     private final RectF resetRect = new RectF(), doneRect = new RectF(), panelRect = new RectF();
     void startEdit() { releaseAll(); editMode = true; iconGate(); invalidate(); }
-    private void endEdit() { editPtr = -1; editMode = false; iconGate(); invalidate(); }
-    private void resetLayout() {
+    private void endEdit() { editPtr = -1; editMode = false; iconGate(); invalidate(); Runnable d = editDone; editDone = null; if (d != null) d.run(); }
+    private void resetPlaces() {
         SharedPreferences.Editor e = getContext().getSharedPreferences("doom_controls", Context.MODE_PRIVATE).edit();
         for (Ctl k : all()) e.remove(posKey(k.group));
         e.apply(); pos.clear(); invalidate();
@@ -411,7 +430,7 @@ public class D3PadView extends View {
     private void editTouch(MotionEvent e, int a, int id, float x, float y) {
         switch (a) {
         case MotionEvent.ACTION_DOWN: case MotionEvent.ACTION_POINTER_DOWN:
-            if (resetRect.contains(x, y)) { resetLayout(); break; }
+            if (resetRect.contains(x, y)) { resetPlaces(); break; }
             if (doneRect.contains(x, y)) { endEdit(); break; }
             if (editPtr < 0) { Ctl c = hitAny(x, y); if (c != null) { editPtr = id; editCtl = c; editAx = ax(c); editAy = ay(c); editX0 = x; editY0 = y; } }
             break;
@@ -513,6 +532,7 @@ public class D3PadView extends View {
     private void drawStick(Canvas c, Stick s) {
         if (hideSticks && !editMode && s.pointer < 0) return;
         float x = sx(s), y = sy(s), r = rad(s), k = hideSticks && !editMode ? k() * 0.5f : k();
+        if (skin().draw(c, s == right ? "stick_r" : "stick_l", x, y, r, r, s.pointer >= 0, 0, s.x / r, s.y / r, k * skin.packAlpha(), getHeight())) return;   // [front]
         fill.setColor(0xffffffff); fill.setAlpha(Math.round(0x20 * k)); c.drawCircle(x, y, r, fill);
         line.setColor(editMode ? 0xffffd040 : 0xffffffff); line.setAlpha(editMode ? 0xe0 : Math.round(0x90 * k)); c.drawCircle(x, y, r, line);
         fill.setAlpha(Math.round((s.pointer >= 0 ? 0x80 : 0x40) * k)); c.drawCircle(x + s.x, y + s.y, r * 0.42f, fill);
@@ -525,6 +545,7 @@ public class D3PadView extends View {
         line.setColor(editMode ? 0xffffd040 : 0xffffffff); line.setAlpha(editMode ? 0xe0 : Math.round(0x90 * k));
         Bitmap ic = iconsOn && icons != null && b.key >= 0 ? icons.icon(b.key) : null;
         if (ic != null) { drawIconBtn(c, b, ic, x, y, r, k, on); return; }
+        if (drawSkinned(c, b, x, y, r, k, on)) return;   // [front] the pad's skin
         c.drawCircle(x, y, r, fill); c.drawCircle(x, y, r, line);
         float ts = touch() ? Math.max(12 * u(), 0.55f * r) : 15 * u();   // gamepad: the labels of DoomPadView's D3 pad
         text.setTextSize(ts); float w = text.measureText(b.label);
@@ -545,6 +566,22 @@ public class D3PadView extends View {
         float bx = x + r * 0.70f, by = y + r * 0.70f, br = Math.max(ts * 0.72f, text.measureText(b.label) * 0.62f);
         fill.setColor(0xff000000); fill.setAlpha(Math.round(0xb0 * k)); c.drawCircle(bx, by, br, fill);
         text.setColor(0xffffffff); text.setAlpha(Math.round(0xe0 * k)); c.drawText(b.label, bx, by + ts * 0.35f, text);
+    }
+    // [front] a button in the skin: by its label's name; the d-pad's four buttons are drawn as the skin's one d-pad, by the up button, at the group's centre
+    private boolean drawSkinned(Canvas c, Btn b, float x, float y, float r, float k, boolean on) {
+        PadSkin s = skin(); if (!s.on()) return false;
+        float sa = (b.key == SETTINGS ? 1 : s.packAlpha()) * k;
+        if (b.key == K_UP || b.key == K_DOWN || b.key == K_LEFT || b.key == K_RIGHT) {
+            if (!s.has("dpad")) return false;
+            if (b.key != K_UP) return true;
+            int bits = 0; float gap = 0;
+            for (Btn d : btns) if (d.group.equals(b.group)) { gap = Math.max(gap, (float) Math.hypot(cx(d) - ax(d), cy(d) - ay(d)));
+                if (d.pointer >= 0) bits |= d.key == K_UP ? PadTheme.UP : d.key == K_DOWN ? PadTheme.DOWN : d.key == K_LEFT ? PadTheme.LEFT : PadTheme.RIGHT; }
+            return s.draw(c, "dpad", ax(b), ay(b), gap + r, gap + r, false, bits, 0, 0, sa, getHeight());
+        }
+        String n = skinName(b); if (n == null) return false;
+        float w = n.equals("l") || n.equals("r") || n.equals("zl") || n.equals("zr") || n.equals("menu") ? r * 1.6f : r;
+        return s.draw(c, n, x, y, w, r, on, 0, 0, 0, sa, getHeight());
     }
     private void drawEditPanel(Canvas c) {
         float w = getWidth(), h = getHeight(), pw = Math.min(w * 0.8f, 440 * dp), bh = 44 * dp, bw = (pw - 36 * dp) / 2, top = h * 0.30f;
