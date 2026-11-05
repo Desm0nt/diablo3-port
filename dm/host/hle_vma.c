@@ -90,8 +90,10 @@ static void vma_log(const vma_stat_t *st, const char *tag) {
     if (nvn_dirty_stats) nvn_dirty_stats(&fa, &pr);
     if (nvn_dirty_vma_stats) nvn_dirty_vma_stats(&mf, &be, &rl, &rp, &sk, &bk);
     static uint64_t pfa; uint64_t dfa = fa - pfa; pfa = fa;
-    LOG("[vma]%s maps %d / max %d (guest AS %d: rw %d, r-- %d, --- %d, shared %d; alias %d, rw %d); write faults %llu (+%llu), host-write pages %llu, block extra pages %llu (unprotect block %d KiB), mprotect fails %llu, sticky pages %llu, relieves %llu (%llu pages)",
-        tag, st->total, max_map_count(), st->as_all, st->as_rw, st->as_ro, st->as_none, st->as_shared, st->alias_all, st->alias_rw,
+    // [D3] breadcrumbs (crash reports): the line carries the time since the host started, so a crash report shows how the map
+    // count went up to the end (one line per DM_VMA_LOG period and per relief event, nothing per frame)
+    LOG("[vma]%s at %.0f s maps %d / max %d (guest AS %d: rw %d, r-- %d, --- %d, shared %d; alias %d, rw %d); write faults %llu (+%llu), host-write pages %llu, block extra pages %llu (unprotect block %d KiB), mprotect fails %llu, sticky pages %llu, relieves %llu (%llu pages)",
+        tag, (now_ns() - g_t0_ns) / 1e9, st->total, max_map_count(), st->as_all, st->as_rw, st->as_ro, st->as_none, st->as_shared, st->alias_all, st->alias_rw,
         (unsigned long long)fa, (unsigned long long)dfa, (unsigned long long)pr, (unsigned long long)be, bk, (unsigned long long)mf, (unsigned long long)sk, (unsigned long long)rl, (unsigned long long)rp);
 }
 static void *vma_watch(void *arg) {

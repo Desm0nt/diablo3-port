@@ -8,6 +8,10 @@
 //                    topmost visible control under the point that is activatable / has its own focus handler / is a list, calls the game's
 //                    UI_SetFocus (main+0x327dd0) on it and holds A for 3 polls one poll later. DM_D3_UITAP=2: any visible control.
 //                    Test without the front end: a file dm/ui-tap-now holding "x y" queues the same tap (checked every 30 polls).
+//   DM_D3_UI_CRUMBS=1 (default; 0 = off) breadcrumbs for crash reports (boot.log -> Download/Diablo3Mobile/logs/crash.txt): with dump
+//                    and tap off, the reader still logs each change of the UI focus / active control (which menu or screen was up when the
+//                    game died), at most 8 lines a second (a flickering focus is summed up in the next line). Reads only, on the game
+//                    thread, two pointer reads a poll after the 2.7.7 sites check.
 // Everything is read through rd(): guest heap directly, main's image directly, anything else through process_vm_readv (a bad pointer
 // reads as "absent", never faults). Addresses: update 2.7.7 main, build-id 2607a74f; the entry points are checked word for word first.
 #ifdef DM_GAME_D3
@@ -49,7 +53,7 @@ static const struct { uint32_t off, w[4]; } k_sites[] = {
 };
 
 static uint8_t *g_base; static size_t g_size; static int g_ok = -1;   // -1 unchecked, 0 not this main, 1 ok
-static int g_dump_mode, g_tap_mode;
+static int g_dump_mode, g_tap_mode, g_crumbs;
 static char g_dir[1100];
 
 // ---- safe guest reads
@@ -73,7 +77,8 @@ static int setup(void) {
     g_ok = 0;
     const char *e = getenv("DM_D3_UIDUMP"); g_dump_mode = e && *e ? atoi(e) : 0;
     e = getenv("DM_D3_UITAP"); g_tap_mode = e && *e ? atoi(e) : 0;
-    if (!g_dump_mode && !g_tap_mode) return 0;
+    e = getenv("DM_D3_UI_CRUMBS"); g_crumbs = !(e && *e == '0');   // [D3] breadcrumbs: focus changes into boot.log (default on)
+    if (!g_dump_mode && !g_tap_mode && !g_crumbs) return 0;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) { g_base = g_mod[i].base; g_size = g_mod[i].size; }
     if (!g_base || g_size < O_G + 0x20) { LOG("【红】[d3ui] no main module"); return 0; }
     for (unsigned i = 0; i < sizeof k_sites / sizeof *k_sites; i++)
@@ -81,7 +86,7 @@ static int setup(void) {
             LOG("【红】[d3ui] main+%#x differs: not D3 update 2.7.7 (build 2607a74f), UI dump / tap off", k_sites[i].off); return 0; }
     if (*(uint64_t *)(g_base + O_GOT_G) != (uint64_t)(uintptr_t)(g_base + O_G)) { LOG("【红】[d3ui] GOT main+%#x does not point at main+%#x: off", O_GOT_G, O_G); return 0; }
     e = getenv("DM_RUNTIME_DIR"); snprintf(g_dir, sizeof g_dir, "%s", e && *e ? e : "dm");
-    LOG("[d3ui] on: dump %d, tap %d, trigger %s/ui-dump-now, game thread tid %d", g_dump_mode, g_tap_mode, g_dir, (int)gettid());
+    LOG("[d3ui] on: dump %d, tap %d, crumbs %d, trigger %s/ui-dump-now, game thread tid %d", g_dump_mode, g_tap_mode, g_crumbs, g_dir, (int)gettid());
     return g_ok = 1;
 }
 
@@ -297,13 +302,23 @@ void dm_d3_ui_pump(uint64_t *buttons) {
         atomic_store(&g_names_state, 1); pthread_t t;
         if (!pthread_create(&t, NULL, names_load, NULL)) pthread_detach(t); else atomic_store(&g_names_state, 0);
     }
-    if (!g_dump_mode) return;
+    if (!g_dump_mode && !g_crumbs) return;
     static uint64_t last_focus = 1, last_active = 1;
     uint64_t focus = rq(mgr + 0x50), active = rq(mgr + 0x28);
     if (focus != last_focus || active != last_active) {
-        LOG("[d3ui] focus %016llx %s | active %016llx %s", (unsigned long long)focus, name_of(focus), (unsigned long long)active, name_of(active));
+        if (g_dump_mode) LOG("[d3ui] focus %016llx %s | active %016llx %s", (unsigned long long)focus, name_of(focus), (unsigned long long)active, name_of(active));
+        else {   // [D3] breadcrumb: rate-limited to 8 lines a second; changes past that are counted into the next line
+            static uint64_t win_t; static unsigned win_n, skipped; uint64_t now = now_ns();
+            if (now - win_t > 1000000000ull) { win_t = now; win_n = 0; }
+            if (win_n++ < 8) {
+                LOG("[d3ui] crumb %.1f s: focus %016llx %s | active %016llx %s%s", (now - g_t0_ns) / 1e9, (unsigned long long)focus, name_of(focus),
+                    (unsigned long long)active, name_of(active), skipped ? " (more changes before this one were not logged)" : "");
+                skipped = 0;
+            } else skipped++;
+        }
         last_focus = focus; last_active = active;
     }
+    if (!g_dump_mode) return;
     if (tick % 30 == 0) {
         char t[1200]; snprintf(t, sizeof t, "%s/ui-dump-now", g_dir);
         if (!access(t, F_OK)) { remove(t); dump(mgr); }

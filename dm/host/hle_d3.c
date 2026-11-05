@@ -218,9 +218,11 @@ static void ls_present_crop(int crop[4]) {
             LOG("[wide] loading screen (st %#llx +0x6c %u +0x70 %u): art UI -160.2..1120.2 -> px %.2f..%.2f x 0..%.1f (sx %.4f ox %.1f): %s",
                 (unsigned long long)st, s[0], s[1], fl, fr, fb, m[0], m[2], on ? "present crop below, stretched to the screen" : "fills the window, nothing to crop"); }
     }
+    // [D3] breadcrumbs (crash reports): each loading screen numbered, with the time since the host started (one line per change)
+    static int nth;
     if (on != was && logged < 400) { logged++;
-        if (on) LOG("[wide] loading screen: present %d,%d %dx%d of the window crop %d,%d %dx%d, stretched to the screen", c[0], c[1], c[2], c[3], crop[0], crop[1], crop[2], crop[3]);
-        else LOG("[wide] loading screen over: present the whole window %d,%d %dx%d again", crop[0], crop[1], crop[2], crop[3]); }
+        if (on) LOG("[wide] loading screen #%d at %.1f s: present %d,%d %dx%d of the window crop %d,%d %dx%d, stretched to the screen", ++nth, (now_ns() - g_t0_ns) / 1e9, c[0], c[1], c[2], c[3], crop[0], crop[1], crop[2], crop[3]);
+        else LOG("[wide] loading screen #%d over at %.1f s: present the whole window %d,%d %dx%d again", nth, (now_ns() - g_t0_ns) / 1e9, crop[0], crop[1], crop[2], crop[3]); }
     was = on;
     if (on) memcpy(crop, c, sizeof c);
 }

@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdatomic.h>
+#include <strings.h>   // strcasecmp ([res] breadcrumb)
 #include <sys/clonefile.h>
 #include <sys/xattr.h>
 
@@ -695,6 +696,28 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     fslog_init();
     if (g_fslog && fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = strdup(path); pthread_mutex_unlock(&g_fslog_lock); }
     if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → fd %d", (now_ns() - g_t0_ns) / 1e9, path, mode, fd);
+#ifdef DM_GAME_DOOM
+    // [DOOM] every save-storage file opened for writing (the commit that follows logs "存档提交 #n"; from the DOOM 2016 port)
+    else if (g_fsave[fd] && (mode & (MODE_WRITE | MODE_APPEND))) LOG("[save] open for writing %s (mode %d, size %lld)", path, mode, (long long)st.st_size);
+    // [DOOM] breadcrumb for crash logs (DOOM 2016 BUGS_AND_FIXES 2.22): the first open of each game archive, i.e. what the game was
+    // loading, one line per archive per run. [D3] the archives are CRI *.cpk (base, language packs, DLC under aoc/); DOOM's *.resources.
+#ifdef DM_GAME_D3
+    static const char k_arc_ext[] = ".cpk";
+#else
+    static const char k_arc_ext[] = ".resources";
+#endif
+    { size_t pl = strlen(path), el = sizeof k_arc_ext - 1;
+      if (pl > el && !strcasecmp(path + pl - el, k_arc_ext) && !(mode & (MODE_WRITE | MODE_APPEND))) {
+          static _Atomic uint64_t seen[512]; uint64_t h = 1469598103934665603ull;
+          for (const char *c = path; *c; c++) h = (h ^ (uint8_t)*c) * 1099511628211ull;
+          if (!h) h = 1;
+          for (unsigned i = 0, k = (unsigned)h & 511; i < 512; i++, k = (k + 1) & 511) {
+              uint64_t z = 0;
+              if (atomic_load(&seen[k]) == h) break;
+              if (atomic_compare_exchange_strong(&seen[k], &z, h)) { LOG("[res] first open %s (%.1f s, %lld MB)", path, (now_ns() - g_t0_ns) / 1e9, (long long)(st.st_size >> 20)); break; }
+              if (z == h) break;
+          } } }
+#endif
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
