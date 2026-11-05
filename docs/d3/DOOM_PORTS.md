@@ -24,7 +24,7 @@ Forced crash: `kill -SEGV <pid>` while playing → next start: toast + `Download
 
 | DOOM | D3 | What |
 |---|---|---|
-| 60ec064, d002c02, 3865197, 7c0da0e, fc66617 | bd1ec6b (native), e5f64e0 (app) | default driver by GPU (Adreno 6xx/7xx bundled Turnip; 710/720/722 and 8xx their downloaded Turnip package; non-Adreno system), packages downloaded when online from DOOM's public `drivers/manifest.json` (SHA-256 checked; D3's repository is private, a copy is in `drivers/manifest.json`), packages for another GPU family / glibc builds / missing libraries hidden and never loaded (`DM_VK_DRIVER_FORCE=1` tries anyway), the take-over verified (`verified=1`), fallback message with the reason. D3's crash guard (two launches dying before the first frame → system driver) kept and merged |
+| 60ec064, d002c02, 3865197, 7c0da0e, fc66617 | bd1ec6b (native), e5f64e0 (app) | default driver by GPU (Adreno 6xx/7xx bundled Turnip; 710/720/722 and 8xx their downloaded Turnip package; non-Adreno system), packages downloaded when online from DOOM's public `drivers/manifest.json` (SHA-256 checked; the same manifest is copied into this repository as `drivers/manifest.json`), packages for another GPU family / glibc builds / missing libraries hidden and never loaded (`DM_VK_DRIVER_FORCE=1` tries anyway), the take-over verified (`verified=1`), fallback message with the reason. D3's crash guard (two launches dying before the first frame → system driver) kept and merged |
 
 ## Non-Adreno GPUs (Mali, PowerVR, Xclipse)
 
