@@ -63,8 +63,11 @@ New-Item -ItemType Directory -Force $fa | Out-Null
 if (Test-Path work/driver-assets/drivers) { Copy-Item -Recurse work/driver-assets/drivers $fa }
 Copy-Item -Recurse dm/android/front-assets/* $fa
 $drv = '-PdmDriverAssets=' + ((Resolve-Path $fa).Path -replace '\\', '/')
+if (-not (Get-Command $gradle -ErrorAction SilentlyContinue)) { throw "Gradle not found: '$gradle' (put gradle on PATH or set GRADLE to gradle.bat)" }
+$built = Join-Path $PWD 'dm/android/app/build/outputs/apk/debug/app-debug.apk'; if (Test-Path $built) { Remove-Item $built }   # never re-sign a stale APK
 & $gradle -p dm/android :app:assembleDebug '-PdmGame=d3' '-PdmAppId=org.diablo3.port' "-PdmPython=$python" "-PdmPrebuiltJni=$jni" --console plain $drv *> work/logs/gradle-apk.log
 if ($LASTEXITCODE) { throw 'APK build failed (work/logs/gradle-apk.log)' }
+if (-not (Test-Path $built)) { throw 'APK build produced no app-debug.apk (work/logs/gradle-apk.log)' }
 if (-not (Test-Path $keystore)) { throw "Keystore not found: $keystore (set DM_KEYSTORE; Android Studio creates ~/.android/debug.keystore, or: keytool -genkeypair -keystore <file> -alias androiddebugkey -storepass android -keypass android -keyalg RSA -validity 10000 -dname CN=Android)" }
 & $apksigner sign --ks $keystore --ks-pass "pass:$kspass" --key-pass "pass:$kspass" --ks-key-alias $alias --out $apk dm/android/app/build/outputs/apk/debug/app-debug.apk
 if ($LASTEXITCODE) { throw 'APK signing failed' }
