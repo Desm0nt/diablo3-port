@@ -31,6 +31,7 @@
 #include "nvn_adaptive_pace.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
+#include <sys/stat.h>
 #include "../tex/nvn_deswizzle.h"
 #include "../../host/dm_cpu.h"   // [DOOM] LSE or ARMv8.0 thunks (GitHub issue #10)
 #ifdef DM_GAME_DOOM
@@ -1897,6 +1898,12 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
 #ifdef DM_GAME_DOOM
     if (o->presents == 1 || o->presents % 300 == 0) LOG("[nvn] present #%llu (texture %d)", (unsigned long long)o->presents, idx);   // bring-up heartbeat
+    // [DOOM] (from the DOOM 2016 port, 3a0d4a7) On-demand dump while the game runs (e.g. stuck behind a loading screen): creating
+    // DM_RUNTIME_DIR/dump (D3: Download/Diablo3Mobile/dm/dump or files/dm/dump) makes the next check (every 300 presents, ~5 s) print what
+    // every guest thread waits on plus the graphics wait points into boot.log; the file is removed. Only a regular file triggers it.
+    if (o->presents % 300 == 0) { static char dump_path[1200]; const char *rd = getenv("DM_RUNTIME_DIR");
+        if (rd && !dump_path[0]) snprintf(dump_path, sizeof dump_path, "%s/dump", rd);
+        struct stat dst; if (dump_path[0] && !stat(dump_path, &dst) && S_ISREG(dst.st_mode)) { unlink(dump_path); crash_dump_now("dm/dump"); } }
 #endif
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
     // 第一次进局的读取画面：后台管线预热没跑完就在这里等它（读取画面多停一会儿），进局后不在提交线程现编管线。预热早已完成时一次判断即过
