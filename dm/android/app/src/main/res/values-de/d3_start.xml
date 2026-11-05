@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [D3] Start screens naming the game's own data folder Download/Diablo3Mobile (from the DOOM 2016 port, d89997e: its 13
+     languages, "DOOM Mobile" replaced); the shared dmAndroid* texts name d2r's Download/S2X/D2R Mobile. -->
+<resources>
+    <string name="d3_start_permission">Erlaube den Dateizugriff, damit das Spiel seine Dateien in Download/Diablo3Mobile lesen kann. Hier tippen, Zugriff erlauben und zurückkehren.</string>
+    <string name="d3_start_missing_data">Keine Spieldateien in Download/Diablo3Mobile gefunden. Führe auf dem PC setup mit deinen eigenen Spieldateien aus und kopiere den erzeugten Ordner „Diablo3Mobile“ in den Download-Ordner des Telefons.</string>
+    <string name="d3_start_missing_modules">Die gepatchten Spielmodule fehlen (Download/Diablo3Mobile/dm/out). Führe setup auf dem PC erneut aus und kopiere den ganzen Ordner „Diablo3Mobile“ noch einmal in den Download-Ordner des Telefons.</string>
+    <string name="d3_start_missing_shaders">Die Shader fehlen (Download/Diablo3Mobile/dm/shaders). Führe setup auf dem PC erneut aus und kopiere den ganzen Ordner „Diablo3Mobile“ noch einmal in den Download-Ordner des Telefons.</string>
+</resources>

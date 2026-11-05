@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [D3] Start screens naming the game's own data folder Download/Diablo3Mobile (from the DOOM 2016 port, d89997e: its 13
+     languages, "DOOM Mobile" replaced); the shared dmAndroid* texts name d2r's Download/S2X/D2R Mobile. -->
+<resources>
+    <string name="d3_start_permission">Дозвольте доступ до файлів, щоб гра могла прочитати свої файли в Download/Diablo3Mobile. Натисніть сюди, дозвольте доступ і поверніться.</string>
+    <string name="d3_start_missing_data">Файли гри не знайдено в Download/Diablo3Mobile. Запустіть на ПК setup зі своїми файлами гри й скопіюйте створену ним теку «Diablo3Mobile» до теки Download на телефоні.</string>
+    <string name="d3_start_missing_modules">Немає пропатчених модулів гри (Download/Diablo3Mobile/dm/out). Запустіть setup на ПК ще раз і знову скопіюйте всю теку «Diablo3Mobile» до Download на телефоні.</string>
+    <string name="d3_start_missing_shaders">Немає шейдерів (Download/Diablo3Mobile/dm/shaders). Запустіть setup на ПК ще раз і знову скопіюйте всю теку «Diablo3Mobile» до Download на телефоні.</string>
+</resources>

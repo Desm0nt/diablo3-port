@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [D3] Start screens naming the game's own data folder Download/Diablo3Mobile (from the DOOM 2016 port, d89997e: its 13
+     languages, "DOOM Mobile" replaced); the shared dmAndroid* texts name d2r's Download/S2X/D2R Mobile. -->
+<resources>
+    <string name="d3_start_permission">게임이 Download/Diablo3Mobile 안의 파일을 읽을 수 있도록 파일 접근을 허용하세요. 여기를 눌러 접근을 허용한 뒤 돌아오세요.</string>
+    <string name="d3_start_missing_data">Download/Diablo3Mobile에서 게임 파일을 찾지 못했습니다. PC에서 자신의 게임 파일로 setup을 실행한 뒤 만들어진 \"Diablo3Mobile\" 폴더를 휴대폰의 Download 폴더에 복사하세요.</string>
+    <string name="d3_start_missing_modules">패치된 게임 모듈이 없습니다(Download/Diablo3Mobile/dm/out). PC에서 setup을 다시 실행하고 \"Diablo3Mobile\" 폴더 전체를 휴대폰의 Download 폴더에 다시 복사하세요.</string>
+    <string name="d3_start_missing_shaders">셰이더가 없습니다(Download/Diablo3Mobile/dm/shaders). PC에서 setup을 다시 실행하고 \"Diablo3Mobile\" 폴더 전체를 휴대폰의 Download 폴더에 다시 복사하세요.</string>
+</resources>

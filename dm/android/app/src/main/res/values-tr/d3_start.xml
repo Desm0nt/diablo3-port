@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [D3] Start screens naming the game's own data folder Download/Diablo3Mobile (from the DOOM 2016 port, d89997e: its 13
+     languages, "DOOM Mobile" replaced); the shared dmAndroid* texts name d2r's Download/S2X/D2R Mobile. -->
+<resources>
+    <string name="d3_start_permission">Oyunun Download/Diablo3Mobile içindeki dosyalarını okuyabilmesi için dosya erişimine izin verin. Buraya dokunun, erişime izin verin ve geri dönün.</string>
+    <string name="d3_start_missing_data">Oyun dosyaları Download/Diablo3Mobile içinde bulunamadı. Bilgisayarda kendi oyun dosyalarınızla setup\'ı çalıştırın ve oluşturduğu \"Diablo3Mobile\" klasörünü telefonun Download klasörüne kopyalayın.</string>
+    <string name="d3_start_missing_modules">Yamalı oyun modülleri eksik (Download/Diablo3Mobile/dm/out). Bilgisayarda setup\'ı yeniden çalıştırın ve \"Diablo3Mobile\" klasörünün tamamını telefonun Download klasörüne yeniden kopyalayın.</string>
+    <string name="d3_start_missing_shaders">Gölgelendiriciler eksik (Download/Diablo3Mobile/dm/shaders). Bilgisayarda setup\'ı yeniden çalıştırın ve \"Diablo3Mobile\" klasörünün tamamını telefonun Download klasörüne yeniden kopyalayın.</string>
+</resources>

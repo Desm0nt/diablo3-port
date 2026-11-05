@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [D3] Start screens naming the game's own data folder Download/Diablo3Mobile (from the DOOM 2016 port, d89997e: its 13
+     languages, "DOOM Mobile" replaced); the shared dmAndroid* texts name d2r's Download/S2X/D2R Mobile. -->
+<resources>
+    <string name="d3_start_permission">请允许文件访问，游戏才能读取 Download/Diablo3Mobile 里的文件。点这里，允许访问后返回。</string>
+    <string name="d3_start_missing_data">在 Download/Diablo3Mobile 里没有找到游戏文件。请在电脑上用你自己的游戏文件运行 setup，再把它生成的「Diablo3Mobile」文件夹拷到手机的 Download 文件夹。</string>
+    <string name="d3_start_missing_modules">缺少打过补丁的游戏模块（Download/Diablo3Mobile/dm/out）。请在电脑上重新运行 setup，再把整个「Diablo3Mobile」文件夹重新拷到手机的 Download 文件夹。</string>
+    <string name="d3_start_missing_shaders">缺少着色器（Download/Diablo3Mobile/dm/shaders）。请在电脑上重新运行 setup，再把整个「Diablo3Mobile」文件夹重新拷到手机的 Download 文件夹。</string>
+</resources>
