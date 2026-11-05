@@ -15,6 +15,25 @@ another language, its language-pack DLC) and `prod.keys`, put them into `put-gam
 > **Tested so far on one device: Snapdragon 8 Gen 3 / Adreno 750 (Xiaomi 14 Ultra) with the bundled Mesa Turnip driver.**
 > Other GPUs are untested.
 
+## Screenshots
+
+Captured on the phone (Xiaomi 14 Ultra, Adreno 750, Mesa Turnip 27) with the widescreen option on: the game renders
+2000×900 at the screen's 20:9 shape (wider view, nothing stretched; loading screens are stretched to fill the screen).
+The counter in the top-left corner is the port's own FPS / frame time / GPU time overlay (it can be turned off). Game
+text in Russian from the language-pack DLC; on-screen controls in the touch-friendly gamepad layout.
+
+| | |
+|---|---|
+| ![Loading screen, stretched to the whole screen](docs/images/loading.jpg) | ![Arrival in New Tristram](docs/images/new_tristram.jpg) |
+| ![Fight in New Tristram](docs/images/town_fight.jpg) | ![Skills on the Old Tristram Road](docs/images/road_skills.jpg) |
+| ![Fight on the Old Tristram Road](docs/images/combat.jpg) | ![Inventory and paperdoll](docs/images/inventory.jpg) |
+| ![Quest journal](docs/images/quest_journal.jpg) | ![Pause menu (gear button)](docs/images/pause_menu.jpg) |
+
+The gear button opens the pause menu (the game stops, as with the Switch HOME menu); *Game settings…* holds the port's
+own options:
+
+![Port settings](docs/images/settings.jpg)
+
 ## What it is, and what it is not
 
 **It is:**
