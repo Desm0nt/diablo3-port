@@ -40,7 +40,19 @@ enum { BUSY_WAIT_MS = 2000 };
 // 跟踪区间 = 各内存池（MemoryPoolInitialize 登记）。池销毁后复用 live=0 的槽，信号处理里无锁扫描。
 // Tracked ranges = the memory pools (registered by MemoryPoolInitialize). After a pool is destroyed its live=0 slot is reused; the signal handler scans without locks.
 #define MAX_RANGE 4096   // 原为 256：内存池多于它时超出的池不跟踪，里面的贴图每次取用都当成脏的重传（暗黑实测峰值见内存读数行的「内存池」；塞尔达约 300 个，踩过）。扫描只到已用的槽数，容量大不增加开销 | was 256: with more memory pools than that the excess pools are untracked and their textures are treated as dirty and re-uploaded on every use (for Diablo's measured peak see "memory pools" in the memory readout line; Zelda has about 300 and hit this). The scan only covers slots in use, so a larger capacity costs nothing
-typedef struct { uintptr_t base, end; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; } range_t;
+typedef struct { uintptr_t base, end; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; _Atomic uint64_t *bgen; size_t bcap; } range_t;
+// [perf6] (from the DOOM 2016 port, 8ca23ae) DM_DIRTY_BLOCKS=1 (default 1; 0 = off): bgen[b] = newest page generation in block b
+// (64 pages = 256 KB), kept with a CAS max wherever a page generation is raised, so nvn_dirty_since skips clean blocks instead of
+// loading every page's generation (DOOM: -1.2 us per draw on the descriptor path). Same answers: a block summary is never lower than
+// its pages' generations (lowering a GEN_STICKY page back to "now" leaves the summary high, i.e. only slower, never wrong).
+enum { BLK_SHIFT = 6 };
+static int g_blocks = -1;
+static int blocks_on(void) { if (g_blocks < 0) { const char *e = getenv("DM_DIRTY_BLOCKS"); g_blocks = e ? (atoi(e) ? 1 : 0) : 1; } return g_blocks; }
+static void bgen_note(range_t *r, uintptr_t p, uint64_t g) {
+    if (!r->bgen) return;
+    _Atomic uint64_t *b = &r->bgen[p >> BLK_SHIFT]; uint64_t cur = atomic_load(b);
+    while (cur < g && !atomic_compare_exchange_weak(b, &cur, g)) {}
+}
 static range_t g_r[MAX_RANGE];
 static _Atomic int g_nr;
 static uintptr_t g_pg, g_shift;
@@ -109,7 +121,7 @@ static int unprotect_run(range_t *r, uintptr_t a, uintptr_t b) {
     int err = mp(r->base + (a << g_shift), (b - a) << g_shift, PROT_READ | PROT_WRITE);
     if (err) return err;
     uint64_t g = atomic_fetch_add(&g_now, 1) + 1;
-    for (uintptr_t k = a; k < b; k++) { atomic_store(&r->gen[k], g); atomic_store(&r->state[k], PG_NONE); }
+    for (uintptr_t k = a; k < b; k++) { atomic_store(&r->gen[k], g); bgen_note(r, k, g); atomic_store(&r->state[k], PG_NONE); }
     return 0;
 }
 static void restore_prot(range_t *r, uintptr_t a, uintptr_t b) { for (uintptr_t k = a; k < b; k++) atomic_store(&r->state[k], PG_PROT); }   // after a failed unprotect: still read-only
@@ -229,7 +241,10 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     } else {
         memset((void *)state, 0, np); memset((void *)gen, 0, np * sizeof *gen);
     }
-    r->base = base; r->end = end; r->state = state; r->gen = gen;
+    _Atomic uint64_t *bgen = r->bgen; size_t nb = (np >> BLK_SHIFT) + 1;   // [perf6] DM_DIRTY_BLOCKS
+    if (blocks_on()) { if (r->bcap < nb) { bgen = calloc(nb, sizeof *bgen); if (!bgen) die("dirty block table allocation failed (%zu)", nb); r->bcap = nb; } else memset((void *)bgen, 0, nb * sizeof *bgen); }
+    else bgen = NULL;
+    r->base = base; r->end = end; r->state = state; r->gen = gen; r->bgen = bgen;
     if (slot == n) atomic_store(&g_nr, n + 1);
     atomic_store_explicit(&r->live, 1, memory_order_release);
     pthread_mutex_unlock(&g_slot_mu);
@@ -269,7 +284,7 @@ void nvn_dirty_protect(const void *addr, size_t len) {
                 uint64_t now = atomic_load(&g_now);
                 for (uintptr_t k = run; k < i; k++) { if (atomic_load(&r->gen[k]) == GEN_STICKY) atomic_store(&r->gen[k], now); atomic_store(&r->state[k], PG_PROT); }
             } else {
-                for (uintptr_t k = run; k < i; k++) { atomic_store(&r->gen[k], GEN_STICKY); atomic_store(&r->state[k], PG_NONE); }
+                for (uintptr_t k = run; k < i; k++) { atomic_store(&r->gen[k], GEN_STICKY); bgen_note(r, k, GEN_STICKY); atomic_store(&r->state[k], PG_NONE); }
                 atomic_fetch_add(&g_now, 1); atomic_fetch_add(&g_sticky, i - run);
                 static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("【红】[vma] dirty tracker: protect of %p+%#lx failed errno=%d (VMA limit?): pages stay writable and count as always dirty; relieving", (void *)(r->base + (run << g_shift)), (unsigned long)((i - run) << g_shift), atomic_load(&g_mp_errno));
             }
@@ -321,6 +336,14 @@ int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) {
     if (!nvn_dirty_tracked(addr, len)) return 1;   // 未跟踪时保守视为脏，宁可多传也不显示旧内容 | When untracked, conservatively treat as dirty: better to upload more than to show stale content
     range_t *r = find((uintptr_t)addr);
     uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
+    if (r->bgen) {   // [perf6] block summary first: a block whose newest generation is <= stamp has no newer page
+        for (uintptr_t b = p >> BLK_SHIFT, bq = q >> BLK_SHIFT; b <= bq; b++) {
+            if (atomic_load(&r->bgen[b]) <= stamp) continue;
+            uintptr_t lo = b << BLK_SHIFT, hi = lo + (1u << BLK_SHIFT) - 1; if (lo < p) lo = p; if (hi > q) hi = q;
+            for (uintptr_t i = lo; i <= hi; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;
+        }
+        return 0;
+    }
     for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;   // 上传前最后一次写的代号 ≤ 戳；之后的写必 > 戳 | The generation of the last write before upload is <= the stamp; any later write must be > the stamp
     return 0;
 }
