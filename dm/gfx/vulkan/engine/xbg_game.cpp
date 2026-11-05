@@ -174,6 +174,13 @@ bool format_feature_flags2=false;
 // D32_SFLOAT). Transfers convert 16 <-> 24-bit depth with exact rounding; constant depth bias is rescaled to the finer depth unit.
 bool depth16_as_d24=false;
 uint32_t d16_to_d24(uint32_t k){return uint32_t((uint64_t(k)*2*16777215u+65535u)/(2*65535u));}
+// [nonadreno] (from the DOOM 2016 port, 8ca23ae) D24 stand-ins: AMD-based Xclipse has no D24 formats; NVN D24S8 (0x35) / X8_D24 (0x33)
+// are then stored as D32_SFLOAT_S8_UINT / D32_SFLOAT (chosen once from the format features at init, never on Adreno, which has D24).
+// Depth texels cross CPU<->GPU as 24-bit unorm in guest memory and as float in the image (d24_to_f32 / f32_to_d24 below).
+bool d24s8_as_d32s8=false,x8d24_as_d32=false;
+inline bool d24_remapped(uint32_t nvn_format){return (nvn_format==0x35 && d24s8_as_d32s8) || (nvn_format==0x33 && x8d24_as_d32);}
+inline float d24_to_f32(uint32_t v){return float(v&0xffffffu)/16777215.0f;}
+inline uint32_t f32_to_d24(float f){if(!(f>0))return 0;if(f>=1)return 0xffffffu;return uint32_t(f*16777215.0f+0.5f);}
 uint32_t d24_to_d16(uint32_t v){return uint32_t((uint64_t(v&0xffffffu)*2*65535u+16777215u)/(2*16777215u));}
 bool storage_without_format_listed(VkFormat f){
     switch(f){
@@ -1517,7 +1524,7 @@ VkFormat format(int f) {
         VK_FORMAT_R16G16B16A16_SFLOAT,VK_FORMAT_R16G16B16A16_UNORM,VK_FORMAT_R16G16B16A16_SNORM,VK_FORMAT_R16G16B16A16_UINT,VK_FORMAT_R16G16B16A16_SINT,
         VK_FORMAT_R32G32B32A32_SFLOAT,VK_FORMAT_R32G32B32A32_UINT,VK_FORMAT_R32G32B32A32_SINT,
         VK_FORMAT_S8_UINT,VK_FORMAT_D16_UNORM,VK_FORMAT_X8_D24_UNORM_PACK32,VK_FORMAT_D32_SFLOAT,VK_FORMAT_D24_UNORM_S8_UINT,VK_FORMAT_D32_SFLOAT_S8_UINT};
-    if(f>0 && f<int(sizeof(table)/sizeof(*table))) return table[f];
+    if(f>0 && f<int(sizeof(table)/sizeof(*table))){VkFormat v=table[f];if(v==VK_FORMAT_D24_UNORM_S8_UINT && d24s8_as_d32s8)return VK_FORMAT_D32_SFLOAT_S8_UINT;if(v==VK_FORMAT_X8_D24_UNORM_PACK32 && x8d24_as_d32)return VK_FORMAT_D32_SFLOAT;return v;}   // [nonadreno] D24 stand-ins
     // NVN ASTC 0x79-0x86 (LDR) / 0x87-0x94 (sRGB), order 4x4 5x4 5x5 6x5 6x6 8x5 8x6 8x8 10x5 10x6 10x8 10x10 12x10 12x12 = Vulkan order.
     if(f>=0x79 && f<=0x94){int k=(f-0x79)%14;return VkFormat(int(VK_FORMAT_ASTC_4x4_UNORM_BLOCK)+2*k+(f>=0x87?1:0));}
     // NVN BC 0x41-0x50: DXT1 RGB/RGBA, DXT3, DXT5, the same four sRGB, RGTC1 U/S, RGTC2 U/S, BPTC unorm/sRGB, BPTC sfloat/ufloat
@@ -1993,7 +2000,7 @@ void resolve_slot_writebacks(const void *slot){
 }
 void write_report(const PendingReport &r){
     uint64_t samples=0;auto e=epochs.find(r.epoch);if(e!=epochs.end()){e->second.advance_known();samples=e->second.prefix(r.count);}
-    uint64_t value=r.ts_value;if(timestamp_bits<64)value&=(uint64_t(1)<<timestamp_bits)-1;
+    uint64_t value=r.ts_value;if(timestamp_bits && timestamp_bits<64)value&=(uint64_t(1)<<timestamp_bits)-1;
     if(r.type==NVN_COUNTER_TYPE_SAMPLES_PASSED){++samples_reports;samples_reported+=samples;}
     NVNcounterData result{};result.counter=r.type==NVN_COUNTER_TYPE_SAMPLES_PASSED?samples:0;result.timestamp=uint64_t(double(value)*properties.limits.timestampPeriod*384.0/625.0);   // NVN 614.4 MHz ticks
     snapshot_invalidate(r.addr,sizeof(result));evguard::EngineRead er(reinterpret_cast<void*>(r.addr),sizeof(result));memcpy(reinterpret_cast<void*>(r.addr),&result,sizeof(result));
@@ -2076,6 +2083,7 @@ void append_depth_planes(std::vector<uint8_t> &data,std::vector<VkBufferImageCop
     if(packed)need(xbg_depth_extract(format,w,h,slices,packed,packed_bytes,row,image,
         f.depth_bytes?(widen?d16.data():data.data()+begin):nullptr,widen?d16.size():depth_bytes,f.stencil_bytes?data.data()+stencil_begin:nullptr,stencil_bytes)==0,"Invalid packed NVN depth upload extent");
     for(size_t i=0;i<d16.size()/2;i++){uint16_t k;memcpy(&k,&d16[i*2],2);uint32_t v=d16_to_d24(k);memcpy(data.data()+begin+i*4,&v,4);}
+    if(packed && f.depth_bytes==4 && d24_remapped(format))for(uint64_t i=0;i<pixels;i++){uint32_t v;memcpy(&v,data.data()+begin+i*4,4);float x=d24_to_f32(v);memcpy(data.data()+begin+i*4,&x,4);}   // [nonadreno] D24 -> D32F
     if(f.depth_bytes){auto r=region;r.bufferOffset=begin;r.imageSubresource.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT;copies.push_back(r);}
     if(f.stencil_bytes){auto r=region;r.bufferOffset=stencil_begin;r.imageSubresource.aspectMask=VK_IMAGE_ASPECT_STENCIL_BIT;copies.push_back(r);}
 }
@@ -2216,6 +2224,7 @@ Image &get_image_slow(const tex_t *t,bool upload){CPU_SCOPE(Image);
         VkImageUsageFlags usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         if(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)usage|=VK_IMAGE_USAGE_SAMPLED_BIT;
         if((t->d.flags&0x4) && (fp.optimalTilingFeatures&VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && (p->samples==VK_SAMPLE_COUNT_1_BIT || cfg.enabled_core.shaderStorageImageMultisample))usage|=VK_IMAGE_USAGE_STORAGE_BIT;
+        else if(t->d.flags&0x4){static unsigned told=0;if(told++<16)xbg_logf("NVN texture serial=%llu NVN fmt=%#x vk=%d requests storage use, but the format has no STORAGE_IMAGE feature (%#x) on this device: created without it; a later storage bind of it will fail",(unsigned long long)t->serial,t->d.format,int(p->fmt),unsigned(fp.optimalTilingFeatures));}   // [nonadreno]
         if(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)usage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         if(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)usage|=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
         VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};ci.imageType=t->d.target==2?VK_IMAGE_TYPE_3D:t->d.target==0||t->d.target==3?VK_IMAGE_TYPE_1D:VK_IMAGE_TYPE_2D;ci.format=p->fmt;ci.extent={p->width,p->height,p->depth};ci.mipLevels=p->levels;ci.arrayLayers=p->layers;ci.samples=p->samples;ci.tiling=VK_IMAGE_TILING_OPTIMAL;ci.usage=usage;ci.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
@@ -2371,6 +2380,7 @@ struct Shader {std::string key;uint32_t stage;VkShaderModule module{};std::vecto
     bool discards=true; // fragment shader may kill/demote (conservative default)
     XbgRasterFacts raster; // position input (vertex), declared outputs and SampleMask (fragment): first_draw_covers
     Buffer c1_buffer{};bool c1_ready=false;
+    std::string unusable;   // [nonadreno] non-empty: the device lacks a capability this module needs; no VkShaderModule, its draws are skipped
     int gs_gate_slot=-1;uint32_t gs_gate_offset=0,gs_gate_value=0; // [perf3] pass-through GS: uniform slot / byte / value of its switch (xbg_spirv_gs_passthru_gate)
     uint32_t pool_mask=0; // [ETERNAL] set-1 bindless pool arrays it reads (bindless::TEX2D/TEX3D/SAMP bits); stripped from bindings
     std::shared_ptr<const XbgPoolIdxProgram> pool_index; // [ETERNAL] how its pool indices are computed (bindless::analyze; null: none / not analysable)
@@ -2464,10 +2474,16 @@ void pipe_memo_fill(PipeMemoKey &k,const void *layout,const void *pass_def,VkRen
     k.rt_n=uint32_t(state.rt.n);k.colors=colors;k.depth=state.rt.depth!=nullptr;k.depth_format=state.rt.depth?uint32_t(state.rt.depth->d.format):0;
     const uint8_t *b=reinterpret_cast<const uint8_t*>(&state);memcpy(k.fixed,b+offsetof(State,attrib),sizeof k.fixed);memcpy(k.stencil,b+offsetof(State,blend_color),sizeof k.stencil);memcpy(k.tail,b+offsetof(State,patch_size),sizeof k.tail);
 }
+// [nonadreno] (from the DOOM 2016 port, 8ca23ae) With cap_soft set (module loaders), a missing capability we can degrade (2 Geometry,
+// 55/56 formatless storage reads/writes without VK_KHR_format_feature_flags2) does not abort: cap_gap names it and the caller marks the
+// module unusable.
+thread_local bool cap_soft=false;thread_local std::string cap_gap;
+void validate_capabilities(const std::vector<uint32_t> &w,uint32_t stage);
+std::string module_gap(const std::vector<uint32_t> &w,uint32_t stage){cap_soft=true;cap_gap.clear();validate_capabilities(w,stage);cap_soft=false;return cap_gap;}
 void validate_capabilities(const std::vector<uint32_t> &w,uint32_t stage){
     need(w.size()>=5 && w[0]==0x07230203,"Invalid packaged SPIR-V");bool group_operations=false;VkSubgroupFeatureFlags groups=0;
     for(size_t i=5;i<w.size();){uint32_t count=w[i]>>16,op=w[i]&65535;need(count && i+count<=w.size(),"Invalid SPIR-V instruction bounds");if(op>=333 && op<=366)group_operations=true;
-        if(op==17){uint32_t cap=w[i+1];bool ok=true;switch(cap){case 1:case 46:case 47:case 50:break;case 2:ok=cfg.enabled_core.geometryShader;break;case 3:ok=cfg.enabled_core.tessellationShader;break;case 10:ok=cfg.enabled_core.shaderFloat64;break;case 11:ok=cfg.enabled_core.shaderInt64;break;case 22:ok=cfg.enabled_core.shaderInt16;break;case 25:ok=cfg.enabled_core.shaderImageGatherExtended;break;case 32:ok=cfg.enabled_core.shaderClipDistance;break;case 33:ok=cfg.enabled_core.shaderCullDistance;break;case 35:ok=cfg.enabled_core.sampleRateShading;break;case 49:ok=cfg.enabled_core.shaderStorageImageExtendedFormats;break;case 55:ok=cfg.enabled_core.shaderStorageImageReadWithoutFormat;break;case 56:ok=cfg.enabled_core.shaderStorageImageWriteWithoutFormat;break;case 61:groups|=VK_SUBGROUP_FEATURE_BASIC_BIT;break;case 62:groups|=VK_SUBGROUP_FEATURE_VOTE_BIT;break;case 63:groups|=VK_SUBGROUP_FEATURE_ARITHMETIC_BIT;break;case 64:groups|=VK_SUBGROUP_FEATURE_BALLOT_BIT;break;case 65:groups|=VK_SUBGROUP_FEATURE_SHUFFLE_BIT;break;case 66:groups|=VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT;break;case 4427:ok=cfg.enabled_shader_draw_parameters;break;default:xbg_fatalf("Shader stage %u has unhandled capability %u",stage,cap);}if(!ok)xbg_fatalf("Shader stage %u requires disabled capability %u",stage,cap);}
+        if(op==17){uint32_t cap=w[i+1];bool ok=true;switch(cap){case 1:case 46:case 47:case 50:break;case 2:ok=cfg.enabled_core.geometryShader;if(!ok && cap_soft){cap_gap="geometryShader";ok=true;}break;case 3:ok=cfg.enabled_core.tessellationShader;break;case 10:ok=cfg.enabled_core.shaderFloat64;break;case 11:ok=cfg.enabled_core.shaderInt64;break;case 22:ok=cfg.enabled_core.shaderInt16;break;case 25:ok=cfg.enabled_core.shaderImageGatherExtended;break;case 32:ok=cfg.enabled_core.shaderClipDistance;break;case 33:ok=cfg.enabled_core.shaderCullDistance;break;case 35:ok=cfg.enabled_core.sampleRateShading;break;case 49:ok=cfg.enabled_core.shaderStorageImageExtendedFormats;break;case 55:ok=cfg.enabled_core.shaderStorageImageReadWithoutFormat || format_feature_flags2;if(!ok && cap_soft){cap_gap="shaderStorageImageReadWithoutFormat";ok=true;}break;case 56:ok=cfg.enabled_core.shaderStorageImageWriteWithoutFormat || format_feature_flags2;if(!ok && cap_soft){cap_gap="shaderStorageImageWriteWithoutFormat";ok=true;}break;case 61:groups|=VK_SUBGROUP_FEATURE_BASIC_BIT;break;case 62:groups|=VK_SUBGROUP_FEATURE_VOTE_BIT;break;case 63:groups|=VK_SUBGROUP_FEATURE_ARITHMETIC_BIT;break;case 64:groups|=VK_SUBGROUP_FEATURE_BALLOT_BIT;break;case 65:groups|=VK_SUBGROUP_FEATURE_SHUFFLE_BIT;break;case 66:groups|=VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT;break;case 4427:ok=cfg.enabled_shader_draw_parameters;break;default:xbg_fatalf("Shader stage %u has unhandled capability %u",stage,cap);}if(!ok)xbg_fatalf("Shader stage %u requires disabled capability %u",stage,cap);}
         if(op==10)xbg_fatalf("Shader stage %u declares extension requiring explicit backend support",stage);i+=count;
     }
     need((subgroup.supportedOperations&groups)==groups,"Required subgroup operations unavailable");if(group_operations)need(subgroup.supportedStages&(1u<<stage),"Actual subgroup operation unsupported in shader stage");
@@ -2598,6 +2614,27 @@ void gscull_rewrite(std::vector<uint32_t> &w,uint32_t stage,const char *key,cons
     xbg_logf("NVN GS culling shader=%s loader=%s tests off mask=%#x applied=%#x (2 occlusion, 4 small, 8 back face, 16 frustum, 0x200 identity slots; 0x800 index carrier)",key,loader,unsigned(mask&0x21e),applied);
 }
 bool warp32_enabled();   // defined below with warp32 (marker gfx-warp32)
+// [nonadreno] (from the DOOM 2016 port, 8ca23ae) shaderImageGatherExtended missing (some PowerVR / old Mali): the translator declares
+// ImageGatherExtended in every module, but core Vulkan only needs it for a non-constant Offset or ConstOffsets image operand. Without
+// the feature the capability is removed; such operands (if any) are dropped (the fetch then ignores its offset: approximate texels,
+// logged) instead of aborting. Never runs where the feature exists (Adreno has it).
+std::atomic<uint64_t> gather_ext_dropped{0};
+void gather_ext_rewrite(std::vector<uint32_t> &w,const char *key){
+    if(cfg.enabled_core.shaderImageGatherExtended || w.size()<5)return;
+    std::vector<uint32_t> out(w.begin(),w.begin()+5);size_t dropped=0;bool cap=false;
+    for(size_t i=5;i<w.size();){uint32_t n=w[i]>>16,op=w[i]&65535;if(!n || i+n>w.size())return;
+        if(op==17 && n==2 && w[i+1]==25){cap=true;i+=n;continue;}   // OpCapability ImageGatherExtended
+        size_t mi=0;if(op==87||op==88||op==91||op==92||op==95||op==98)mi=5;else if(op==89||op==90||op==93||op==94||op==96||op==97)mi=6;
+        if(mi && n>mi && (w[i+mi]&0x30)){
+            const uint32_t mask=w[i+mi];std::vector<uint32_t> ins(w.begin()+long(i),w.begin()+long(i+mi));uint32_t nm=mask&~0x30u;ins.push_back(nm);
+            size_t at=i+mi+1;const uint32_t order[8]={0x1,0x2,0x4,0x8,0x10,0x20,0x40,0x80};
+            for(uint32_t bit:order){if(!(mask&bit))continue;size_t k=bit==0x4?2:1;if(at+k>i+n)return;if(!(bit&0x30))ins.insert(ins.end(),w.begin()+long(at),w.begin()+long(at+k));at+=k;}
+            ins[0]=(uint32_t(ins.size())<<16)|op;out.insert(out.end(),ins.begin(),ins.end());++dropped;i+=n;continue;}
+        out.insert(out.end(),w.begin()+long(i),w.begin()+long(i+n));i+=n;}
+    if(!cap && !dropped)return;
+    w.swap(out);gather_ext_dropped+=dropped;
+    static std::atomic<unsigned> logged{0};if(dropped || logged.load()<4){if(logged++<64)xbg_logf("NVN gather-extended unavailable: shader=%s capability removed, %zu offset operand(s) dropped%s",key,dropped,dropped?" (texels approximate)":"");}
+}
 void lone_rewrite(std::vector<uint32_t> &words,uint32_t stage,const char *key,const char *loader){
     if(words.size()<5)return;bool ops=false;VkSubgroupFeatureFlags groups=0;
     for(size_t i=5;i<words.size();){uint32_t count=words[i]>>16,op=words[i]&65535;if(!count||i+count>words.size())return;
@@ -2811,7 +2848,8 @@ Shader *load_shader(const void *control,const void *code=nullptr){
     p->bindings.erase(std::remove_if(p->bindings.begin(),p->bindings.end(),[](const xbg_shader_binding &b){return b.source>=XBG_SOURCE_TEXTURE_POOL && b.source<=XBG_SOURCE_IMAGE_POOL;}),p->bindings.end());
     if(p->pool_mask){static unsigned told=0;if(told++<4)xbg_logf("NVN bindless: shader %s stage=%u reads pool arrays mask=%#x (set 1)",key.c_str(),h.stage,p->pool_mask);}
 #endif
-    gscull_rewrite(words,h.stage,key.c_str(),"runtime");lone_rewrite(words,h.stage,key.c_str(),"runtime");early_tests_rewrite(words,h.stage,key.c_str());invariant_rewrite(words,h.stage,key.c_str());validate_capabilities(words,h.stage);
+    gscull_rewrite(words,h.stage,key.c_str(),"runtime");lone_rewrite(words,h.stage,key.c_str(),"runtime");early_tests_rewrite(words,h.stage,key.c_str());invariant_rewrite(words,h.stage,key.c_str());gather_ext_rewrite(words,key.c_str());
+    {std::string gap=module_gap(words,h.stage);if(!gap.empty()){p->unusable=gap;xbg_logf("NVN shader %s stage=%u needs %s, which this device lacks: no module, its draws/dispatches are skipped",key.c_str(),h.stage,gap.c_str());}}   // [nonadreno]
     // [perf3] DOOM's culling GS is a pure position pass-through while its switch word is off: remember where the switch lives
     // (on the bundle's own SPIR-V, before any rewrite) so draw() can drop the stage (DM_GFX_GS_PASSTHRU, perf_round3.md).
     if(h.stage==3){std::vector<uint32_t> orig(h.spirv_bytes/4);memcpy(orig.data(),bytes.data()+offset,h.spirv_bytes);XbgGsPassGate g;
@@ -2831,7 +2869,7 @@ Shader *load_shader(const void *control,const void *code=nullptr){
     {bool unknown=false;p->storage_writes=spirv_storage_writes(words,unknown);if(unknown){for(auto &b:p->bindings)if(b.type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)p->storage_writes.insert(b.binding);}}
     if(h.stage==0){p->input_classes.resize(p->inputs.size());need(xbg_vertex_input_classes(words.data(),words.size(),p->inputs.data(),p->inputs.size(),p->input_classes.data())==0,"Unsupported vertex input scalar interface");}
     load_t3=timing_clock();
-    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};ci.codeSize=words.size()*4;ci.pCode=words.data();VK(vkCreateShaderModule(cfg.device,&ci,nullptr,&p->module));warm::register_module(p->module,key);Shader *out=p.get();shaders.emplace(key,std::move(p));++stats.shader_loads;++hud::shaders;const uint64_t load_t4=timing_clock();hud::shader_ns+=load_t4-load_t0;
+    if(p->unusable.empty()){VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};ci.codeSize=words.size()*4;ci.pCode=words.data();VK(vkCreateShaderModule(cfg.device,&ci,nullptr,&p->module));warm::register_module(p->module,key);}Shader *out=p.get();shaders.emplace(key,std::move(p));++stats.shader_loads;++hud::shaders;const uint64_t load_t4=timing_clock();hud::shader_ns+=load_t4-load_t0;
     xbg_logf("NVN shader %s stage=%u loaded words=%zu ms read=%.2f rewrite=%.2f analyse=%.2f module=%.2f reused=%d",key.c_str(),h.stage,words.size(),(load_t1-load_t0)/1e6,(load_t2-load_t1)/1e6,(load_t3-load_t2)/1e6,(load_t4-load_t3)/1e6,int(have_reused));return out;
 }
 // nvnProgramSetShaders assigns a new serial, and NVN shader control/code memory
@@ -2947,8 +2985,9 @@ VkShaderModule load_module(const std::string &key){
 #ifdef DM_GAME_ETERNAL
     {std::vector<xbg_shader_binding> bs(h.binding_count);if(h.binding_count)memcpy(bs.data(),b.data()+sizeof(h),bs.size()*sizeof(xbg_shader_binding));uint32_t mask=0;if(!bindless::rewrite(bs.data(),uint32_t(bs.size()),w,mask,key.c_str()))return VK_NULL_HANDLE;}
 #endif
-    gscull_rewrite(w,h.stage,key.c_str(),"warm");lone_rewrite(w,h.stage,key.c_str(),"warm");early_tests_rewrite(w,h.stage,key.c_str());invariant_rewrite(w,h.stage,key.c_str());quad_rewrite(w,h.stage,key.c_str(),"warm");warp_rewrite(w,h.stage,key.c_str(),"warm");tidy_rewrite(w);
+    gscull_rewrite(w,h.stage,key.c_str(),"warm");lone_rewrite(w,h.stage,key.c_str(),"warm");early_tests_rewrite(w,h.stage,key.c_str());invariant_rewrite(w,h.stage,key.c_str());gather_ext_rewrite(w,key.c_str());quad_rewrite(w,h.stage,key.c_str(),"warm");warp_rewrite(w,h.stage,key.c_str(),"warm");tidy_rewrite(w);
     if(keep_rewritten){std::lock_guard<std::mutex> l(mu);rewritten.emplace(key,w);}
+    if(!module_gap(w,h.stage).empty())return VK_NULL_HANDLE;   // [nonadreno] the device lacks a capability: the warm pipeline is not built
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};ci.codeSize=w.size()*4;ci.pCode=w.data();VkShaderModule m;if(vkCreateShaderModule(cfg.device,&ci,nullptr,&m)!=VK_SUCCESS)return VK_NULL_HANDLE;
     std::lock_guard<std::mutex> l(mu);auto ins=modules.emplace(key,m);if(!ins.second){vkDestroyShaderModule(cfg.device,m,nullptr);return ins.first->second;}return m;
 }
@@ -4824,7 +4863,12 @@ Descriptors &descriptors_stable(Commands &c,bool compute){
         {static unsigned n=0;if(n++<8)xbg_logf("NVN %s: descriptors rebuilt after a submission inside the build (try %d)",compute?"dispatch":"draw",tries+1);}
         if(tries==3){need(d.entry!=nullptr,"Descriptor build keeps ending the submission");return d;}}
 }
+bool skip_unusable(const char *what){   // [nonadreno] (from the DOOM 2016 port) a bound module lacks a device capability (Shader::unusable): skip, logged per module
+    for(unsigned st=0;st<6;st++){Shader *sh=state.shader[st];if(what[0]=='d' && st==5)continue;if(what[0]=='c' && st!=5)continue;
+        if(sh && !sh->unusable.empty()){static std::unordered_set<std::string> told;if(told.insert(sh->key).second)xbg_logf("NVN %s skipped: shader %s stage %u needs %s",what,sh->key.c_str(),st,sh->unusable.c_str());return true;}}
+    return false;}
 void draw(int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances=1,uint32_t first_instance=0,const GpuIndirect *gi=nullptr){
+    if(skip_unusable("draw"))return;
     if(missing_program){if(!(missing_program_skips++&(missing_program_skips-1)))xbg_logf("draws/dispatches skipped for missing shader bundles: %llu",(unsigned long long)missing_program_skips);return;}
 #if defined(DM_GAME_ETERNAL) || defined(DM_GAME_XC2) || defined(DM_GAME_D3)
     pipeguard::gload();
@@ -5146,6 +5190,7 @@ void after_dispatch(Commands &c){
 }
 const Buffer *dispatch_indirect=nullptr;   // [DOOM] DispatchComputeIndirect whose arguments are pending GPU results (see gpu_indirect_try)
 void dispatch(const p_dispatch &p){
+    if(skip_unusable("compute dispatch"))return;
     if(missing_program){if(!(missing_program_skips++&(missing_program_skips-1)))xbg_logf("draws/dispatches skipped for missing shader bundles: %llu",(unsigned long long)missing_program_skips);return;}
     preflight_cpu_reads();
     if(draw_log_fp)fprintf(draw_log_fp,"DISPATCH %u cs=%s %dx%dx%d\n",draw_log_n++,state.shader[5]?state.shader[5]->key.c_str():"-",p.x,p.y,p.z);CPU_SCOPE(Dispatch);provenance_log("DISPATCH shader=%s",state.shader[5]?state.shader[5]->key.c_str():"null");need(state.shader[5],"Dispatch has no genuine compute shader");need(p.x>=0 && p.y>=0 && p.z>=0,"Negative compute dispatch");if(!p.x||!p.y||!p.z)return;if(pipeguard::skipped(state.shader[5]->key))return;need(uint32_t(p.x)<=properties.limits.maxComputeWorkGroupCount[0] && uint32_t(p.y)<=properties.limits.maxComputeWorkGroupCount[1] && uint32_t(p.z)<=properties.limits.maxComputeWorkGroupCount[2],"Compute dispatch exceeds device limit");
@@ -5324,6 +5369,7 @@ void copy_texture_buffer(const p_copy_b2t &request,bool to_buffer){preflight_cpu
             gpu_sync(perf.sync_readback);staging.invalidate();invalidate_cpu_range(p.src,bytes);const uint8_t *dp=nullptr,*sp=nullptr;
             for(auto &r:copies){if(r.imageSubresource.aspectMask==VK_IMAGE_ASPECT_DEPTH_BIT)dp=static_cast<const uint8_t*>(staging.mapped)+(r.bufferOffset-staging.offset);else sp=static_cast<const uint8_t*>(staging.mapped)+(r.bufferOffset-staging.offset);}
             size_t pixels=size_t(p.r.width)*p.r.height*p.r.depth;
+            std::vector<uint8_t> d24c;if(dp && f.depth_bytes==4 && d24_remapped(p.tex->d.format)){d24c.resize(pixels*4);for(size_t i=0;i<pixels;i++){float x;memcpy(&x,dp+i*4,4);uint32_t v=f32_to_d24(x);memcpy(&d24c[i*4],&v,4);}dp=d24c.data();}   // [nonadreno] D32F -> D24
             std::vector<uint8_t> d16;if(dp && p.tex->d.format==0x32 && depth16_as_d24){d16.resize(pixels*2);for(size_t i=0;i<pixels;i++){uint32_t v;memcpy(&v,dp+i*4,4);uint16_t k=uint16_t(d24_to_d16(v));memcpy(&d16[i*2],&k,2);}dp=d16.data();}
             need(xbg_depth_merge(p.tex->d.format,p.r.width,p.r.height,p.r.depth,reinterpret_cast<void*>(p.src),bytes,row,image,dp,pixels*f.depth_bytes,sp,pixels*f.stencil_bytes)==0,"Packed NVN depth readback merge failed");
         }else im.gpu_written=true,provenance_write(im,__LINE__);
@@ -5808,8 +5854,15 @@ void execute(const uint8_t *pc,unsigned depth,uint64_t &budget){
             if(type!=NVN_COUNTER_TYPE_TIMESTAMP && type!=NVN_COUNTER_TYPE_SAMPLES_PASSED){static uint32_t told=0;if(!(told>>(type&31)&1)){told|=1u<<(type&31);xbg_logf("NVN counter report type %llu written as 0 (XC2)",(unsigned long long)type);}
                 cpu_access(addr,16,11);zc::mark(addr,16);invalidate_cpu_range(addr,16);memset(reinterpret_cast<void*>(addr),0,16);break;}
 #endif
-            need(type==NVN_COUNTER_TYPE_TIMESTAMP || type==NVN_COUNTER_TYPE_SAMPLES_PASSED,"Unsupported pipeline statistics query");need(timestamp_bits,"Queue family does not support GPU timestamps");++counter_ops[type==NVN_COUNTER_TYPE_TIMESTAMP?1:2];if(type==NVN_COUNTER_TYPE_SAMPLES_PASSED)samples_report_seen=true;
+            need(type==NVN_COUNTER_TYPE_TIMESTAMP || type==NVN_COUNTER_TYPE_SAMPLES_PASSED,"Unsupported pipeline statistics query");++counter_ops[type==NVN_COUNTER_TYPE_TIMESTAMP?1:2];if(type==NVN_COUNTER_TYPE_SAMPLES_PASSED)samples_report_seen=true;
             PendingReport r{addr,type,counter_epoch,epochs[counter_epoch].size(),nullptr,VK_NULL_HANDLE,0,0,false};
+            // [nonadreno] (from the DOOM 2016 port) a queue without timestamps (timestampValidBits 0): the report gets the CPU clock in
+            // GPU ticks at record time instead of aborting; samples reports still close the pass (their occlusion run).
+            if(!timestamp_bits){static bool told=false;if(!told){told=true;xbg_logf("NVN queue has no GPU timestamps: game timestamp reports use the CPU clock");}
+                r.slot=&recording_slot();r.ts_known=true;const double period=properties.limits.timestampPeriod>0?properties.limits.timestampPeriod:1.0;
+                r.ts_value=uint64_t(double(std::chrono::steady_clock::now().time_since_epoch().count())/period);
+                if(type==NVN_COUNTER_TYPE_SAMPLES_PASSED){Commands c;c.finish();}
+                pending_reports.push_back(r);break;}
             if(type==NVN_COUNTER_TYPE_TIMESTAMP && !heavy_timestamps && !ab_off("timestamps")){
                 // A bottom-of-pipe timestamp already waits for all earlier work and may be written inside a render pass: no pass
                 // end and no full barriers, so a timestamp report no longer splits a pass on a tiling GPU (4 per D2R frame).
@@ -5984,6 +6037,12 @@ extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t b
        const VkFormatFeatureFlags d24_needs=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_FORMAT_FEATURE_TRANSFER_SRC_BIT|VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
        bool d16_linear=(d16.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)!=0;depth16_as_d24=!d16_linear && (d24.optimalTilingFeatures&d24_needs)==d24_needs;
        xbg_logf("NVN depth16 stored as %s (D16 linear filtering=%u, X8_D24 features=%#x)",depth16_as_d24?"X8_D24":"D16",unsigned(d16_linear),d24.optimalTilingFeatures);
+       {const VkFormatFeatureFlags ds_needs=VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_TRANSFER_SRC_BIT|VK_FORMAT_FEATURE_TRANSFER_DST_BIT;   // [nonadreno] D24 stand-ins (Xclipse)
+        const VkFormatProperties &d24s8=format_properties(VK_FORMAT_D24_UNORM_S8_UINT),&d32s8=format_properties(VK_FORMAT_D32_SFLOAT_S8_UINT),&x8=format_properties(VK_FORMAT_X8_D24_UNORM_PACK32),&d32=format_properties(VK_FORMAT_D32_SFLOAT);
+        d24s8_as_d32s8=(d24s8.optimalTilingFeatures&ds_needs)!=ds_needs && (d32s8.optimalTilingFeatures&ds_needs)==ds_needs;
+        x8d24_as_d32=(x8.optimalTilingFeatures&ds_needs)!=ds_needs && (d32.optimalTilingFeatures&ds_needs)==ds_needs;
+        if(depth16_as_d24 && x8d24_as_d32)depth16_as_d24=false;   // no X8_D24 to widen D16 into
+        xbg_logf("NVN depth formats: D24S8 %s (features %#x), X8_D24 %s (features %#x)",d24s8_as_d32s8?"-> D32_SFLOAT_S8_UINT":"native",d24s8.optimalTilingFeatures,x8d24_as_d32?"-> D32_SFLOAT":"native",x8.optimalTilingFeatures);}
        xbg_logf("NVN compatibility format_feature_flags2=%d depth16_as_d24=%d",int(format_feature_flags2),int(depth16_as_d24));}
       for(size_t at=0;at<list.size();at+=900)xbg_logf("NVN caps extensions[%zu] %s",at/900,list.substr(at,900).c_str());
       xbg_logf("NVN caps api=%u.%u.%u driver=%u maxUBdyn=%u maxPerStageUB=%u minUBAlign=%llu maxBoundSets=%u",VK_API_VERSION_MAJOR(properties.apiVersion),VK_API_VERSION_MINOR(properties.apiVersion),VK_API_VERSION_PATCH(properties.apiVersion),properties.driverVersion,properties.limits.maxDescriptorSetUniformBuffersDynamic,properties.limits.maxPerStageDescriptorUniformBuffers,(unsigned long long)properties.limits.minUniformBufferOffsetAlignment,properties.limits.maxBoundDescriptorSets);}
