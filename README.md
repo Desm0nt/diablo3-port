@@ -12,8 +12,13 @@ another language, its language-pack DLC) and `prod.keys`, put them into `put-gam
 (or `bash setup.sh`), copy `work/Diablo3Mobile` to the phone's `Download` folder and install the APK (build it with
 `build.bat`, see *Building*).
 
+> [!WARNING]
 > **Tested so far on one device: Snapdragon 8 Gen 3 / Adreno 750 (Xiaomi 14 Ultra) with the bundled Mesa Turnip driver.**
-> Other GPUs are untested.
+> **Devices with Mali (Exynos, Dimensity, Tensor), PowerVR and Xclipse GPUs have not been tested at all** — the engine has
+> fallbacks for them, but expect problems. If something goes wrong on your device, please
+> [open an issue](https://github.com/Desm0nt/diablo3-port/issues) and **always attach the logs**:
+> `Download/Diablo3Mobile/logs/crash.txt` (written after a crash) and `Android/data/org.diablo3.port/files/dm/boot.log`
+> (+ `boot.prev.log`), and name your phone model and Android version. Without logs a report usually can't be acted on.
 
 ## Screenshots
 
@@ -241,6 +246,13 @@ MIT — see [LICENSE](LICENSE). The d2r-mobile copyright notice is kept; third-p
 ---
 
 ## По-русски
+
+> [!WARNING]
+> **Проверено только на одном устройстве: Snapdragon 8 Gen 3 / Adreno 750 (Xiaomi 14 Ultra).** Телефоны с GPU **Mali**
+> (Exynos, Dimensity, Tensor), **PowerVR** и **Xclipse** не тестировались вообще — обходы в движке есть, но проблемы
+> вероятны. Если что-то не работает, [откройте issue](https://github.com/Desm0nt/diablo3-port/issues) и **обязательно
+> приложите логи**: `Download/Diablo3Mobile/logs/crash.txt` (появляется после падения) и
+> `Android/data/org.diablo3.port/files/dm/boot.log` (+ `boot.prev.log`), укажите модель телефона и версию Android.
 
 **Diablo III Mobile** — нативный порт Diablo III: Eternal Collection для Nintendo Switch на Android. Оригинальный
 AArch64-код игры исполняется прямо на процессоре телефона (без эмулятора и JIT); небольшой хост подменяет системные
