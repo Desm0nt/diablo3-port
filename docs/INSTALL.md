@@ -33,8 +33,9 @@ by their content.
 
 **A phone:**
 
-- Android 12 or newer, 64-bit;
-- **Snapdragon with an Adreno GPU recommended** (tested on Snapdragon 8 Gen 3; other GPUs are untested);
+- Android 12 or newer, 64-bit (Android 10 and 11: the separate `-android10` APK, Step 6);
+- **Snapdragon with an Adreno GPU recommended** (tested on Snapdragon 8 Gen 3; Mali / PowerVR / Xclipse phones use their
+  own driver with engine fallbacks and are untested);
 - 8 GB of RAM or more;
 - about **17 GB free** in internal storage (+5–6 GB per language pack);
 - a USB cable (or another way to copy the folder to the phone).
@@ -136,6 +137,10 @@ The finished folder is **`work/Diablo3Mobile`** inside the setup folder.
 Install the APK from this repository's Releases page, or build it yourself (`build.bat`, see *Building* in the
 [README](../README.md)). Android asks you to allow installing apps from your browser or file manager the first time.
 
+- Android 12 or newer: `D3-port-debug.apk`.
+- Android 10 or 11: `D3-port-debug-android10.apk` (the same game built for older Android; it asks for the storage
+  permission instead of *All files access*; not yet tested on a real Android 10 device).
+
 ## Step 7. First launch
 
 1. Start **Diablo III Mobile**.
@@ -167,6 +172,9 @@ data* option turned on (and keep the ticket).
 selected under *Game language* in the gear dialog; restart the game afterwards.
 
 **Black screen or the app closes** — open the gear dialog → *Vulkan driver* → try *System*, restart the app. Then open an
-issue on this repository with the phone model, Android version and what happened.
+issue on this repository with the phone model, Android version and what happened, and attach
+`Download/Diablo3Mobile/logs/crash.txt`: after a crash the next start writes it there (with the log of the crashed run)
+and says so on screen. The log of the last run is `Download/Diablo3Mobile/logs/boot.log` (copied there when the app goes
+to the background).
 
 Technical details of the preparation (what each step does, running the tools by hand): [d3/GAME_FILES.md](d3/GAME_FILES.md).

@@ -87,7 +87,8 @@ Tested on **Snapdragon 8 Gen 3 / Adreno 750** (Xiaomi 14 Ultra) with Mesa Turnip
 
 - Only update **v1441792** (game patch 2.7.7) is supported; the patches and addresses are tied to its build id
   (`main` 2607a74f…, `sdk` 3ae34e68…).
-- Only one device has been tested; other Snapdragon devices may work, other GPUs (Mali, PowerVR, Xclipse) are untested.
+- Only one device has been tested; other Snapdragon devices may work, other GPUs (Mali, PowerVR, Xclipse) are untested
+  (the engine has fallbacks for them, see *Other GPUs*).
 - The offline game cannot use online features (seasons, clans, Battle.net co-op).
 - Long sessions (heat, memory) and the later acts have seen less testing than Act 1. Reports are welcome.
 - Many renderer and host fixes are still behind switches for A/B testing (`Download/Diablo3Mobile/dm/env`); see
@@ -146,8 +147,48 @@ Full guide: **[docs/INSTALL.md](docs/INSTALL.md)** (English) / **[docs/INSTALL.r
 
 The APK bundles **Mesa Turnip v27** (an adrenotools build of Mesa main for Adreno 6xx/7xx) and uses it by default; it
 falls back to the phone's own driver when Turnip does not load or finds no supported GPU. Your own adrenotools driver
-package can be copied into `Download/Diablo3Mobile/drivers/` and chosen in the gear dialog. Details and known packages:
-[drivers/README.md](drivers/README.md).
+package can be copied into `Download/Diablo3Mobile/drivers/` (the folder or the package zip as released) and chosen in the
+gear dialog. Details and known packages: [drivers/README.md](drivers/README.md).
+
+The default is picked per GPU at every start (from the DOOM 2016 port): Adreno 6xx/7xx use the bundled Turnip;
+Adreno 710/720/722 and 8xx use their own Turnip package, which the app downloads when the phone is online (the list is
+DOOM Mobile's public [drivers/manifest.json](https://github.com/Desm0nt/doom-port/blob/main/drivers/manifest.json),
+each zip checked against its SHA-256); Mali, PowerVR, Xclipse and anything without the Adreno kernel driver use the
+phone's own driver, and Turnip packages are hidden there. A package for another GPU family, a Linux/glibc build
+(`*-EMULATOR.zip`) or one missing a library is not loaded and is hidden in the gear dialog with the reason. After loading,
+the app checks that the package's driver really took over; if not, or if it fails to start, the game runs on the system
+driver and a message says why. If two launches in a row end before the first frame with a custom driver, the system
+driver is chosen and saved (crash guard).
+
+## Other GPUs (Mali, PowerVR, Xclipse)
+
+Untested on real hardware. The engine checks the device's features and, instead of aborting, falls back where the
+game's Switch shaders need something the GPU lacks (all ported from the DOOM 2016 port): no geometry shaders, no
+format-less storage writes or `shaderImageGatherExtended` (those shaders are skipped or degraded), no D24 depth (D32
+is used), no GPU timestamps, no linear filtering of some formats (nearest), no depth bounds / non-solid fill / depth bias
+clamp, no `nullDescriptor`, texel buffer limits, driver pipeline failures (skipped instead of fatal), interrupted fence
+waits on Mali. BC textures, which Mali and PowerVR cannot sample, are decoded on the GPU in batches. One boot.log line
+lists what the device needed: `NVN fallbacks on this device: ...`. `DM_GFX_SIM_GPU=mali` (or `powervr`, `xclipse`) in
+`Download/Diablo3Mobile/dm/env` simulates such a GPU on a Snapdragon for testing. Reports (device, GPU, driver,
+`crash.txt`) are very welcome.
+
+## Android versions and CPUs
+
+- `D3-port-debug.apk`: Android 12 or newer (minSdk 31). `D3-port-debug-android10.apk` (`build_apk.ps1 -Android10`): the
+  same app for Android 10 and 11 (minSdk 29; asks for the storage permission there instead of *All files access*); it
+  also installs on newer Android. Not yet tested on a real Android 10 / 11 device.
+- 64-bit ARM only. ARMv8.0 CPUs without LSE atomics (Cortex-A53 / A57 / A72 / A73 phones, e.g. Snapdragon 6xx) are
+  supported: the port's own hand-written code picks an ARMv8.0 variant at start (`boot: cpu ...` line in boot.log).
+
+## Logs and crash reports
+
+Every start writes a fresh `boot.log` (the previous run is kept as `boot.prev.log`): the device, SoC, GPU, Vulkan driver
+choice, CPU features and the game's progress (archives opened, loading screens, menus, Vulkan driver status). When the
+game crashes or is killed while playing, the next start writes **`Download/Diablo3Mobile/logs/crash.txt`** (the previous
+one is kept as `crash.prev.txt`; without file access `Android/data/org.diablo3.port/files/logs/`) and shows a message:
+the device header, the reason, the start and end of that run's boot.log and the app's logcat. `boot.log` itself is
+copied next to it when the app goes to the background. Attach `crash.txt` to a bug report. Switches and details:
+[docs/d3/DOOM_PORTS.md](docs/d3/DOOM_PORTS.md).
 
 ## Repository layout
 
@@ -211,7 +252,20 @@ AArch64-код игры исполняется прямо на процессо�
   [docs/INSTALL.ru.md](docs/INSTALL.ru.md).** Технические подробности подготовки файлов —
   [docs/d3/GAME_FILES.md](docs/d3/GAME_FILES.md) (англ.), журнал порта — [docs/d3/D3_PORT.md](docs/d3/D3_PORT.md).
 - Проверено на одном устройстве: Snapdragon 8 Gen 3 / Adreno 750 (Xiaomi 14 Ultra) с драйвером Turnip из APK: меню и
-  геймплей Акта 1 — **60 fps**. Другие GPU не проверялись.
+  геймплей Акта 1 — **60 fps**. Другие GPU не проверялись; для Mali / PowerVR / Xclipse в движке есть фолбэки из порта
+  DOOM 2016 (без геометрических шейдеров, без D24, без BC — декод текстур на GPU и т. п.; строка
+  `NVN fallbacks on this device` в boot.log).
+- Драйвер выбирается по GPU при каждом запуске: Adreno 6xx/7xx — встроенный Turnip, Adreno 710/720/722 и 8xx — свой
+  пакет Turnip (скачивается, когда есть интернет, с проверкой SHA-256), Mali / PowerVR / Xclipse — системный. Пакет не
+  для этого GPU, glibc-сборка или пакет без нужной библиотеки не загружаются и скрыты в настройках с причиной; если
+  выбранный драйвер не подменил системный или не запустился — игра идёт на системном и показывает почему; два запуска
+  подряд без первого кадра — системный драйвер сохраняется.
+- Android 12+: `D3-port-debug.apk` (minSdk 31); Android 10 и 11: `D3-port-debug-android10.apk` (minSdk 29,
+  `build_apk.ps1 -Android10`; на настоящем Android 10 ещё не проверялся). Процессоры ARMv8.0 без LSE (Cortex-A53/A73,
+  Snapdragon 6xx) поддерживаются.
+- **Логи и отчёты о падении:** каждый запуск пишет новый `boot.log` (прошлый — `boot.prev.log`). После падения или
+  убийства во время игры следующий запуск пишет **`Download/Diablo3Mobile/logs/crash.txt`** (прошлый — `crash.prev.txt`)
+  и показывает сообщение; там же копия `boot.log`. Прикладывайте `crash.txt` к сообщениям об ошибках.
 - Широкий экран (Hor+, по форме экрана телефона), сенсорная раскладка под Diablo (плавающий стик, ходьба по касанию,
   кнопки навыков с иконками из HUD игры, жесты для меню), геймпады, вибрация, резкость RCAS, лимит 30 / 60 fps,
   единое меню паузы, скины геймпада, перенос сохранений.

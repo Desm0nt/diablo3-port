@@ -19,6 +19,8 @@ Each ported file says so in a comment and keeps the original copyright line.
 | AMD FidelityFX Super Resolution 1.0 (RCAS) | MIT, Copyright (c) 2021 Advanced Micro Devices, Inc. | https://github.com/GPUOpen-Effects/FidelityFX-FSR — `dm/android/shaders/rcas.comp` |
 | deko3d (layout size algorithm) | zlib, Copyright (C) 2018-2020 fincs | https://github.com/devkitPro/deko3d — `dm/gfx/nvn/nvn_tex.c` (inherited from d2r-mobile, see DEPENDENCIES.md) |
 | Mesa Turnip (adrenotools build by The412Banner) | MIT | https://github.com/The412Banner/Banners-Turnip — **not stored here**; `tools/fetch_turnip.py` downloads v27.0.0-20261029 at build time with a pinned SHA-256 and the APK bundles it as its default driver |
+| Granite (texture decode shaders) | MIT, Copyright (c) 2017-2026 Hans-Kristian Arntzen (shader headers: 2020-2026) | https://github.com/Themaister/Granite at 69f450c62dc3, `assets/shaders/decode/{bc6.comp,bc7.comp,bitextract.h}` — ported (modified) into `dm/gfx/vulkan/engine/xbg_bc_gpu.glsl` by the DOOM 2016 port (GPU BC decode, `DM_GFX_BC_DECODE=gpu`); licence and hashes in `dm/gfx/vulkan/engine/third_party/granite_decode/` |
+| DOOM Mobile (DOOM 2016 port) | MIT (this host) | https://github.com/Desm0nt/doom-port — logs and crash reports, driver choice and verification, non-Adreno fallbacks, GPU BC decode, ARMv8.0 thunks, Android 10 build: [d3/DOOM_PORTS.md](d3/DOOM_PORTS.md) |
 
 Only the parts that Diablo III (and the sibling ports sharing this host) use were ported, on an Adreno 750 target.
 Diablo III code is behind `DM_GAME_D3`; the DOOM / DOOM Eternal / Xenoblade 2 code behind `DM_GAME_DOOM` / `DM_GAME_ETERNAL` /
