@@ -71,4 +71,19 @@
     <string name="d3_pad_reset">Reset layout</string>
     <string name="d3_pad_done">Done</string>
     <string name="d3_hide_sticks">Sticks appear only under the finger (as D2R Mobile)</string>
+    <!-- [D3] crash reports and the driver check (from the DOOM 2016 port: CrashLog.java, its BUGS_AND_FIXES 2.22 / 2.25) -->
+    <string name="d3_toast_last_crash">The last Diablo III run ended unexpectedly. Report: %1$s</string>
+    <string name="d3_start_report">"Log for a bug report: "</string>
+    <string name="d3_toast_driver_unfit">Vulkan driver %1$s cannot run here: %2$s. The system driver is used.</string>
+    <string name="d3_driver_hidden">Hidden (cannot run on this phone, %1$s):</string>
+    <string name="d3_drv_no_adreno">it is for Adreno 6xx+ (Snapdragon) GPUs only</string>
+    <string name="d3_drv_no_mali">it is for Mali GPUs only</string>
+    <string name="d3_drv_no_xclipse">it is for Samsung Xclipse GPUs only</string>
+    <string name="d3_drv_no_powervr">it is for PowerVR GPUs only</string>
+    <string name="d3_drv_glibc">this is a Linux glibc build (for Winlator-style glibc containers); use the Android package of this driver (e.g. …-adrenotools.zip)</string>
+    <string name="d3_drv_not_taken_over">the driver did not load and the system driver ran instead (details in the log)</string>
+    <string name="d3_drv_no_gpu">the driver sees no GPU on this phone</string>
+    <string name="d3_drv_load_failed">the driver could not be opened</string>
+    <string name="d3_drv_no_library">the package has no driver library</string>
+    <string name="d3_drv_missing_lib">the package lacks a library</string>
 </resources>

@@ -70,4 +70,18 @@
     <string name="d3_pad_reset">Сбросить</string>
     <string name="d3_pad_done">Готово</string>
     <string name="d3_hide_sticks">Стики появляются только под пальцем (как в D2R Mobile)</string>
+    <string name="d3_toast_last_crash">Прошлый запуск Diablo III завершился неожиданно. Отчёт: %1$s</string>
+    <string name="d3_start_report">"Журнал для отчёта об ошибке: "</string>
+    <string name="d3_toast_driver_unfit">Драйвер Vulkan %1$s не подходит: %2$s. Используется системный драйвер.</string>
+    <string name="d3_driver_hidden">Скрыты (не подходят этому телефону, %1$s):</string>
+    <string name="d3_drv_no_adreno">он только для Adreno 6xx+ (Snapdragon)</string>
+    <string name="d3_drv_no_mali">он только для Mali</string>
+    <string name="d3_drv_no_xclipse">он только для Samsung Xclipse</string>
+    <string name="d3_drv_no_powervr">он только для PowerVR</string>
+    <string name="d3_drv_glibc">это сборка для Linux/glibc (эмуляторы вроде Winlator glibc), нужен Android-пакет этого драйвера (например …-adrenotools.zip)</string>
+    <string name="d3_drv_not_taken_over">драйвер не загрузился, вместо него работал системный (подробности в логе)</string>
+    <string name="d3_drv_no_gpu">драйвер не видит GPU этого телефона</string>
+    <string name="d3_drv_load_failed">драйвер не открылся</string>
+    <string name="d3_drv_no_library">в пакете нет библиотеки драйвера</string>
+    <string name="d3_drv_missing_lib">в пакете не хватает библиотеки</string>
 </resources>
