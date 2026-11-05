@@ -1,5 +1,9 @@
 # Build libdm.so (DM_GAME=d3) and the adrenotools hook libraries, package the Android app around them and sign it.
-# Usage (from anywhere): powershell -File tools/build_apk.ps1 [-Install <adb serial>] [-Validation]
+# Usage (from anywhere): powershell -File tools/build_apk.ps1 [-Install <adb serial>] [-Validation] [-Android10]
+# -Android10 (from the DOOM 2016 port, b573fda): the Android 10 build (minSdk 29) from work/build-android29, a native tree configured with
+#   -DANDROID_PLATFORM=android-29 (configured here from work/build-android's cache when missing); the same sources (Android 11+ calls are
+#   guarded), output work/D3-port-debug-android10.apk. Its native objects and jni folder (work/jni29) are separate, so both APKs can be built
+#   side by side.
 #
 # Needs a configured native build tree in work/build-android (see README.md, "Building"), and:
 #   JAVA_HOME        JDK 17+ (Gradle's Android plugin)
@@ -10,8 +14,9 @@
 #   DM_KEYSTORE_PASS keystore and key password (default: android); DM_KEY_ALIAS (default: androiddebugkey)
 #   DM_BUILD_TOOLS   build-tools version to sign with (default: the newest installed)
 # Keystores never go into this repository (.gitignore excludes *.keystore / *.jks).
-# Output: work/D3-port-debug.apk, application id org.diablo3.port ("Diablo III Mobile"; data folder Download/Diablo3Mobile on the phone).
-param([string]$Install = '', [switch]$Validation)
+# Output: work/D3-port-debug.apk (-Android10: work/D3-port-debug-android10.apk), application id org.diablo3.port ("Diablo III Mobile"; data
+# folder Download/Diablo3Mobile on the phone). Both variants have the same id and signature: one replaces the other on a phone.
+param([string]$Install = '', [switch]$Validation, [switch]$Android10)
 # Continue: Windows PowerShell turns any stderr line of a native tool (cmake GLOB notes, javac deprecation notes) into a stop;
 # every step checks $LASTEXITCODE instead
 $ErrorActionPreference = 'Continue'
@@ -29,10 +34,22 @@ $alias = Env-Or 'DM_KEY_ALIAS' 'androiddebugkey'
 $bt = Env-Or 'DM_BUILD_TOOLS' ((Get-ChildItem "$env:ANDROID_HOME/build-tools" -Directory | Sort-Object { [version]($_.Name -replace '[^0-9.].*$', '') } | Select-Object -Last 1).Name)
 $apksigner = Join-Path $env:ANDROID_HOME "build-tools/$bt/apksigner$(if ($IsWindows -or $env:OS -eq 'Windows_NT') { '.bat' })"
 $adb = Join-Path $env:ANDROID_HOME 'platform-tools/adb'
-$bdir = 'work/build-android'
-$jdir = 'work/jni'
-$apk = 'work/D3-port-debug.apk'
-if (-not (Test-Path $bdir/CMakeCache.txt)) { throw "Configure the native build first: cmake -S dm/android -B $bdir ... -DDM_GAME=d3 (README.md, Building)" }
+$bdir = if ($Android10) { 'work/build-android29' } else { 'work/build-android' }
+$jdir = if ($Android10) { 'work/jni29' } else { 'work/jni' }
+$minsdk = if ($Android10) { '29' } else { '31' }
+$apk = if ($Android10) { 'work/D3-port-debug-android10.apk' } else { 'work/D3-port-debug.apk' }
+if ($Android10 -and -not (Test-Path $bdir/CMakeCache.txt) -and (Test-Path work/build-android/CMakeCache.txt)) {
+    # The Android 10 tree: the same generator, toolchain, ninja, build type and game as work/build-android, platform android-29
+    $cache = Get-Content work/build-android/CMakeCache.txt
+    function Cache-Value([string]$key) { $l = $cache | Where-Object { $_ -match "^$([regex]::Escape($key)):[A-Z]+=" } | Select-Object -First 1; if ($l) { $l -replace '^[^=]*=', '' } else { '' } }
+    $cfg = @('-S', 'dm/android', '-B', $bdir, '-G', (Cache-Value 'CMAKE_GENERATOR'), "-DCMAKE_TOOLCHAIN_FILE=$(Cache-Value 'CMAKE_TOOLCHAIN_FILE')",
+        '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=android-29', "-DCMAKE_BUILD_TYPE=$(Cache-Value 'CMAKE_BUILD_TYPE')", '-DDM_GAME=d3')
+    $mk = Cache-Value 'CMAKE_MAKE_PROGRAM'; if ($mk) { $cfg += "-DCMAKE_MAKE_PROGRAM=$mk" }
+    New-Item -ItemType Directory -Force work/logs | Out-Null
+    & cmake @cfg *> work/logs/native-configure29.log
+    if ($LASTEXITCODE) { throw "Configuring $bdir failed (work/logs/native-configure29.log)" }
+}
+if (-not (Test-Path $bdir/CMakeCache.txt)) { throw "Configure the native build first: cmake -S dm/android -B $bdir ... -DDM_GAME=d3$(if ($Android10) { ' -DANDROID_PLATFORM=android-29' }) (README.md, Building)" }
 if (-not (Select-String -Path $bdir/CMakeCache.txt -Pattern '^DM_GAME:STRING=d3$' -Quiet)) { throw "$bdir is not configured with -DDM_GAME=d3" }
 New-Item -ItemType Directory -Force work/logs, $jdir/arm64-v8a | Out-Null
 
@@ -65,7 +82,7 @@ Copy-Item -Recurse dm/android/front-assets/* $fa
 $drv = '-PdmDriverAssets=' + ((Resolve-Path $fa).Path -replace '\\', '/')
 if (-not (Get-Command $gradle -ErrorAction SilentlyContinue)) { throw "Gradle not found: '$gradle' (put gradle on PATH or set GRADLE to gradle.bat)" }
 $built = Join-Path $PWD 'dm/android/app/build/outputs/apk/debug/app-debug.apk'; if (Test-Path $built) { Remove-Item $built }   # never re-sign a stale APK
-& $gradle -p dm/android :app:assembleDebug '-PdmGame=d3' '-PdmAppId=org.diablo3.port' "-PdmPython=$python" "-PdmPrebuiltJni=$jni" --console plain $drv *> work/logs/gradle-apk.log
+& $gradle -p dm/android :app:assembleDebug '-PdmGame=d3' '-PdmAppId=org.diablo3.port' "-PdmPython=$python" "-PdmPrebuiltJni=$jni" "-PdmMinSdk=$minsdk" --console plain $drv *> work/logs/gradle-apk.log
 if ($LASTEXITCODE) { throw 'APK build failed (work/logs/gradle-apk.log)' }
 if (-not (Test-Path $built)) { throw 'APK build produced no app-debug.apk (work/logs/gradle-apk.log)' }
 if (-not (Test-Path $keystore)) { throw "Keystore not found: $keystore (set DM_KEYSTORE; Android Studio creates ~/.android/debug.keystore, or: keytool -genkeypair -keystore <file> -alias androiddebugkey -storepass android -keypass android -keyalg RSA -validity 10000 -dname CN=Android)" }
