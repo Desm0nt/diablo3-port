@@ -6232,8 +6232,15 @@ void poll_retire(){
 unsigned retire_signalled(){
     unsigned n=0;
     for(int i=0;i<2;i++){Slot &o=slots[slot_index].pending?slots[slot_index]:slots[slot_index^1];
-        if(!o.pending || o.recording || vkGetFenceStatus(cfg.device,o.fence)!=VK_SUCCESS)break;
+        if(!o.pending || o.recording)break;
+        if(vkGetFenceStatus(cfg.device,o.fence)!=VK_SUCCESS){
+            // [D3] breadcrumb (crash reports / hangs): the oldest submission still unsignalled after 2 s of idle polling, once per submission
+            static uint64_t wait_serial=0,wait_t0=0,told_serial=0;const uint64_t now=timing_clock();
+            if(o.covers!=wait_serial){wait_serial=o.covers;wait_t0=now;}
+            else if(now-wait_t0>2000000000ull && told_serial!=o.covers){told_serial=o.covers;xbg_logf("NVN idle retire: submission %llu not signalled after %.1f s of idle polling (GPU still busy or hung; DM_GFX_CRUMBS=1 names the work)",(unsigned long long)o.covers,(now-wait_t0)/1e9);}
+            break;}
         SiteScope site(SITE_IDLE);retire_slot(o);++n;}
+    if(n){static bool first=true;if(first){first=false;xbg_logf("NVN idle retire: first submission retired by the translate thread on its own (mode %d)",idle_retire);}}   // [D3] breadcrumb
     idle_retired+=n;return n;
 }
 // The recording slot holds deferred results (a SignalEvent kept by gfx-defer-events 2, or a counter report) that only its
