@@ -23,21 +23,24 @@ static int aoc_owned(void) { static int v = -1; if (v < 0) { const char *e = get
 // 6 italian, 7 german, 8 korean, 9 portuguese_brazil, 10 russian, 11 chinese_china, 12 chinese_taiwan, 14 polish, 15 portuguese_portugal,
 // 16 japanese, 17 english_us; 100..102 cosmetic dlc.*). The game lists the add-ons, mounts each as "aoc_<index>" (hle_fs.c
 // h_fs_MountAoc -> DM_AOC/<index>) and reads a locale's archives there. Owned = DM_AOC/<index> holds a *_Common.cpk (the extracted
-// pack RomFS, tools/d3_dlc_romfs.py); DM_AOC_OWNED=0 reports none.
+// pack RomFS, tools/d3_dlc_romfs.py); the cosmetic item packs 100..102 (30th Anniversary, Prime Evil Collection, Heritage of Arreat)
+// hold only an entitlement marker NX64_AOC_<name>.data (34-35 bytes) that the game looks for in aoc_<index>:/, owned when it is
+// there; DM_AOC_OWNED=0 reports none.
 #include <dirent.h>
 static int g_d3_aoc[32], g_d3_aoc_n = -1;
 static void d3_aoc_scan(void) {
     if (g_d3_aoc_n >= 0) return;
     int n = 0; const char *a = getenv("DM_AOC");
-    for (int idx = 1; idx <= 17 && a && *a && n < (int)(sizeof g_d3_aoc / sizeof *g_d3_aoc); idx++) {
+    for (int idx = 1; idx <= 102 && a && *a && n < (int)(sizeof g_d3_aoc / sizeof *g_d3_aoc); idx = idx == 17 ? 100 : idx + 1) {
         char d[1100]; snprintf(d, sizeof d, "%s/%d", a, idx);
         DIR *dir = opendir(d); struct dirent *de; int hit = 0;
-        while (dir && !hit && (de = readdir(dir))) { size_t l = strlen(de->d_name); hit = l > 11 && !strcmp(de->d_name + l - 11, "_Common.cpk"); }
+        while (dir && !hit && (de = readdir(dir))) { size_t l = strlen(de->d_name);
+            hit = idx < 100 ? l > 11 && !strcmp(de->d_name + l - 11, "_Common.cpk") : !strncmp(de->d_name, "NX64_AOC_", 9) && l > 14 && !strcmp(de->d_name + l - 5, ".data"); }
         if (dir) closedir(dir);
-        if (hit) { g_d3_aoc[n++] = idx; LOG("aoc: language pack %d in %s", idx, d); }
+        if (hit) { g_d3_aoc[n++] = idx; LOG("aoc: %s %d in %s", idx < 100 ? "language pack" : "item pack", idx, d); }
     }
     g_d3_aoc_n = n;
-    if (!n) LOG("aoc: no language packs in %s/<index>", a && *a ? a : "(DM_AOC unset)");
+    if (!n) LOG("aoc: no language or item packs in %s/<index>", a && *a ? a : "(DM_AOC unset)");
 }
 static int aoc_owned(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_AOC_OWNED"); v = !(e && !strcmp(e, "0")); } if (!v) return 0; d3_aoc_scan(); return g_d3_aoc_n > 0; }
 #elif defined(DM_GAME_DOOM)   // [DOOM] AOC 1 = D2R "Reign of the Warlock"; Doom: no add-on content unless DM_AOC_OWNED=1

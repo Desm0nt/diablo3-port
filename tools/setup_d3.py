@@ -43,7 +43,7 @@ sys.path.insert(0, str(TOOLS))
 
 BASE_TID, UPDATE_TID, UPDATE_VERSION = 0x01001B300B9BE000, 0x01001B300B9BE800, 1441792
 AOC_BASE = BASE_TID + 0x1000                 # AOC title id = AOC_BASE + index
-LANG_PACKS = range(1, 18)                    # indices the host mounts (dm/host/hle_misc.c); 100..102 are cosmetic
+LANG_PACKS = list(range(1, 18)) + [100, 101, 102]   # indices the host mounts (dm/host/hle_misc.c): 1..17 language packs, 100..102 item packs (entitlement markers)
 BUILD_ID = '2607a74f5df7754cc0357b5df7e49693'
 SDK_BUILD_ID = '3ae34e689d7a35f13cbf42bfd672af8b'
 APP_ID, DATA_NAME = 'org.diablo3.port', 'Diablo3Mobile'
@@ -287,7 +287,7 @@ class Title:
         if self.mtype == 0x82:
             i = self.aoc_index
             extra = f' (index {i}' + (f', {LANG_NAMES[i]} language pack' if i in LANG_NAMES else
-                                      ', language pack' if i in LANG_PACKS else ', not used by the port') + ')'
+                                      ', item pack' if i >= 100 and i in LANG_PACKS else ', language pack' if i in LANG_PACKS else ', not used by the port') + ')'
         return f"{game}{META_TYPES.get(self.mtype, f'type {self.mtype:#x}')} {self.tid:016X} v{self.version}{extra}"
 
 
