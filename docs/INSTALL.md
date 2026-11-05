@@ -137,8 +137,8 @@ The finished folder is **`work/Diablo3Mobile`** inside the setup folder.
 Install the APK from this repository's Releases page, or build it yourself (`build.bat`, see *Building* in the
 [README](../README.md)). Android asks you to allow installing apps from your browser or file manager the first time.
 
-- Android 12 or newer: `D3-port-debug.apk`.
-- Android 10 or 11: `D3-port-debug-android10.apk` (the same game built for older Android; it asks for the storage
+- Android 12 or newer: `Diablo3-Mobile-v<version>-arm64.apk` from the [latest release](https://github.com/Desm0nt/diablo3-port/releases/latest) (`D3-port-debug.apk` when you build it yourself).
+- Android 10 or 11: `Diablo3-Mobile-v<version>-arm64-android10.apk` (the same game built for older Android; it asks for the storage
   permission instead of *All files access*; not yet tested on a real Android 10 device).
 
 ## Step 7. First launch

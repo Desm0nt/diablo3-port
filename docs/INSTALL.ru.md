@@ -136,8 +136,8 @@ Switch. Программа установки на ПК превращает в�
 Установите APK со страницы Releases этого репозитория или соберите сами (`build.bat`, см. «Building» в
 [README](../README.md)). При первой установке Android попросит разрешить установку приложений из браузера или файлового менеджера.
 
-- Android 12 и новее: `D3-port-debug.apk`.
-- Android 10 или 11: `D3-port-debug-android10.apk` (та же игра, собранная для старого Android; вместо «Доступа ко всем
+- Android 12 и новее: `Diablo3-Mobile-v<версия>-arm64.apk` из [последнего релиза](https://github.com/Desm0nt/diablo3-port/releases/latest) (`D3-port-debug.apk`, если собираете сами).
+- Android 10 или 11: `Diablo3-Mobile-v<версия>-arm64-android10.apk` (та же игра, собранная для старого Android; вместо «Доступа ко всем
   файлам» просит разрешение на хранилище; на настоящем Android 10 ещё не проверялась).
 
 ## Шаг 7. Первый запуск
