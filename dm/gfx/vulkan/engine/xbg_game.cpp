@@ -1859,7 +1859,9 @@ template<class F> void for_images_overlapping(uint64_t address,uint64_t bytes,F 
 // or vanished sun shadow, shadow_flicker.md round 2). Ending the pass stores the tiles and the full barrier orders the read.
 uint64_t read_break_why[8],depth_feedback_reads=0;int depth_feedback_on=-1;
 // default 2 since 28.10: the shadow atlas copy read its own just-written depth (desert shadow flicker gone on device)
-int depth_feedback_mode(){if(depth_feedback_on<0){const char *e=getenv("DM_GFX_DEPTH_FEEDBACK");depth_feedback_on=e?atoi(e):2;if(depth_feedback_on!=2)xbg_logf("NVN DM_GFX_DEPTH_FEEDBACK=%d",depth_feedback_on);}return depth_feedback_on;}
+// [nonadreno] default 0 off Adreno: the read of a depth attachment of the open pass is a feedback loop, undefined in Vulkan and
+// only seen to work on Adreno; a Mali-G57 (0.2.2-debug, black level with HUD) did ~12 a frame, the pass break costs ~12 splits.
+int depth_feedback_mode(){if(depth_feedback_on<0){const char *e=getenv("DM_GFX_DEPTH_FEEDBACK");depth_feedback_on=e && *e?atoi(e):properties.vendorID==0x5143?2:0;if(depth_feedback_on!=2)xbg_logf("NVN DM_GFX_DEPTH_FEEDBACK=%d%s",depth_feedback_on,e && *e?"":" (default off Adreno: open-pass depth reads end the pass)");}return depth_feedback_on;}
 bool depth_feedback(){return depth_feedback_mode()>0;}
 void read_break_log(unsigned why,Image &im,bool in_open);
 // storage: 1 = bound as a storage image (unordered with earlier storage writes, like NVN without a barrier), 0 = sampled,
