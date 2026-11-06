@@ -79,6 +79,37 @@ class Fail(Exception):
 def say(msg): print(f'== {msg}', flush=True)
 
 
+LOG_NAME = 'work/setup.log'
+
+
+class _Tee:
+    """Console output also goes to <work>/setup.log (attach it to bug reports); progress bars keep their carriage returns."""
+    def __init__(self, stream, f): self.stream, self.f = stream, f
+    def write(self, s):
+        self.stream.write(s)
+        try: self.f.write(s)
+        except (OSError, ValueError): pass
+        return len(s)
+    def flush(self):
+        self.stream.flush()
+        try: self.f.flush()
+        except (OSError, ValueError): pass
+    def __getattr__(self, k): return getattr(self.stream, k)
+
+
+def start_log(work):
+    global LOG_NAME
+    try:
+        work.mkdir(parents=True, exist_ok=True)
+        f = open(work / 'setup.log', 'a', encoding='utf-8', errors='replace')
+    except OSError:
+        return
+    LOG_NAME = str(work / 'setup.log')
+    import datetime, platform
+    f.write(f"\n===== setup {datetime.datetime.now():%Y-%m-%d %H:%M:%S}  Python {sys.version.split()[0]}  {platform.platform()}\n")
+    sys.stdout, sys.stderr = _Tee(sys.stdout, f), _Tee(sys.stderr, f)
+
+
 def stage(n):
     name, est = STAGES[n - 1]
     print(f'\n[{n}/{len(STAGES)}] {name}' + (f'  (usually {est})' if est else ''), flush=True)
@@ -621,19 +652,33 @@ def step_shaders(L, dn):
 def step_dlc(L, dlc, keys, keep_nsp):
     if not dlc: print('  no language-pack DLC among the files (optional: the game runs in English without it)'); return
     import d3_dlc_romfs
-    done = L.aoc_done()
+    done, failed = L.aoc_done(), []
     for t in dlc:
         i = t.aoc_index
         if i in done: print(f'  {t.describe()}: already done'); continue
         pkg, ncas = t.pkg.path, {n.split('.')[0].lower() for n in t.data}
         if t.compressed:
-            pkg = expand(L, f'dlc-{i}', t, t.data + [t.meta_entry])
+            try: pkg = expand(L, f'dlc-{i}', t, t.data + [t.meta_entry])
+            except (Exception, Fail) as e:
+                import traceback; traceback.print_exc(file=sys.stdout)
+                failed.append(t)
+                print(f'  !! {t.describe()}: expanding the {t.pkg.kind} failed ({type(e).__name__}: {e}); SKIPPED, the game works '
+                      f'without it. Details: {LOG_NAME}.', flush=True)
+                continue
         if (L.aoc / str(i)).exists(): shutil.rmtree(L.aoc / str(i))
         bar = Progress()
         print(f'  {t.describe()} -> aoc/{i}: verifying (IVFC), then writing the files', flush=True)
-        d3_dlc_romfs.extract(pkg, L.aoc, keys, verify_progress=lambda d, n: bar(f'verified {gb(d)} of {gb(n)}'),
-                             file_progress=lambda k, n, p: bar(f'file {k} of {n}', final=k == n),
-                             manifest=L.aoc_manifest, tid=t.tid, ncas=ncas)
+        try:
+            d3_dlc_romfs.extract(pkg, L.aoc, keys, verify_progress=lambda d, n: bar(f'verified {gb(d)} of {gb(n)}'),
+                                 file_progress=lambda k, n, p: bar(f'file {k} of {n}', final=k == n),
+                                 manifest=L.aoc_manifest, tid=t.tid, ncas=ncas)
+        except (Exception, Fail) as e:           # an optional pack never stops setup: the game runs without it
+            import traceback; traceback.print_exc(file=sys.stdout)
+            shutil.rmtree(L.aoc / str(i), ignore_errors=True)
+            failed.append(t)
+            print(f'  !! {t.describe()} could not be prepared ({type(e).__name__}: {e}); SKIPPED. The game works without it '
+                  f'(English / no extra items). Details: {LOG_NAME}. To retry it later run setup again; --no-dlc skips all DLC.', flush=True)
+    if failed: print(f'  {len(failed)} DLC skipped, the rest of the game folder is fine')
     cleanup_nsp(L, keep_nsp)
 
 
@@ -812,6 +857,7 @@ def check(L, files):
 # ---------------------------------------------------------------- prepare
 def prepare(a, L):
     steps = set(a.steps.split(','))
+    if getattr(a, 'no_dlc', False): steps.discard('dlc')
     shaders_needed = 'shaders' in steps and not a.skip_shaders and not L.shaders_ok()
     miss = missing_packages()
     if sys.version_info < (3, 10) or miss:
@@ -884,8 +930,14 @@ def prepare(a, L):
         step_shaders(L, dn or find_dotnet() or install_dotnet(a.yes)); print(f'  done in {took(t0)}')
     else: print('  already done' if L.shaders_ok() else '  skipped')
     t0 = stage(8)
-    if 'dlc' in steps: step_dlc(L, dlc, kf, a.keep_nsp); print(f'  done in {took(t0)}')
-    else: print('  skipped (--steps)')
+    if 'dlc' in steps:
+        try: step_dlc(L, dlc, kf, a.keep_nsp)
+        except (Exception, Fail) as e:           # DLC are optional: never lose the finished game folder over them
+            import traceback; traceback.print_exc(file=sys.stdout)
+            print(f'  !! the DLC step failed ({type(e).__name__}: {e}); the game folder is complete without DLC. '
+                  f'Details: {LOG_NAME}; --no-dlc skips this step.')
+        print(f'  done in {took(t0)}')
+    else: print('  skipped (--no-dlc)' if getattr(a, 'no_dlc', False) else '  skipped (--steps)')
     if not L.complete():
         say(f'finished the requested steps; the folder is not complete yet: {L.phone}'); return 0
     if a.push:
@@ -919,9 +971,11 @@ def main(argv=None):
     ap.add_argument('--keep-nsp', action='store_true')
     ap.add_argument('--skip-shaders', action='store_true')
     ap.add_argument('--skip-verify', action='store_true', help='do not run the patch equivalence check (dm/verify/equiv.py)')
+    ap.add_argument('--no-dlc', action='store_true', help='ignore all DLC (language and item packs): the game runs in English')
     ap.add_argument('--steps', default='exefs,patch,verify,romfs,shaders,dlc', help='comma list of steps to run (default: all)')
     a = ap.parse_args(argv)
     L = Layout(a.work)
+    start_log(Path(a.work))
     print('Diablo III Mobile setup: prepares the game folder for the phone from your own Diablo III (Switch) dumps.')
     return prepare(a, L)
 

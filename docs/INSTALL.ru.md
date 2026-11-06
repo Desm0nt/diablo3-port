@@ -164,6 +164,8 @@ Switch. Программа установки на ПК превращает в�
 **«personalized ticket» / «no ticket for rights id»** — снимите NSP заново с включённой опцией nxdumptool
 *remove console specific data* (и с тикетом).
 
+**Установка останавливается или пишет `!!` на этапе 8/8 (DLC)** — языковые и предметные паки необязательны: пак с ошибкой пропускается, папка игры всё равно собирается (игра тогда на английском). `setup.bat --no-dlc` / `bash setup.sh --no-dlc` пропускает все DLC. Каждый запуск пишется в `work/setup.log` — приложите его к issue.
+
 **«not enough free space»** — освободите место или вынесите рабочую папку на другой диск: `setup.bat --work D:\d3-work`
 (Windows) или `bash setup.sh --work /mnt/big/d3-work`.
 

@@ -165,6 +165,8 @@ console you dumped from, made with an up-to-date Lockpick_RCM. `title.keys` is a
 **"personalized ticket" / "no ticket for rights id"** — dump the NSP again with nxdumptool's *remove console specific
 data* option turned on (and keep the ticket).
 
+**Setup stops or shows `!!` at stage 8/8 (DLC)** — language and item packs are optional: a pack that fails is skipped and the game folder is still finished (the game then runs in English). `setup.bat --no-dlc` / `bash setup.sh --no-dlc` ignores all DLC. Every run is logged to `work/setup.log`: attach it to an issue.
+
 **"not enough free space"** — free some space, or put the work folder on another disk: `setup.bat --work D:\d3-work`
 (Windows) or `bash setup.sh --work /mnt/big/d3-work`.
 
