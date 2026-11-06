@@ -227,8 +227,8 @@ def main():
             if r.returncode: return key, 'spirv-opt inline failed', r.stderr.strip()[:200], None
             os.replace(f3, f2)
         spv = NS['add_format_caps'](open(f2, 'rb').read()); open(f2, 'wb').write(spv)
-        r = subprocess.run([VAL, '--target-env', 'vulkan1.1', f2], capture_output=True, text=True, errors='replace')
-        if r.returncode: return key, 'spirv-val failed', (r.stderr.strip() or r.stdout.strip() or '?').splitlines()[0][:200], None
+        r = subprocess.run([VAL, '--target-env', 'vulkan1.1', f2], capture_output=True, text=True, errors='replace') if VAL else None
+        if r and r.returncode: return key, 'spirv-val failed', (r.stderr.strip() or r.stdout.strip() or '?').splitlines()[0][:200], None
         res = json.load(open(os.path.join(work, key + '.res.json'), encoding='utf-8'))
         try: vk = NS['export'](key, stage, c1s[key], spv, res)
         except (ValueError, KeyError) as e: return key, 'export failed', re.sub(r'[^\x20-\x7e]+', ' ', str(e))[:200], None

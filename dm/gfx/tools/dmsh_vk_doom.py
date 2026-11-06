@@ -72,8 +72,14 @@ def decode_tex_doom(slots, h, image):
 NS['decode_tex'] = decode_tex_doom
 
 
-OPT, VAL = (os.environ.get(k, d) for k, d in (('SPIRV_OPT', 'spirv-opt'), ('SPIRV_VAL', 'spirv-val')))
+# SPIRV-Tools are optional (setup's own promise): without spirv-opt the capability trim is py_trim, without spirv-val the
+# check of each shader is skipped. None = not found.
+def find_tool(env, name):
+    p = os.environ.get(env) or name
+    return shutil.which(p) or (p if os.path.isfile(p) else None)
+OPT, VAL = find_tool('SPIRV_OPT', 'spirv-opt'), find_tool('SPIRV_VAL', 'spirv-val')
 INLINE_CS = os.environ.get('DM_VK_INLINE_CS') == '1'
+if INLINE_CS and not OPT: sys.exit('DM_VK_INLINE_CS=1 needs spirv-opt (SPIRV_OPT or PATH)')
 
 
 # ---- capability trim fallback (spirv-opt without --trim-capabilities) ----
@@ -117,6 +123,7 @@ def py_trim(spv):
 
 
 def opt_has_trim():
+    if not OPT: return False
     r = subprocess.run([OPT, '--help'], capture_output=True, text=True, errors='replace')
     return '--trim-capabilities' in r.stdout + r.stderr
 
@@ -207,6 +214,7 @@ def sha16(data): return hashlib.sha256(data).hexdigest()[:16]
 
 
 def tool_version(exe):
+    if not exe: return 'missing'
     r = subprocess.run([exe, '--version'], capture_output=True, text=True, errors='replace')
     t = (r.stdout.strip() or r.stderr.strip())
     return t.splitlines()[0] if t else 'missing'
@@ -291,8 +299,8 @@ def main():
             if r.returncode: return key, 'spirv-opt inline failed', r.stderr.strip()[:200], None
             os.replace(f3, f2)
         spv = NS['add_format_caps'](open(f2, 'rb').read()); open(f2, 'wb').write(spv)
-        r = subprocess.run([VAL, '--target-env', 'vulkan1.1', f2], capture_output=True, text=True, errors='replace')
-        if r.returncode: return key, 'spirv-val failed', (r.stderr.strip() or r.stdout.strip() or '?').splitlines()[0][:200], None
+        r = subprocess.run([VAL, '--target-env', 'vulkan1.1', f2], capture_output=True, text=True, errors='replace') if VAL else None
+        if r and r.returncode: return key, 'spirv-val failed', (r.stderr.strip() or r.stdout.strip() or '?').splitlines()[0][:200], None
         res = json.load(open(os.path.join(work, key + '.res.json'), encoding='utf-8'))
         try: vk = NS['export'](key, stage, c1s[key], spv, res)
         except (ValueError, KeyError) as e: return key, 'export failed', re.sub(r'[^\x20-\x7e]+', ' ', str(e))[:200], None
