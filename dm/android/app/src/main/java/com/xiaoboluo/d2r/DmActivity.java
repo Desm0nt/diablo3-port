@@ -444,15 +444,15 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             if (D3) { drv = driverHardwareCheck(p, drv); drv = driverGuardCheck(p, drv); }
             if (!drv.isEmpty()) Os.setenv("DM_VK_DRIVER", drv, true); else Os.unsetenv("DM_VK_DRIVER");
             // [D3] GPUs we could not test (no Adreno kernel driver: Mali, PowerVR, Xclipse): turn on the existing text diagnostics so one
-            // report shows what the renderer did - the NVN call trace (last calls in a crash report), the NVN calls of the first 120
-            // frames, a per-pass GPU profile (passes, targets, draws, pipelines) every 600 frames for the first ~2 minutes, and GPU
-            // breadcrumbs (which pass a GPU hang stopped in). Text only, no frame captures; dm/env still overrides each value.
+            // report shows what the renderer did - the NVN calls of the first 120 frames, a per-pass GPU profile (passes, targets,
+            // draws, pipelines) every 600 frames for the first ~2 minutes.
+            // Text only, no frame captures; dm/env still overrides each value. Not DM_NVN_TRACE: its wrapper takes the slot from x16,
+            // which only the guest thunks set - NVN functions the host calls through a slot pointer crashed it at boot (Mali, 0.2.1);
+            // GPU crumbs (DM_GFX_CRUMBS) stay off until they are checked on D3.
             if (D3 && !kgsl()) {
-                Os.setenv("DM_NVN_TRACE", "1", false);
                 Os.setenv("DM_NVN_FRAMES", "120", false);
                 Os.setenv("DM_GFX_PASS_PROF", "60 600 7200", false);
-                Os.setenv("DM_GFX_CRUMBS", "1", false);
-                crumb("diagnostics on (not an Adreno GPU: " + hardwareSummary() + "): NVN trace, NVN calls of 120 frames, pass profile for ~2 min, GPU crumbs");
+                crumb("diagnostics on (not an Adreno GPU: " + hardwareSummary() + "): NVN calls of 120 frames, pass profile for ~2 min");
             }
         } catch (ErrnoException e) { android.util.Log.e("dm", "doom settings: " + e); }
     }
