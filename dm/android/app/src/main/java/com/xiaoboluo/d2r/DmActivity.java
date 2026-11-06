@@ -147,6 +147,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override public void quit() {
         android.util.Log.i("dm", "[java] quit from the pause menu");
         if (DOOM) CrashLog.sessionEnd(this);   // [DOOM] a clean end: no crash report at the next start
+        CrashLog.stopLiveLogcat();
         try { if (libraryLoaded) nativeQuit(); } catch (UnsatisfiedLinkError e) { /* an older library: just end */ }
         if (DOOM && libraryLoaded) CrashLog.mirrorBootLogs(this);   // [DOOM] boot.log next to crash.txt (System.exit skips onStop)
         finishAndRemoveTask(); System.exit(0);
@@ -205,6 +206,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 android.widget.Toast.makeText(app, d3Ui().getString(R.string.d3_toast_last_crash, f.getAbsolutePath()), android.widget.Toast.LENGTH_LONG).show();
             }));
             if (last != null) crumb(last);
+            CrashLog.startLiveLogcat(app);   // [D3] logs/logcat.txt written live (survives a kill); after checkPrevious read the old run
         }
     }
     // A start / boot failure screen: the report now (the screen names it), once per message and process.

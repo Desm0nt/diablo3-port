@@ -55,6 +55,7 @@ final class CrashLog {
     static final long MIRROR_MAX = 8L << 20;
     static void mirrorBootLogs(Context c) {
         File log = bootLog(c), d = dir(c);
+        if (sameFile(log.getParentFile(), d)) return;   // [D3] the native side already writes boot.log into logs/ (jni_android.c)
         copyLog(log, new File(d, "boot.log"));
         copyLog(new File(log.getParentFile(), "boot.prev.log"), new File(d, "boot.prev.log"));
     }
@@ -75,10 +76,33 @@ final class CrashLog {
     // same rule as DmActivity.startHost; both are looked at so a change of that rule does not lose the log).
     static File bootLog(Context c) {
         File a = new File(c.getFilesDir(), "dm/boot.log"), ext = c.getExternalFilesDir(null), b = ext == null ? null : new File(ext, "dm/boot.log");
-        if (b == null || !b.isFile()) return a;
-        if (!a.isFile()) return b;
-        return a.lastModified() >= b.lastModified() ? a : b;
+        File pub = new File(new File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                                     DmActivity.FRONT_DATA_DIR + "/logs"), "boot.log");   // [D3] where jni_android.c writes it now
+        File best = a.isFile() ? a : null;
+        for (File f : new File[] { b, pub }) if (f != null && f.isFile() && (best == null || f.lastModified() > best.lastModified())) best = f;
+        return best != null ? best : a;
     }
+    static boolean sameFile(File x, File y) {
+        try { return x != null && y != null && x.getCanonicalPath().equals(y.getCanonicalPath()); } catch (IOException e) { return false; }
+    }
+
+    // ---- [D3] a live logcat of this process in logs/logcat.txt (the previous run's in logcat.prev.txt): logcat writes every line
+    // to the file as it comes, so a run the system kills (low memory, SIGKILL) keeps its lines up to the end, which a report built at
+    // the next start may miss once the ring buffer has moved on. An app reads its own lines without READ_LOGS. Rotates at
+    // LIVE_LOGCAT_KB (logcat.txt.1 kept); stopped on a clean end, dies with the process otherwise. DmActivity.startLiveLogcat.
+    static final int LIVE_LOGCAT_KB = 8192;
+    private static Process liveLogcat;
+    static synchronized void startLiveLogcat(Context c) {
+        if (liveLogcat != null) return;
+        File d = dir(c), f = new File(d, "logcat.txt"), prev = new File(d, "logcat.prev.txt");
+        if (f.isFile()) { prev.delete(); if (!f.renameTo(prev)) f.delete(); }
+        new File(d, "logcat.txt.1").delete();
+        try {
+            liveLogcat = new ProcessBuilder("logcat", "-v", "threadtime", "-b", "main,system,crash", "--pid=" + android.os.Process.myPid(),
+                "-f", f.getAbsolutePath(), "-r", String.valueOf(LIVE_LOGCAT_KB), "-n", "1").redirectErrorStream(true).start();
+        } catch (IOException e) { android.util.Log.w("dm", "live logcat: " + e); }
+    }
+    static synchronized void stopLiveLogcat() { if (liveLogcat != null) { liveLogcat.destroy(); liveLogcat = null; } }
 
     // ---- the session marker: the game is running (pid, state fg / bg / boot); removed on a clean end
     static void session(Context c, String state) {

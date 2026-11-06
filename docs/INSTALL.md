@@ -176,7 +176,8 @@ selected under *Game language* in the gear dialog; restart the game afterwards.
 **Black screen or the app closes** — open the gear dialog → *Vulkan driver* → try *System*, restart the app. Then open an
 issue on this repository with the phone model, Android version and what happened, and attach
 `Download/Diablo3Mobile/logs/crash.txt`: after a crash the next start writes it there (with the log of the crashed run)
-and says so on screen. The log of the last run is `Download/Diablo3Mobile/logs/boot.log` (copied there when the app goes
-to the background).
+and says so on screen. The same folder holds `boot.log` and `logcat.txt` of the current run and `boot.prev.log` /
+`logcat.prev.txt` of the one before, written line by line while the game runs (so they are there even when Android kills
+the game): attach the whole `logs` folder.
 
 Technical details of the preparation (what each step does, running the tools by hand): [d3/GAME_FILES.md](d3/GAME_FILES.md).
