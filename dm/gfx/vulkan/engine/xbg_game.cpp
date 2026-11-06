@@ -41,6 +41,7 @@ extern "C" int xbg_completion_wait_selftest(char *report,size_t bytes);
 #include "xbg_spirv_peep.h"     // [d3-perf] DOOM round-3 peepholes (f2i, texcoord guard)
 #include "xbg_selftest.h"        // [d3-perf][nonadreno] GPU self-test of the d3-perf switches off Adreno
 #include "xbg_spirv_temps.h"
+#include "xbg_vertex_retype.h"  // [nonadreno] vertex inputs declared with their attribute format's type (DM_GFX_VTX_RETYPE)
 #include "xbg_spirv_raster.h"
 #include "xbg_spirv_gspass.h"
 #include "xbg_spirv_poolidx.h"   // [ETERNAL] bindless residency: pool indices a draw can take
@@ -1871,6 +1872,11 @@ uint64_t read_break_why[8],depth_feedback_reads=0;int depth_feedback_on=-1;
 // default 2 since 28.10: the shadow atlas copy read its own just-written depth (desert shadow flicker gone on device)
 // [nonadreno] default 0 off Adreno: the read of a depth attachment of the open pass is a feedback loop, undefined in Vulkan and
 // only seen to work on Adreno; a Mali-G57 (0.2.2-debug, black level with HUD) did ~12 a frame, the pass break costs ~12 splits.
+// [nonadreno] DM_GFX_VTX_RETYPE (xbg_vertex_retype.h): a vertex input whose scalar type differs from its attribute format's (float
+// input over UINT data, ...) is declared with the format's type and bitcast back. Default on off Adreno: Mali converts the value
+// to the declared type (0.2.3-debug, Mali-G57: black level), Adreno passes the bits, so it stays as it was there.
+int vtx_retype_on=-1;uint64_t vtx_retype_variants=0,vtx_retype_refused=0;
+bool vtx_retype_mode(){if(vtx_retype_on<0){const char *e=getenv("DM_GFX_VTX_RETYPE");vtx_retype_on=e && *e?atoi(e)!=0:properties.vendorID!=0x5143;xbg_logf("NVN DM_GFX_VTX_RETYPE=%d%s",vtx_retype_on,e && *e?"":properties.vendorID==0x5143?" (default off on Adreno)":" (default on off Adreno: vertex inputs take their attribute format's type)");}return vtx_retype_on!=0;}
 int depth_feedback_mode(){if(depth_feedback_on<0){const char *e=getenv("DM_GFX_DEPTH_FEEDBACK");depth_feedback_on=e && *e?atoi(e):properties.vendorID==0x5143?2:0;if(depth_feedback_on!=2)xbg_logf("NVN DM_GFX_DEPTH_FEEDBACK=%d%s",depth_feedback_on,e && *e?"":" (default off Adreno: open-pass depth reads end the pass)");}return depth_feedback_on;}
 bool depth_feedback(){return depth_feedback_mode()>0;}
 void read_break_log(unsigned why,Image &im,bool in_open);
@@ -2762,7 +2768,9 @@ struct Shader {std::string key;uint32_t stage;VkShaderModule module{};std::vecto
     int gs_gate_slot=-1;uint32_t gs_gate_offset=0,gs_gate_value=0; // [perf3] pass-through GS: uniform slot / byte / value of its switch (xbg_spirv_gs_passthru_gate)
     uint32_t pool_mask=0; // [ETERNAL] set-1 bindless pool arrays it reads (bindless::TEX2D/TEX3D/SAMP bits); stripped from bindings
     std::shared_ptr<const XbgPoolIdxProgram> pool_index; // [ETERNAL] how its pool indices are computed (bindless::analyze; null: none / not analysable)
-    ~Shader(){if(module)vkDestroyShaderModule(cfg.device,module,nullptr);}};
+    std::vector<uint32_t> words; // [nonadreno] final SPIR-V of a vertex shader, kept while DM_GFX_VTX_RETYPE is on (vtx_retype_module)
+    std::map<uint32_t,VkShaderModule> retyped; // [nonadreno] retype code (2 bits per location) -> module; the base module when refused
+    ~Shader(){for(auto &r:retyped)if(r.second && r.second!=module)vkDestroyShaderModule(cfg.device,r.second,nullptr);if(module)vkDestroyShaderModule(cfg.device,module,nullptr);}};
 // Storage buffers written by a shader. Pointers rooted at a storage-buffer
 // variable that reach OpStore/OpCopyMemory/atomics, function calls, phis or
 // selects mark that binding written; anything unprovable marks all written.
@@ -3248,7 +3256,8 @@ Shader *load_shader(const void *control,const void *code=nullptr){
     {bool kill=false;for(size_t i=5;i<words.size();){uint32_t n=words[i]>>16,op=words[i]&0xffff;if(op==252||op==4416||op==5380){kill=true;break;}if(!n)break;i+=n;}p->discards=kill;}
     p->raster=xbg_spirv_raster_facts(words.data(),words.size(),h.stage);
     {bool unknown=false;p->storage_writes=spirv_storage_writes(words,unknown);if(unknown){for(auto &b:p->bindings)if(b.type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)p->storage_writes.insert(b.binding);}}
-    if(h.stage==0){p->input_classes.resize(p->inputs.size());need(xbg_vertex_input_classes(words.data(),words.size(),p->inputs.data(),p->inputs.size(),p->input_classes.data())==0,"Unsupported vertex input scalar interface");}
+    if(h.stage==0){p->input_classes.resize(p->inputs.size());need(xbg_vertex_input_classes(words.data(),words.size(),p->inputs.data(),p->inputs.size(),p->input_classes.data())==0,"Unsupported vertex input scalar interface");
+        if(vtx_retype_mode())p->words=words;}
     load_t3=timing_clock();
     if(p->unusable.empty()){VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};ci.codeSize=words.size()*4;ci.pCode=words.data();VK(vkCreateShaderModule(cfg.device,&ci,nullptr,&p->module));warm::register_module(p->module,key);}Shader *out=p.get();shaders.emplace(key,std::move(p));++stats.shader_loads;++hud::shaders;const uint64_t load_t4=timing_clock();hud::shader_ns+=load_t4-load_t0;
     xbg_logf("NVN shader %s stage=%u loaded words=%zu ms read=%.2f rewrite=%.2f analyse=%.2f module=%.2f reused=%d",key.c_str(),h.stage,words.size(),(load_t1-load_t0)/1e6,(load_t2-load_t1)/1e6,(load_t3-load_t2)/1e6,(load_t4-load_t3)/1e6,int(have_reused));return out;
@@ -5443,6 +5452,23 @@ Descriptors &descriptors_stable(Commands &c,bool compute){
         {static unsigned n=0;if(n++<8)xbg_logf("NVN %s: descriptors rebuilt after a submission inside the build (try %d)",compute?"dispatch":"draw",tries+1);}
         if(tries==3){need(d.entry!=nullptr,"Descriptor build keeps ending the submission");return d;}}
 }
+// [nonadreno] DM_GFX_VTX_RETYPE: the vertex module for one retype code (2 bits per location: 0 keep, 1 float, 2 sint, 3 uint),
+// built once per shader and code; a refused rewrite keeps the base module (logged).
+VkShaderModule vtx_retype_module(Shader &s,uint32_t code){
+    auto it=s.retyped.find(code);if(it!=s.retyped.end())return it->second;
+    static const char *const names[3]={"float","sint","uint"};
+    std::vector<uint32_t> loc,want;std::string desc;
+    for(uint32_t l=0;l<16;l++)if((code>>(2*l))&3){loc.push_back(l);want.push_back(((code>>(2*l))&3)-1);
+        uint32_t had=3;for(size_t i=0;i<s.inputs.size();i++)if(s.inputs[i]==l)had=s.input_classes[i];
+        char b[48];snprintf(b,sizeof b,"%sloc%u %s->%s",desc.empty()?"":" ",l,had<3?names[had]:"?",names[want.back()]);desc+=b;}
+    std::vector<uint32_t> out;std::string why;VkShaderModule m=s.module;
+    if(xbg_vertex_retype(s.words,loc.data(),loc.size(),want.data(),out,&why)){
+        VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};ci.codeSize=out.size()*4;ci.pCode=out.data();VkShaderModule v=VK_NULL_HANDLE;
+        if(vkCreateShaderModule(cfg.device,&ci,nullptr,&v)==VK_SUCCESS){m=v;char tag[16];snprintf(tag,sizeof tag,"#vi%08x",code);warm::register_module(m,s.key+tag);
+            if(++vtx_retype_variants<=32)xbg_logf("NVN vertex input retype %s code=%#x: %s",s.key.c_str(),code,desc.c_str());}
+        else why="vkCreateShaderModule failed";}
+    if(m==s.module){++vtx_retype_refused;xbg_logf("NVN vertex input retype %s code=%#x (%s) refused: %s; the base module is kept",s.key.c_str(),code,desc.c_str(),why.c_str());}
+    s.retyped.emplace(code,m);return m;}
 bool skip_unusable(const char *what){   // [nonadreno] (from the DOOM 2016 port) a bound module lacks a device capability (Shader::unusable): skip, logged per module
     for(unsigned st=0;st<6;st++){Shader *sh=state.shader[st];if(what[0]=='d' && st==5)continue;if(what[0]=='c' && st!=5)continue;
         if(sh && !sh->unusable.empty()){static std::unordered_set<std::string> told;if(told.insert(sh->key).second)xbg_logf("NVN %s skipped: shader %s stage %u needs %s",what,sh->key.c_str(),st,sh->unusable.c_str());return true;}}
@@ -5539,6 +5565,11 @@ Pass p;create_pass(p,c);
         }
         need(a.stream<16,"Vertex stream out of bounds");VkFormat fmt=format(a.fmt);if(!(format_properties(fmt).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT))fmt=vertex_format_fallback(fmt,loc,a.offset,state.stream[a.stream].stride);const VkFormatProperties &fp=format_properties(fmt);need(fp.bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT,"Vertex format unsupported");need(state.stream[a.stream].divisor<=1,"Instance divisor >1 unsupported");attributes.push_back({loc,a.stream,fmt,a.offset});binding_slots[a.stream]={a.stream,state.stream[a.stream].stride,state.stream[a.stream].divisor?VK_VERTEX_INPUT_RATE_INSTANCE:VK_VERTEX_INPUT_RATE_VERTEX};binding_used|=1u<<a.stream;if(capture.active)capture_log("ATTRIBUTE location=%u stream=%u format=%u vk=%u offset=%u stride=%u divisor=%u",loc,a.stream,a.fmt,unsigned(fmt),a.offset,state.stream[a.stream].stride,state.stream[a.stream].divisor);
     }
+    // [nonadreno] DM_GFX_VTX_RETYPE: a vertex input whose class differs from its attribute format's gets the retyped module
+    if(vtx_retype_mode() && !state.shader[0]->words.empty()){const Shader &vs=*state.shader[0];uint32_t code=0;
+        for(auto &a:attributes)for(size_t i=0;i<vs.inputs.size();i++)if(vs.inputs[i]==a.location){
+            const uint32_t want=xbg_vertex_format_class(int(a.format));if(want!=vs.input_classes[i])code|=(want+1)<<(2*a.location);break;}
+        if(code){VkShaderModule m=vtx_retype_module(*state.shader[0],code);for(auto &st:stages)if(st.stage==VK_SHADER_STAGE_VERTEX_BIT)st.module=m;}}
     static std::vector<VkVertexInputBindingDescription> bindings;bindings.clear();for(uint32_t i=0;i<16;i++)if(binding_used&(1u<<i))bindings.push_back(binding_slots[i]);   // ascending binding order, as the former std::map
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};vi.vertexBindingDescriptionCount=bindings.size();vi.pVertexBindingDescriptions=bindings.data();vi.vertexAttributeDescriptionCount=attributes.size();vi.pVertexAttributeDescriptions=attributes.data();
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};ia.topology=topology(prim);
