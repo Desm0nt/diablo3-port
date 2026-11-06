@@ -1,0 +1,33 @@
+#version 450
+// GPU self-test of the shader rewrites (xbg_selftest.cpp): the instruction patterns DM_GFX_NAN_SAT, DM_GFX_F2I_NOTRUNC and
+// DM_GFX_LDC_CANON rewrite, in the translator's form, on inputs read from a buffer so the driver cannot fold them. At run time
+// the engine's own rewrite functions turn this module into each variant; the outputs must match the original's bit for bit.
+// Regenerate xbg_selftest_spv.h after editing (the command is at the top of that file).
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) buffer Data {
+    float sat_in[8];     // NaN, +inf, -inf, -0, 0.5, 2, -3, 1
+    float f2i_in[8];     // 1.5, -1.5, 2.999, -2.999, 0.75, -0.75, 100, NaN
+    uint bone[4];        // 0..3: bone * 48 is a multiple of 16, as in the skinning shaders
+    vec4 table[16];      // distinct values, so a wrong vec4 index shows
+    uint sat_out[8];
+    int f2i_out[8];
+    uint f2u_out[8];
+    uint ldc_out[4];
+} d;
+void main() {
+    for (int k = 0; k < 8; k++) {
+        // FClamp(x, 0, 1): NClamp after DM_GFX_NAN_MINMAX, kept as FClamp with DM_GFX_NAN_SAT
+        d.sat_out[k] = floatBitsToUint(clamp(d.sat_in[k], 0.0, 1.0));
+        // ConvertFToS / ConvertFToU (clamp (trunc x)) with integral bounds: DM_GFX_F2I_NOTRUNC drops the trunc
+        d.f2i_out[k] = int(clamp(trunc(d.f2i_in[k]), -8.0, 8.0));
+        d.f2u_out[k] = uint(clamp(trunc(d.f2i_in[k]), 0.0, 255.0));
+    }
+    for (int k = 0; k < 4; k++) {
+        // the translator's LDC word addressing: vec4 index ((x + K) >> 2) >> 2 and the high word's (((x + K) >> 2) + 1) >> 2
+        uint x = d.bone[k] * 48u;
+        uint w = (x + 8u) >> 2u;
+        vec4 a = d.table[w >> 2u];
+        vec4 b = d.table[(w + 1u) >> 2u];
+        d.ldc_out[k] = floatBitsToUint(a.z) * 31u + floatBitsToUint(b.w);
+    }
+}

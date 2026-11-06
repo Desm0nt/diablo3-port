@@ -416,12 +416,11 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     setenv("DM_GFX_SUBMIT_CHUNK_US", "0", 0);
     // [D3] exact GPU switches on by default at the owner's request (docs/d3/D3_PERF_CANDIDATES.md; not A/B'd on the phone yet):
     // samples-passed reports inside the pass (16 pass ends + 32 barriers a frame), saturating clamps without NaN checks,
-    // clears folded into the pass load op, canonical LDC, float-to-int without the trunc. DM_GFX_*=0 in dm/env turns each off.
-    setenv("DM_GFX_REPORT_INPASS", "1", 0);
-    setenv("DM_GFX_NAN_SAT", "1", 0);
-    setenv("DM_GFX_LAZY_CLEAR", "1", 0);
-    setenv("DM_GFX_LDC_CANON", "1", 0);
-    setenv("DM_GFX_F2I_NOTRUNC", "1", 0);
+    // clears folded into the pass load op, canonical LDC, float-to-int without the trunc. DM_GFX_D3PERF=1 asks the engine for
+    // them (xbg_game.cpp d3perf_switches): on Adreno as verified there; on any other GPU only those its start-up GPU self-test
+    // passes (xbg_selftest.cpp; a Mali-G720 got a black 3D scene with all five on, cause not pinned down). The switches are not set
+    // here, so DM_GFX_REPORT_INPASS / LAZY_CLEAR / NAN_SAT / LDC_CANON / F2I_NOTRUNC = 0 or 1 in dm/env still decide each one.
+    setenv("DM_GFX_D3PERF", "1", 0);
 #else
     setenv("DM_GFX_DEFER_EVENTS", "2", 0);
 #endif

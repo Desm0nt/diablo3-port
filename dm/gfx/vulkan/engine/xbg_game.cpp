@@ -38,6 +38,7 @@ extern "C" int xbg_completion_wait_selftest(char *report,size_t bytes);
 #include "xbg_spirv_warp.h"
 #include "xbg_spirv_ldc.h"
 #include "xbg_spirv_peep.h"     // [d3-perf] DOOM round-3 peepholes (f2i, texcoord guard)
+#include "xbg_selftest.h"        // [d3-perf][nonadreno] GPU self-test of the d3-perf switches off Adreno
 #include "xbg_spirv_temps.h"
 #include "xbg_spirv_raster.h"
 #include "xbg_spirv_gspass.h"
@@ -814,6 +815,11 @@ unsigned cur_op=0;uint64_t pass_end_by[64],barrier_by[64];
 // gfx-no-query-batch marker.
 struct OpenOcclusion {VkCommandBuffer cmd{};VkQueryPool pool{};uint32_t index=0;} open_occlusion;
 bool occlusion_batch_enabled=true;uint64_t occlusion_queries_started=0;
+// [nonadreno] DM_GFX_QUERY_WAIT (default: on off Adreno, set in initialize): submit_slots copies the occlusion results with
+// VK_QUERY_RESULT_WAIT_BIT. Without it a copy only writes queries already available when the transfer runs; the engine relies
+// on the pass end's subpass dependency for that, which Adreno honours. Every query in [0, occlusion_used) is begun and ended in
+// the slot (draw() begins each one it allocates), so the wait cannot block. The GPU self-test logs whether it matters here.
+bool query_copy_wait=false;
 void end_occlusion_query(){
     if(open_occlusion.cmd){vkCmdEndQuery(open_occlusion.cmd,open_occlusion.pool,open_occlusion.index);open_occlusion=OpenOcclusion{};}
 }
@@ -1069,7 +1075,7 @@ void submit_slots(bool wait){
         if(open_pass.cmd==s.cmd){unsigned saved=cur_op;cur_op=60;end_open_pass();cur_op=saved;}barrier_seq=0;
         // Occlusion results: GPU copies them into mapped memory (vkGetQueryPoolResults is slow on this driver).
         s.query_copied=0;if(s.occlusion_used){size_t used=s.occlusion_used;s.query_results=s.readback.alloc(used*8);
-            for(size_t i=0;i*256<used;i++){uint32_t n=uint32_t(std::min<size_t>(256,used-i*256));vkCmdCopyQueryPoolResults(s.cmd,s.occlusion_pools[i],0,n,s.query_results.buffer,s.query_results.offset+i*256*8,8,VK_QUERY_RESULT_64_BIT);}
+            for(size_t i=0;i*256<used;i++){uint32_t n=uint32_t(std::min<size_t>(256,used-i*256));vkCmdCopyQueryPoolResults(s.cmd,s.occlusion_pools[i],0,n,s.query_results.buffer,s.query_results.offset+i*256*8,8,VK_QUERY_RESULT_64_BIT|(query_copy_wait?VK_QUERY_RESULT_WAIT_BIT:0));}
             VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};hb.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;hb.dstAccessMask=VK_ACCESS_HOST_READ_BIT;vkCmdPipelineBarrier(s.cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&hb,0,nullptr,0,nullptr);
             s.query_copied=used;}
         if(storage_unbarriered){storage_unbarriered=false;full_barrier(s.cmd);VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};hb.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;hb.dstAccessMask=VK_ACCESS_HOST_READ_BIT;vkCmdPipelineBarrier(s.cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&hb,0,nullptr,0,nullptr);}
@@ -3066,23 +3072,26 @@ bool nan_minmax=false;std::atomic<uint64_t> nan_minmax_swaps{0};
 //   change). D3 offline: 2,601 guarded coordinates in 766 modules. DOOM measured no gain.
 bool nan_sat=false,ldc_canon=false,f2i_notrunc=false,texcoord_unguard=false;
 std::atomic<uint64_t> nan_sat_kept{0},canon_shifts{0},canon_merges{0},f2i_rewrites{0},texcoord_unguarded{0};
-size_t nan_minmax_swap(std::vector<uint32_t> &w){
+// sat: keep FClamp(x, 0.0, 1.0) (DM_GFX_NAN_SAT); kept_out (the GPU self-test) receives how many were kept instead of the counter.
+size_t nan_minmax_swap(std::vector<uint32_t> &w,bool sat,size_t *kept_out=nullptr){
     uint32_t glsl=0;size_t k=0,kept=0;std::unordered_map<uint32_t,uint32_t> fconst;   // OpConstant id -> bits (32-bit), for DM_GFX_NAN_SAT
     for(size_t i=5;i<w.size();){
         uint32_t op=w[i]&0xFFFFu,n=w[i]>>16;if(!n || i+n>w.size())break;
-        if(nan_sat && op==43 && n==4)fconst[w[i+2]]=w[i+3];
+        if(sat && op==43 && n==4)fconst[w[i+2]]=w[i+3];
         if(op==11 && n>=5 && !memcmp(&w[i+2],"GLSL.std.450",13))glsl=w[i+1];
         else if(op==12 && n>=5 && glsl && w[i+3]==glsl){uint32_t &e=w[i+4];
-            if(e==43 && nan_sat && n>=8){auto lo=fconst.find(w[i+6]),hi=fconst.find(w[i+7]);if(lo!=fconst.end() && hi!=fconst.end() && lo->second==0u && hi->second==0x3f800000u){++kept;i+=n;continue;}}
+            if(e==43 && sat && n>=8){auto lo=fconst.find(w[i+6]),hi=fconst.find(w[i+7]);if(lo!=fconst.end() && hi!=fconst.end() && lo->second==0u && hi->second==0x3f800000u){++kept;i+=n;continue;}}
             if(e==37){e=79;++k;}else if(e==40){e=80;++k;}else if(e==43){e=81;++k;}}
         i+=n;
     }
-    if(kept)nan_sat_kept.fetch_add(kept,std::memory_order_relaxed);
+    if(kept_out)*kept_out=kept;else if(kept)nan_sat_kept.fetch_add(kept,std::memory_order_relaxed);
     return k;
 }
+// [d3-perf] the GPU self-test's view of it (xbg_selftest.h XbgSelftestIn::nan_swap)
+size_t selftest_nan_swap(std::vector<uint32_t> &w,bool sat,size_t *kept){return nan_minmax_swap(w,sat,kept);}
 void tidy_rewrite(std::vector<uint32_t> &words){
     std::vector<uint32_t> out;
-    if(nan_minmax){size_t k=nan_minmax_swap(words);if(k)nan_minmax_swaps.fetch_add(k,std::memory_order_relaxed);}
+    if(nan_minmax){size_t k=nan_minmax_swap(words,nan_sat);if(k)nan_minmax_swaps.fetch_add(k,std::memory_order_relaxed);}
     if(ldc_fold){size_t k=xbg_spirv_ldc_fold(words.data(),words.size(),out);if(k){words.swap(out);ldc_folds.fetch_add(k,std::memory_order_relaxed);}}
     if(forward_temps){size_t k=xbg_spirv_forward_temps(words.data(),words.size(),out);if(k){words.swap(out);temps_forwarded.fetch_add(k,std::memory_order_relaxed);}}
     // [d3-perf] after the forwarding, which leaves the translator's chains as SSA values (as in the DOOM branch)
@@ -6440,6 +6449,42 @@ void zero_copy_probe(){
         }
     }
 }
+// [d3-perf][nonadreno] The five exact GPU switches D3 turns on by default (jni_android.c sets DM_GFX_D3PERF=1 and no longer the
+// switches themselves, so a DM_GFX_* value present here was set by dm/env or a test run and always wins). They were verified
+// only on Adreno: on Adreno (vendor 0x5143) they stay on with no check; on any other GPU xbg_selftest.cpp checks each one on
+// the device before the game's first frame and keeps only those that pass. DM_GFX_SELFTEST=1 runs the check on Adreno too,
+// DM_GFX_SELFTEST=0 skips it (unset switches then stay off off Adreno), DM_GFX_SELFTEST_FORCE_FAIL=report_inpass,... (or all)
+// fails the named checks for testing. Also sets query_copy_wait (DM_GFX_QUERY_WAIT, default on off Adreno).
+static void d3perf_switches(){
+    static const char *const env[XBG_ST_COUNT]={"DM_GFX_REPORT_INPASS","DM_GFX_LAZY_CLEAR","DM_GFX_NAN_SAT","DM_GFX_LDC_CANON","DM_GFX_F2I_NOTRUNC"};
+    auto set=[](const char *e){const char *v=getenv(e);return v && *v;};
+    auto on=[](const char *e){const char *v=getenv(e);return v && *v && atoi(v)!=0;};
+    const bool defaults=on("DM_GFX_D3PERF"),adreno=properties.vendorID==0x5143;
+    const char *st=getenv("DM_GFX_SELFTEST");const int mode=st && *st?atoi(st):-1;   // -1 automatic, 0 never, 1 also on Adreno
+    bool given[XBG_ST_COUNT],need=false;for(int k=0;k<XBG_ST_COUNT;k++){given[k]=set(env[k]);need=need || (defaults && !given[k]);}
+    const bool run=need && (adreno?mode==1:mode!=0);
+    XbgSelftestOut so;
+    if(run){XbgSelftestIn in;in.physical=cfg.physical;in.device=cfg.device;in.queue=cfg.queue;in.queue_family=cfg.queue_family;in.precise_occlusion=cfg.enabled_core.occlusionQueryPrecise!=VK_FALSE;
+        in.timestamp_bits=timestamp_bits;in.force_fail=xbg_selftest_parse(getenv("DM_GFX_SELFTEST_FORCE_FAIL"));in.nan_swap=selftest_nan_swap;xbg_selftest_run(in,so);}
+    bool value[XBG_ST_COUNT];std::string envs;
+    for(int k=0;k<XBG_ST_COUNT;k++){
+        if(given[k]){value[k]=on(env[k]);envs+=std::string(envs.empty()?"":" ")+xbg_selftest_name(k)+"="+getenv(env[k]);}
+        else value[k]=defaults && (run?so.pass[k]!=0:adreno);}
+    report_inpass=value[XBG_ST_REPORT_INPASS];lazy_clear_on=value[XBG_ST_LAZY_CLEAR];nan_sat=value[XBG_ST_NAN_SAT];ldc_canon=value[XBG_ST_LDC_CANON];f2i_notrunc=value[XBG_ST_F2I_NOTRUNC];
+    query_copy_wait=set("DM_GFX_QUERY_WAIT")?on("DM_GFX_QUERY_WAIT"):!adreno;
+    std::string s;char b[400];
+    snprintf(b,sizeof b,"[selftest] gpu \"%s\" vendor %#x driver %#x: ",properties.deviceName,properties.vendorID,properties.driverVersion);s=b;
+    if(run){snprintf(b,sizeof b,"%.1f ms%s%s: ",so.ms,so.ran?"":", the test did not run: ",so.ran?"":so.error);s+=b;
+        for(int k=0;k<XBG_ST_COUNT;k++){snprintf(b,sizeof b,"%s%s %s (%s)",k?" | ":"",xbg_selftest_name(k),so.pass[k]?"PASS":"FAIL",so.note[k]);s+=b;}
+        if(so.ran){s+=" | ";s+=so.query_note;}}
+    else if(!need)s+=defaults?"not run, every switch set in env":"not run, d3-perf defaults off (DM_GFX_D3PERF unset)";
+    else if(adreno)s+="not run on Adreno, switches on as verified there (DM_GFX_SELFTEST=1 runs it)";
+    else s+="not run (DM_GFX_SELFTEST=0): unset switches off";
+    s+=" -> enabled:";for(int k=0;k<XBG_ST_COUNT;k++)if(value[k]){s+=' ';s+=xbg_selftest_name(k);}
+    s+=" disabled:";for(int k=0;k<XBG_ST_COUNT;k++)if(!value[k]){s+=' ';s+=xbg_selftest_name(k);}
+    s+=" (env wins: ";s+=envs.empty()?"-":envs;snprintf(b,sizeof b,") query copy WAIT=%d%s",int(query_copy_wait),set("DM_GFX_QUERY_WAIT")?" (env)":"");s+=b;
+    for(size_t at=0;at<s.size();at+=900)xbg_logf("%s%s",at?"[selftest] ... ":"",s.substr(at,900).c_str());   // xbg_logf keeps 1023 characters a line
+}
 extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t bytes){
     if(!c || c->size!=sizeof(*c) || !c->physical || !c->device || !c->queue || !c->shader_directory || !c->fence_timeout_ns){if(error&&bytes)snprintf(error,bytes,"Invalid xbg_game_config");return -1;}
     std::lock_guard<std::recursive_mutex> lock(mutex);if(initialized){if(error&&bytes)snprintf(error,bytes,"Game graphics already initialized");return -1;}
@@ -6538,9 +6583,10 @@ extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t b
     {std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');std::string base=cut==std::string::npos?dir:dir.substr(0,cut);
      auto dm=[&](const char *marker,const char *env){FILE *q=fopen((base+marker).c_str(),"rb");bool on=false;if(q){on=fgetc(q)!='0';fclose(q);}else if(const char *e=getenv(env))on=atoi(e)!=0;return on;};
      ldc_fold=dm("/gfx-ldc-fold","DM_GFX_LDC_FOLD");forward_temps=dm("/gfx-forward-temps","DM_GFX_FORWARD_TEMPS");nan_minmax=dm("/gfx-nan-minmax","DM_GFX_NAN_MINMAX");
-     {auto env_on=[](const char *env,int def){const char *e=getenv(env);return e&&*e?atoi(e)!=0:def!=0;};   // [d3-perf] all off unless dm/env sets them
-      report_inpass=env_on("DM_GFX_REPORT_INPASS",0);lazy_clear_on=env_on("DM_GFX_LAZY_CLEAR",0);xbg_logf("NVN d3-perf pass switches: DM_GFX_REPORT_INPASS=%d DM_GFX_LAZY_CLEAR=%d",int(report_inpass),int(lazy_clear_on));
-      nan_sat=env_on("DM_GFX_NAN_SAT",0);ldc_canon=env_on("DM_GFX_LDC_CANON",0);f2i_notrunc=env_on("DM_GFX_F2I_NOTRUNC",0);texcoord_unguard=!env_on("DM_GFX_TEXCOORD_NAN",1);
+     {auto env_on=[](const char *env,int def){const char *e=getenv(env);return e&&*e?atoi(e)!=0:def!=0;};
+      d3perf_switches();   // [d3-perf][nonadreno] defaults, the GPU self-test off Adreno, explicit env
+      xbg_logf("NVN d3-perf pass switches: DM_GFX_REPORT_INPASS=%d DM_GFX_LAZY_CLEAR=%d",int(report_inpass),int(lazy_clear_on));
+      texcoord_unguard=!env_on("DM_GFX_TEXCOORD_NAN",1);
       xbg_logf("NVN d3-perf shader switches: DM_GFX_NAN_SAT=%d DM_GFX_LDC_CANON=%d DM_GFX_F2I_NOTRUNC=%d DM_GFX_TEXCOORD_NAN=%d (texcoord NaN guard kept)",int(nan_sat),int(ldc_canon),int(f2i_notrunc),int(!texcoord_unguard));}
      xbg_logf("NVN NaN-ignoring min / max / clamp like Maxwell=%d (marker gfx-nan-minmax)",int(nan_minmax));
      xbg_logf("NVN translator output clean-up: component fold=%d (marker gfx-ldc-fold) forwarded temporaries=%d (marker gfx-forward-temps)",int(ldc_fold),int(forward_temps));

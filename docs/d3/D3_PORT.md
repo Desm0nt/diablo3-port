@@ -146,3 +146,33 @@ D3: UI-фокус, экраны загрузки, VMA, idle retire, GPU-крош
 загрузкой пакетов Turnip, все фолбэки для Mali / PowerVR / Xclipse (включая декод BC на GPU и заливку пачками), сборка
 под Android 10 (`build_apk.ps1 -Android10`), ARMv8.0 без LSE, стартовые экраны на 13 языках. Что откуда, переключатели и
 что пропущено — [DOOM_PORTS.md](DOOM_PORTS.md). На телефоне проверено только то, что видно на Adreno 750.
+
+## Самопроверка GPU-оптимизаций не на Adreno — 06.11.2026 (0.2.2-debug)
+
+Пять точных оптимизаций D3 (`DM_GFX_REPORT_INPASS`, `DM_GFX_LAZY_CLEAR`, `DM_GFX_NAN_SAT`, `DM_GFX_LDC_CANON`,
+`DM_GFX_F2I_NOTRUNC`) проверены только на Adreno, а на Mali-G720 (r49p1, Android 16) игрок видел чёрную 3D-сцену при
+живых HUD и звуке. Теперь `jni_android.c` ставит только `DM_GFX_D3PERF=1`, а решает движок (`xbg_game.cpp`
+`d3perf_switches`):
+
+* Adreno (vendor 0x5143) — все пять включены без проверки, как раньше (ноль затрат).
+* Любой другой GPU — при инициализации движка, до первого кадра игры, `xbg_selftest.cpp` один раз гоняет на самом
+  устройстве маленький тест (один командный буфер, одно ожидание с таймаутом 1 с; любая ошибка Vulkan или таймаут = FAIL)
+  и выключает то, что не прошло:
+  * `report_inpass` — проход 16×16: заслонка на левой половине, затем два occlusion-«бокса» без записи цвета/глубины;
+    запрос закрыт и timestamp записан внутри прохода (как в пути in-pass) против старого пути (конец прохода). PASS:
+    in-pass > 0 и совпадает с эталоном (с precise-запросами 128 и 256);
+  * `lazy_clear` — двойник render pass с `loadOp`/`stencilLoadOp = CLEAR` поверх мусора (синий цвет, «непроходная»
+    глубина, stencil 0x55), белый прямоугольник слева и зелёный сверху за ним (stencil EQUAL 0); два варианта: глубина 1.0 +
+    LESS_OR_EQUAL на D24S8 и 0.0 + GREATER_OR_EQUAL (reverse Z) на D32. PASS: все пиксели как ожидалось;
+  * `nan_sat`, `f2i_notrunc`, `ldc_canon` — compute-шейдер `xbg_selftest.comp` с точными шаблонами переводчика; варианты
+    делают сами функции переписывания движка; PASS: те же биты, что у оригинала (NaN, ±inf, −0, 0.5, 2 … для клампа).
+* `DM_GFX_SELFTEST=1` — тест и на Adreno (результат применяется), `=0` — без теста, тогда не на Adreno все пять выкл.
+  `DM_GFX_SELFTEST_FORCE_FAIL=report_inpass,lazy_clear` (или `all`) — принудительный FAIL для проверки отката.
+  Явный `DM_GFX_<имя>=0/1` в `dm/env` всегда главнее теста.
+* Заодно не на Adreno копия результатов occlusion-запросов (`vkCmdCopyQueryPoolResults`) идёт с `WAIT_BIT`
+  (`DM_GFX_QUERY_WAIT`, env главнее); тест пишет, отличалась бы копия без него.
+
+В `boot.log` одна строка `[selftest] gpu "…" vendor … driver …: N ms: report_inpass PASS (in-pass 128/256, reference
+128/256) | lazy_clear … | nan_sat … | ldc_canon … | f2i_notrunc … | query copy without WAIT … -> enabled: … disabled: …
+(env wins: …) query copy WAIT=1`. На RTX 3090 (десктопный стенд с тем же кодом) всё PASS, 5–8 мс (первый холодный запуск
+~250 мс из-за компиляции шейдеров). Шаблоны в шейдере проверяет `tests/selftest_patterns_test.cpp`.
