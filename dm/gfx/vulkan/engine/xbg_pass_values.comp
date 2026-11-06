@@ -1,0 +1,54 @@
+#version 450
+// NVN GVAL probe (xbg_game.cpp namespace passval, DM_GFX_PASS_VALUES): on a profiled frame, right after a render pass, reads
+// a fixed grid of texels of one of its attachments (cell centres of gw x gh over the pass extent, the view's own level and
+// layer) and reduces them to one record: counts of NaN / +-inf / all-zero / negative / all-one texels and per-channel sum,
+// min and max of the finite values. Read-only; one workgroup of 64 threads loops over the grid (576 = 32x18 points).
+// NaN / inf are tested on the bits, so a fast-math driver cannot fold the test away.
+// Regenerate xbg_pass_values_spv.h after editing (the command is at the top of that file).
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) uniform sampler2D src;
+struct Rec { uint n, nan, inf, zero, neg, one, pad0, pad1; vec4 sum; vec4 lo; vec4 hi; };
+layout(std430, set = 0, binding = 1) buffer Out { Rec rec[]; } o;
+// mask: the format's channels (bit c = channel c); zero / one count texels whose every such channel is 0.0 / 1.0
+layout(push_constant) uniform P { uint index, gw, gh, w, h, mask; } p;
+shared uvec4 s_cnt[64];   // nan, inf, zero, neg
+shared uint s_one[64];
+shared vec4 s_sum[64], s_lo[64], s_hi[64];
+bool is_nan(float x) { uint b = floatBitsToUint(x); return (b & 0x7f800000u) == 0x7f800000u && (b & 0x007fffffu) != 0u; }
+bool is_inf(float x) { return (floatBitsToUint(x) & 0x7fffffffu) == 0x7f800000u; }
+void main() {
+    uint t = gl_LocalInvocationIndex, total = p.gw * p.gh;
+    uvec4 cnt = uvec4(0u); uint one = 0u;
+    vec4 sum = vec4(0.0), lo = vec4(3.0e38), hi = vec4(-3.0e38);
+    for (uint k = t; k < total; k += 64u) {
+        uint gx = k % p.gw, gy = k / p.gw;
+        ivec2 xy = ivec2(int((2u * gx + 1u) * p.w / (2u * p.gw)), int((2u * gy + 1u) * p.h / (2u * p.gh)));
+        vec4 v = texelFetch(src, xy, 0);
+        bool any_nan = false, any_inf = false, all_zero = true, any_neg = false, all_one = true;
+        for (int c = 0; c < 4; c++) {
+            float x = v[c];
+            bool in_fmt = (p.mask & (1u << uint(c))) != 0u;
+            if (is_nan(x)) { any_nan = true; all_zero = false; all_one = false; continue; }
+            if (is_inf(x)) { any_inf = true; all_zero = false; all_one = false; if (x < 0.0) any_neg = true; continue; }
+            sum[c] += x; lo[c] = min(lo[c], x); hi[c] = max(hi[c], x);
+            if (in_fmt) { if (x != 0.0) all_zero = false; if (x != 1.0) all_one = false; if (x < 0.0) any_neg = true; }
+        }
+        cnt += uvec4(any_nan ? 1u : 0u, any_inf ? 1u : 0u, all_zero ? 1u : 0u, any_neg ? 1u : 0u);
+        one += all_one ? 1u : 0u;
+    }
+    s_cnt[t] = cnt; s_one[t] = one; s_sum[t] = sum; s_lo[t] = lo; s_hi[t] = hi;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1u) {
+        if (t < s) {
+            s_cnt[t] += s_cnt[t + s]; s_one[t] += s_one[t + s]; s_sum[t] += s_sum[t + s];
+            s_lo[t] = min(s_lo[t], s_lo[t + s]); s_hi[t] = max(s_hi[t], s_hi[t + s]);
+        }
+        barrier();
+    }
+    if (t == 0u) {
+        uint i = p.index;
+        o.rec[i].n = total; o.rec[i].nan = s_cnt[0].x; o.rec[i].inf = s_cnt[0].y; o.rec[i].zero = s_cnt[0].z; o.rec[i].neg = s_cnt[0].w;
+        o.rec[i].one = s_one[0]; o.rec[i].pad0 = 0u; o.rec[i].pad1 = 0u;
+        o.rec[i].sum = s_sum[0]; o.rec[i].lo = s_lo[0]; o.rec[i].hi = s_hi[0];
+    }
+}
