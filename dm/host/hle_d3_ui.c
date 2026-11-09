@@ -12,7 +12,11 @@
 //                      accept          -> the UI's logical BUTTON_1 press event {code 0x1d, player, button 0} handed to the UI input dispatcher
 //                                         0x32c490 (focus -> its HandleMessage, else the registered input listeners), the same entry the game's
 //                                         event queue calls; never the pad state.
+//                      skills icons / category arrows -> the skills screen's selection group 0x23ace0 / its own step 0x37b5f0;
+//                      button legend entry -> that console button's logical press through the same dispatcher (A, B, X, Y, ...);
 //                    Unknown targets are logged (topmost control + class) and left alone.
+//   dm_d3_ui_scroll(x, y, dy) (UI thread): a swipe over a visible list queues the travel; the poll moves the list's selection past its edge
+//                    one row per row height (the game scrolls lists only through the selection), which scrolls it. 0 = no list there.
 //                    Test without the front end: a file dm/ui-tap-now holding "x y" queues the same tap (checked every 30 polls).
 //   dm_d3_ui_menu_open() (published every poll): front end (title / main menu / hero select), a console screen group open (pause, the "+"
 //                    hero menu and its tabs), a focused control or a modal one. Plain gameplay = 0.
@@ -83,6 +87,11 @@ enum {
     O_GOT_SCREENS = 0x114d080,
     // screen objects (bss pointers, from the screens' own handlers)
     V_SKILLS = 0x186dc40, V_PARAGON = 0x17f0a78, V_JOURNAL = 0x17ee838, V_PARTY = 0x17fedc8,
+    V_SKILLS_ROOT = 0x185fc40,   // UIID var: Root.NormalLayer.ConsoleSkillSelection_main (UISkills_On* run only while it is shown)
+    O_GRP_SET     = 0x23ace0,    // int SelGroup_Set(group *, index, notify): +8 item UIIDs, +0x10 count, +0x20 selected, +0x28 may-select, +0x30 changed
+    O_SKL_STEP    = 0x37b5f0,    // void Skills_Step(skills *, 0 left / 1 right): D-pad / stick left-right of UISkills; past the edge pages the category (+0x6c0)
+    SM_OFF        = 0x110,       // console screen manager + 0x110: button legend model, 0x17 slots x 0x40 {int action (-1 none); string label @8; int n @0x38};
+                                 //   +0x5c0 != 0 = being rebuilt (0x1bb820 reads -1). Screens switch on their slot's action: OnButton1 = slot 4, OnButton2 = slot 7
     UI_W = 960, UI_H = 720,      // UI virtual space (main 0x34bc80: 960.0 / 720.0 at 0xeb09e0 / 0xeb0e68)
     MAX_CTRL = 65536, MAX_DEPTH = 40, RAW_BYTES = 0x400, MAX_SEG = 64,
     EV_PRESS = 0x1d, BTN_1 = 0, BTN_LEFT = 10, BTN_RIGHT = 11,   // event codes 0x2b44xx: 0x1d press, 0x1e held, 0x1f long, 0x21 release
@@ -112,6 +121,8 @@ static const struct { uint32_t off; int n; uint32_t w[NW]; } k_sites[] = {
     {O_SEL_NEXT,   6, {0xf81d0ff5, 0xa9014ff4, 0xa9027bfd, 0x910083fd, 0xf9400008, 0xf9408908}},
     {O_INGAME,     6, {0xf81e0ff3, 0xa9017bfd, 0x910043fd, 0xf0006413, 0xf9446a73, 0xf9400260}},
     {O_SOUND,      6, {0xd10283ff, 0xfd0013ea, 0x6d0323e9, 0xa9046ffc, 0xa90567fa, 0xa9065ff8}},
+    {O_GRP_SET,    6, {0xd10143ff, 0xf9000bf7, 0xa90257f6, 0xa9034ff4, 0xa9047bfd, 0x910103fd}},
+    {O_SKL_STEP,   6, {0xa9be4ff4, 0xa9017bfd, 0x910043fd, 0xb941f808, 0xaa0003f3, 0x71000d1f}},
 };
 static const struct { uint32_t vt, slot, fn; } k_vts[] = {   // relocated vtable slots that must point where the class tables above say
     {O_VT_LIST, 0x60, O_LIST_HM}, {O_VT_CHECK, 0x60, O_CHECK_HM}, {O_VT_SELECTOR, 0x60, O_SELECTOR_HM}, {O_VT_INVBASE, 0x28, O_INV_UPDATE},
@@ -331,7 +342,7 @@ static int screen_group(screens *s) {   // the console screen manager's current 
 static int ui_player(uint64_t mgr) { int p = ri(mgr + 0x58); return p >= 0 && p < 8 ? p : 0; }   // mgr+0x58: the UI's owning player (-1 = any)
 static int id_valid(uint64_t id) { return id != ~0ull && find(id) != NULL; }
 
-typedef struct { uint64_t h, cb3, cb4; const char *host; int player; } ring;
+typedef struct { uint64_t h, cb3, cb4, obj; const char *host; int player; } ring;
 static int ring_ok(uint64_t h) {   // a ring helper (0x389750): +0 {f32 angle; UIID seg} x 0x10, +8 count, +0x18 ring UIID, +0x20 cursor, +0x28 sel, +0x2c active
     uint64_t v = rq(h), n = rq(h + 8), id = rq(h + 0x18);
     return v && n && n <= MAX_SEG && id && id != ~0ull && (v & 7) == 0;
@@ -340,11 +351,11 @@ static int find_rings(ring *out, int max, int player) {
     int n = 0; uint64_t o;
     for (unsigned i = 0; i < sizeof k_inv_vars / sizeof *k_inv_vars && n < max; i++)   // inventory family: Update 0x1f7590 runs the ring while obj+0x10
         if (is_obj(o = rq(ma(k_inv_vars[i]))) && rq(rq(o) + 0x28) == ma(O_INV_UPDATE) && rq(o + 0x10) && ring_ok(o + 0xd0))
-            out[n++] = (ring){o + 0xd0, ma(O_INV_RINGCB), ma(O_INV_RINGOK), "inventory", ri(o + 0xc)};
-    if (n < max && (o = rq(ma(V_SKILLS))) && ri(o + 0x1f8) == 0 && ring_ok(o + 0x168)) out[n++] = (ring){o + 0x168, ma(O_SKL_RINGCB), 0, "skills", player};
-    if (n < max && (o = rq(ma(V_PARAGON))) && ri(o + 0xd8) == 0 && ring_ok(o + 8)) out[n++] = (ring){o + 8, ma(O_PAR_RINGCB), 0, "paragon", player};
-    if (n < max && (o = rq(ma(V_JOURNAL))) && rq(o + 0x2858) && !ri(o + 0x2944) && ring_ok(o + 0x2860)) out[n++] = (ring){o + 0x2860, ma(O_JRN_RINGCB), 0, "journal", player};
-    if (n < max && (o = rq(ma(V_PARTY))) && ri(o + 0x18) == 2 && ring_ok(o + 0x318)) out[n++] = (ring){o + 0x318, ma(O_PTY_RINGCB), 0, "party", player};
+            out[n++] = (ring){o + 0xd0, ma(O_INV_RINGCB), ma(O_INV_RINGOK), o, rq(o) == ma(O_VT_INVBASE) ? "inventory" : "inventory-family", ri(o + 0xc)};
+    if (n < max && (o = rq(ma(V_SKILLS))) && ri(o + 0x1f8) == 0 && ring_ok(o + 0x168)) out[n++] = (ring){o + 0x168, ma(O_SKL_RINGCB), 0, o, "skills", player};
+    if (n < max && (o = rq(ma(V_PARAGON))) && ri(o + 0xd8) == 0 && ring_ok(o + 8)) out[n++] = (ring){o + 8, ma(O_PAR_RINGCB), 0, o, "paragon", player};
+    if (n < max && (o = rq(ma(V_JOURNAL))) && rq(o + 0x2858) && !ri(o + 0x2944) && ring_ok(o + 0x2860)) out[n++] = (ring){o + 0x2860, ma(O_JRN_RINGCB), 0, o, "journal", player};
+    if (n < max && (o = rq(ma(V_PARTY))) && ri(o + 0x18) == 2 && ring_ok(o + 0x318)) out[n++] = (ring){o + 0x318, ma(O_PTY_RINGCB), 0, o, "party", player};
     return n;
 }
 static uint64_t map_get(uint64_t mgr, uint64_t id) {   // the control map lookup of 0x330000 (FNV-1a 32 over the id's low 4 bytes & mask), no assert
@@ -379,13 +390,21 @@ int dm_d3_ui_menu_open(void) { return g_ok > 0 && g_tap_mode > 0 && atomic_load_
 // ---- the game's own actions
 static int g_dry;
 static void play_sound(int id) { if (id != -1 && !g_dry) ((void (*)(int, const void *))(g_base + O_SOUND))(id, (const void *)(uintptr_t)ma(O_SNDP)); }
-static int accept(uint64_t mgr, const char *why) {   // the UI's logical BUTTON_1 press through the UI input dispatcher (what a press reaches, minus the pad)
+// the UI's logical press of a console button (BUTTON_1 = accept, BUTTON_2 = back, ...) through the UI input dispatcher: what a press
+// reaches, minus the pad and minus the gameplay handlers further down the event chain
+static int ui_button(uint64_t mgr, int button, const char *why) {
     uint8_t ev[0x48] __attribute__((aligned(16))) = {0}; int32_t v;
-    v = EV_PRESS; memcpy(ev, &v, 4); v = ui_player(mgr); memcpy(ev + 0x28, &v, 4); v = BTN_1; memcpy(ev + 0x2c, &v, 4);
+    v = EV_PRESS; memcpy(ev, &v, 4); v = ui_player(mgr); memcpy(ev + 0x28, &v, 4); memcpy(ev + 0x2c, &button, 4);
     uint64_t f = rq(mgr + 0x50);
     int r = g_dry ? -1 : ((int (*)(const void *))(g_base + O_DISPATCH))(ev);
-    LOG("[d3ui]   accept (%s): BUTTON_1 -> UI dispatcher 0x32c490, focus %016llx %s, handled %d", why, (unsigned long long)f, name_of(f), r);
+    LOG("[d3ui]   %s: button %d -> UI dispatcher 0x32c490, focus %016llx %s, handled %d", why, button, (unsigned long long)f, name_of(f), r);
     return r;
+}
+static int accept(uint64_t mgr, const char *why) { return ui_button(mgr, BTN_1, why); }
+static int legend_action(int slot) {   // the action id the button legend model holds for a slot (what the screens' OnButton handlers switch on)
+    uint64_t S = rq(ma(O_SCREENS)); if (!S) return -1;
+    uint64_t sm = S + SM_OFF; if (ri(sm + 0x5c0)) return -1;
+    return ri(sm + 0x40ull * slot);
 }
 static int send_button(uint64_t mgr, uint64_t id, int button) {   // that control's own HandleMessage for a button press (UI_SendMessage 0x32cd60)
     uint8_t ev[0x48] __attribute__((aligned(16))) = {0}; int32_t v, kind[4] = {1, 0, 0, 0};
@@ -433,13 +452,15 @@ static int tap_nav(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
                 float d = fabsf((g->r[0] + g->r[2]) * 0.5f - ux); if (d < best) { best = d; which = k; }
             }
             if (!has || s.gid < 0) { LOG("[d3ui] tap UI %.0f,%.0f -> tab %d of %s: no console screen group open, nothing done", ux, uy, which + 1, name_of(p)); return 1; }
-            uint64_t ents = rq(s.grp);
-            int enabled = which < s.count && ents ? ri(ents + 0x18ull * which + 0x10) : 0;
-            LOG("[d3ui] tap UI %.0f,%.0f -> tab %d (Glow%d of %016llx %s): group %d screen %d -> %d of %d, enabled %d", ux, uy, which, which + 1,
-                (unsigned long long)p, name_of(p), s.gid, s.cur, which, s.count, enabled);
-            if (which == s.cur || which >= s.count || !enabled) return 1;
-            int r = g_dry ? -1 : ((int (*)(unsigned, unsigned, int, int))(g_base + O_OPENSCREEN))((unsigned)s.gid, (unsigned)which, player, 0);
-            LOG("[d3ui]   Console_OpenScreen(%d, %d, player %d) = %d", s.gid, which, player, r);
+            // GlowN = the N-th ENABLED screen of the group: L / R (0x16a5c0 / 0x1701b0) skip screens with enabled (+0x10) == 0, and the header
+            // shows only the reachable ones (hero menu: 6 screens, the 5th (party, 0x21d4b0) disabled, 5 headers; Glow5 = quests = screen 5)
+            uint64_t ents = rq(s.grp); int screen = -1;
+            for (int k = 0, seen = 0; ents && k < s.count && k < 32; k++) if (ri(ents + 0x18ull * k + 0x10) && seen++ == which) { screen = k; break; }
+            LOG("[d3ui] tap UI %.0f,%.0f -> tab Glow%d of %016llx %s: group %d screen %d -> %d (the %d. enabled of %d)", ux, uy, which + 1,
+                (unsigned long long)p, name_of(p), s.gid, s.cur, screen, which + 1, s.count);
+            if (screen < 0 || screen == s.cur) return 1;
+            int r = g_dry ? -1 : ((int (*)(unsigned, unsigned, int, int))(g_base + O_OPENSCREEN))((unsigned)s.gid, (unsigned)screen, player, 0);
+            LOG("[d3ui]   Console_OpenScreen(%d, %d, player %d) = %d", s.gid, screen, player, r);
             return 1;
         }
     }
@@ -462,8 +483,14 @@ static int tap_ring(uint64_t mgr, float ux, float uy) {
         uint64_t seg = v + 0x10ull * pick + 8, sid = rq(seg);
         LOG("[d3ui] tap UI %.0f,%.0f -> ring %016llx %s (%s, helper %#llx) segment %d/%d %016llx %s, selected %d, active %d", ux, uy, (unsigned long long)rid,
             name_of(rid), R->host, (unsigned long long)R->h, pick, n, (unsigned long long)sid, name_of(sid), sel, active);
-        if (pick == sel) { accept(mgr, "selected ring segment"); return 1; }
-        if (!active) { LOG("[d3ui]   ring not active (the screen's other panel has the input): nothing done"); return 1; }
+        if (!active && rq(R->obj) == ma(O_VT_INVBASE) && legend_action(7) == 3) {
+            // the console inventory with the item list holding the input: its own B (UIInventory_OnButton2 -> 0x36e1d0, legend slot 7 action 3 =
+            // back: sound 0x3c0 + vtable+0x18 0x1f7480, which re-activates the ring 0x38a690(ring, 1)); then the segment as usual
+            ui_button(mgr, 1, "ring inactive, the inventory's own back (B, legend action 3)");
+            active = ri(R->h + 0x2c); sel = ri(R->h + 0x28);
+            if (active && pick == sel) return 1;   // back on the ring at that very segment: done (no accept)
+        } else if (active && pick == sel) { accept(mgr, "selected ring segment"); return 1; }
+        if (!active) { LOG("[d3ui]   ring not active (the screen's other panel has the input; legend B action %d): nothing done", legend_action(7)); return 1; }
         if (R->cb4 && !g_dry && !(((uint64_t (*)(uint64_t, uint64_t))(uintptr_t)R->cb4)(R->h, seg) & 1)) { LOG("[d3ui]   segment refused by the screen (0x1f77a0)"); return 1; }
         if (!g_dry) {
             ((void (*)(uint64_t, uint64_t))(g_base + O_RING_ROT))(R->h, seg);
@@ -489,6 +516,100 @@ static int widget(uint64_t mgr, ctrl *w, float ux) {
     }
     return 0;
 }
+
+// skills screen (ConsoleSkillSelection; object *(main+0x186dc40), mode +0x1f8: 1 skills of a category, 2 runes, 3 passives, else the loadout
+// ring): each mode moves a selection group (0x23ace0 layout) of its own: +0x200 skills, +0x238 runes, +0x270 passives (0x37b5f0 / 0x37b490).
+// A tap on an icon of the active group = SelGroup_Set(group, k, 1) (what its own left / right steps 0x23ae30 / 0x23ae00 end in); a tap on the
+// selected icon = accept (UISkills_OnButton1 0x382180: assign). The arrows of ElectiveMode (left unnamed35 / right unnamed34) page the
+// category the way its own step does past the edge: put the selection on the edge (SelGroup_Set), then Skills_Step(obj, dir) 0x37b5f0.
+static const char *k_grp_name[4] = {"", "skills", "runes", "passives"};
+static int tap_skills(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
+    uint64_t o = rq(ma(V_SKILLS)), root = rq(ma(V_SKILLS_ROOT)); if (!o || !vis(find(root))) return 0;
+    int mode = ri(o + 0x1f8);
+    uint64_t elective = child_id(child_id(child_id(child_id(root, "LayoutRoot"), "SkillSelection"), "Skills"), "ElectiveMode");
+    int arrow = -1;
+    for (int i = 0; i < nh; i++) {
+        if (hits[i]->id == child_id(elective, "unnamed35")) arrow = 0;
+        else if (hits[i]->id == child_id(elective, "unnamed34")) arrow = 1;
+    }
+    for (int gm = 1; gm <= 3; gm++) {
+        uint64_t g = o + 0x200 + 0x38ull * (gm - 1), items = rq(g + 8); int cnt = ri(g + 0x10), sel = ri(g + 0x20);
+        if (!items || cnt <= 0 || cnt > 64 || !in_image(rq(g + 0x30))) continue;
+        int pick = -1;
+        for (int i = 0; i < nh && pick < 0; i++)
+            for (int k = 0; k < cnt; k++) if (is_under(hits[i], rq(items + 8ull * k))) { pick = k; break; }
+        if (pick < 0) continue;
+        uint64_t pid = rq(items + 8ull * pick);
+        LOG("[d3ui] tap UI %.0f,%.0f -> skills %s icon %d/%d %016llx %s, selected %d, mode %d", ux, uy, k_grp_name[gm], pick, cnt, (unsigned long long)pid, name_of(pid), sel, mode);
+        if (gm != mode) { LOG("[d3ui]   not the active group (mode %d): nothing done", mode); return 1; }
+        if (pick == sel) { accept(mgr, "selected skill icon"); return 1; }
+        int r = g_dry ? -1 : ((int (*)(uint64_t, int, int))(g_base + O_GRP_SET))(g, pick, 1);
+        LOG("[d3ui]   SelGroup_Set 0x23ace0(%d) = %d -> selected %d", pick, r, ri(g + 0x20));
+        return 1;
+    }
+    if (arrow >= 0) {
+        uint64_t g = o + 0x200; int cnt = ri(g + 0x10), cat = ri(o + 0x6c0);
+        LOG("[d3ui] tap UI %.0f,%.0f -> skills category arrow %s, mode %d, category %d, %d icons", ux, uy, arrow ? "right" : "left", mode, cat, cnt);
+        if (mode != 1 || cnt <= 0 || cnt > 64) return 1;
+        if (!g_dry) {
+            ((int (*)(uint64_t, int, int))(g_base + O_GRP_SET))(g, arrow ? cnt - 1 : 0, 1);   // to the edge, then its own step pages
+            ((void (*)(uint64_t, int))(g_base + O_SKL_STEP))(o, arrow);
+        }
+        LOG("[d3ui]   Skills_Step 0x37b5f0(%d): category %d -> %d, selected %d", arrow, cat, ri(o + 0x6c0), ri(g + 0x20));
+        return 1;
+    }
+    return 0;
+}
+// button legend (main menu "A accept  X change hero  B exit", ConsoleButtonLegend_main...ButtonLegend, and the dialogs' own legends): the
+// text of the text control (+0x398; the main one is built by 0x1bb840 from the legend model: per slot "{icon:<button>,2.0}" + nbsp + label,
+// entries 6 spaces apart, centred) is split into entries; the entry under the finger = that console button's logical press through the UI
+// dispatcher. Widths are estimated per character (icon 18, space 5.8, other 7.4 UI units; main menu legend measured at 318..642).
+static int icon_button(const char *n, size_t len) {
+    static const struct { const char *n; int b; } k[] = {{"button1", 0}, {"button2", 1}, {"button3", 2}, {"button4", 3}, {"l1", 4}, {"r1", 5}, {"l2", 6},
+        {"r2", 7}, {"up", 8}, {"down", 9}, {"left", 10}, {"right", 11}, {"minus", 12}, {"plus", 13}, {"l3", 14}, {"r3", 15}, {"options", 17}};
+    for (unsigned i = 0; i < sizeof k / sizeof *k; i++) if (strlen(k[i].n) == len && !strncasecmp(n, k[i].n, len)) return k[i].b;
+    return -1;
+}
+static int tap_legend(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
+    for (int i = 0; i < nh; i++) {
+        ctrl *c = hits[i]; if (c->kind != K_BUTTON) continue;
+        char t[512]; uint64_t tp = rq(c->c + 0x398); size_t got = sizeof t - 1;
+        if (!tp) continue;
+        while (got >= 16 && !rd(tp, t, got)) got /= 2;
+        if (got < 16) continue;
+        t[got] = 0;
+        if (!strstr(t, "{icon:")) continue;
+        struct { float a, b; int btn; } e[16]; int ne = 0, spaces = 0; float x = 0;
+        for (const char *q = t; *q; ) {
+            if (!strncasecmp(q, "{icon:", 6)) {
+                const char *nm = q + 6, *end = strchr(nm, '}'); if (!end) break;
+                size_t l = strcspn(nm, ",}"); int b = icon_button(nm, l);
+                if (b >= 0 && ne < 16) { if (ne) e[ne - 1].b = x - spaces * 5.8f; e[ne].a = x; e[ne].b = -1; e[ne].btn = b; ne++; }
+                x += 18; spaces = 0; q = end + 1; continue;
+            }
+            unsigned char ch = (unsigned char)*q;
+            if (ch == ' ') { x += 5.8f; spaces++; q++; continue; }
+            if (ch == 0xc2 && (unsigned char)q[1] == 0xa0) { x += 5.8f; q += 2; continue; }   // nbsp between icon and label
+            if (ch == '{') { const char *end = strchr(q, '}'); q = end ? end + 1 : q + 1; continue; }   // other markup
+            spaces = 0; x += 7.4f; q++;
+            while ((*q & 0xc0) == 0x80) q++;   // one UTF-8 code point
+        }
+        if (!ne) continue;
+        if (e[ne - 1].b < 0) e[ne - 1].b = x;
+        float w = x, cw = c->r[2] - c->r[0], cx = (c->r[0] + c->r[2]) * 0.5f, k = w > cw && w > 0 ? cw / w : 1.0f, x0 = cx - w * k * 0.5f;
+        int pick = -1; float best = 1e9f;
+        for (int j = 0; j < ne; j++) {
+            float a = x0 + e[j].a * k, b = x0 + e[j].b * k, d = ux < a ? a - ux : ux > b ? ux - b : 0;
+            if (d < best) { best = d; pick = j; }
+        }
+        LOG("[d3ui] tap UI %.0f,%.0f -> button legend %016llx %s: %d entries over %.0f..%.0f, entry %d (button %d, %.0f off)", ux, uy, (unsigned long long)c->id,
+            name_of(c->id), ne, x0, x0 + w * k, pick, pick >= 0 ? e[pick].btn : -1, best);
+        if (pick < 0 || best > 30) return 1;
+        ui_button(mgr, e[pick].btn, "button legend entry");
+        return 1;
+    }
+    return 0;
+}
 static int tap_list(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
     ctrl *L = NULL, *row = NULL; int k = -1;
     uint64_t modal = rq(mgr + 0x38); if (!id_valid(modal)) modal = 0;   // a modal control up (mgr+0x38): only lists inside it
@@ -501,6 +622,12 @@ static int tap_list(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
         }
     }
     if (!L) return 0;
+    ctrl *fl = find(rq(mgr + 0x50));   // a focused list drawn above this one (a popup over the menu, e.g. ConsolePlayerOptions over the main menu)
+    if (fl && fl != L && fl->kind == K_LIST && vis(fl) && above(fl, L)) {
+        LOG("[d3ui] tap UI %.0f,%.0f -> list %016llx %s under the focused popup list %016llx %s: nothing done", ux, uy, (unsigned long long)L->id, name_of(L->id),
+            (unsigned long long)fl->id, name_of(fl->id));
+        return 1;
+    }
     int sel = ri(L->c + 0x1e0), first = ri(L->c + 0x1e4), per = ri(L->c + 0x2a4), mode = ri(L->c + 0x2a0);
     int idx = (first < 0 ? 0 : first * (per > 0 ? per : 1)) + k;   // items[k] <-> first * per + k (0x3873d0 / 0x3876c0 use items[sel - first * per])
     LOG("[d3ui] tap UI %.0f,%.0f -> list %016llx %s row %d (item %d %016llx), selected %d, first %d, per %d, layout %d", ux, uy, (unsigned long long)L->id,
@@ -527,12 +654,16 @@ static void do_tap(uint64_t mgr, float fx, float fy) {
     for (int i = 0; i < n; i++) {
         ctrl *c = &g_c[i]; if (!hit(c, ux, uy)) continue;
         if (nh == hcap) { int nc = hcap ? hcap * 2 : 512; ctrl **v = realloc(hits, (size_t)nc * sizeof *v); if (!v) break; hits = v; hcap = nc; }
-        hits[nh++] = c; if (!top || above(c, top)) top = c;
+        hits[nh++] = c;
+        int full = c->r[2] - c->r[0] >= 900 && c->r[3] - c->r[1] >= 700;   // screen roots / fade layers: never targets, only skipped in the log
+        if (!full && (!top || above(c, top))) top = c;
     }
     g_dry = g_tap_mode == 2;
     if (tap_nav(mgr, ux, uy, hits, nh)) return;
     if (tap_ring(mgr, ux, uy)) return;
+    if (tap_skills(mgr, ux, uy, hits, nh)) return;
     if (tap_list(mgr, ux, uy, hits, nh)) return;
+    if (tap_legend(mgr, ux, uy, hits, nh)) return;
     ctrl *w = NULL, *b = NULL;
     for (int i = 0; i < nh; i++) {
         ctrl *c = hits[i];
@@ -551,6 +682,85 @@ static void do_tap(uint64_t mgr, float fx, float fy) {
     if (vis(title) && !in_game()) { LOG("[d3ui] tap UI %.0f,%.0f -> title screen", ux, uy); accept(mgr, "title screen"); return; }
     LOG("[d3ui] tap %.3f,%.3f = UI %.0f,%.0f: nothing to do (topmost %016llx %s vt %#llx type %s, %d controls under the finger)", fx, fy, ux, uy,
         top ? (unsigned long long)top->id : 0ull, top ? name_of(top->id) : "", top ? (unsigned long long)mo(top->vt) : 0ull, top ? top->type : "", nh);
+}
+
+
+// ---- swipe = list scroll. The game scrolls a list only by moving its selection (D-pad 0x387a40 and both sticks 0x387800 end in
+// List_SetSelected, which brings the new row into view: 0x385980 / 0x385c90). So a swipe selects the row just past the visible edge it pulls
+// in: finger down (dy > 0, earlier rows) -> (first row - n), finger up -> (last visible + n); one row per row height of finger travel.
+// dm_d3_ui_scroll runs on the UI thread: it answers from a cache of the visible lists (rects in picture fractions) that the game thread
+// refreshes every 10 polls while a menu is open, and queues the travel; the next poll applies it.
+enum { MAX_LISTS = 24 };
+typedef struct { uint64_t id; float l, t, r, b; } list_rect;
+static list_rect g_lists[MAX_LISTS]; static int g_nlists; static _Atomic unsigned g_lists_seq;
+static _Atomic uint64_t g_scroll_id; static _Atomic int g_scroll_pend;   // travel in 1/100000 of the picture height
+static void refresh_lists(uint64_t mgr) {   // game thread: every visible list class control (vtable only, no full snapshot)
+    pxmap m; uint64_t map = rq(mgr), buckets; uint32_t mask;
+    if (!px_map(&m) || !map || !rd(map, &mask, 4) || mask > 0xfffff || !(buckets = rq(map + 0x10))) return;
+    list_rect tmp[MAX_LISTS]; int n = 0;
+    for (uint32_t i = 0; i <= mask && n < MAX_LISTS; i++) {
+        uint64_t node = rq(buckets + 8ull * i);
+        for (int guard = 0; node && guard < 4096 && n < MAX_LISTS; guard++) {
+            uint64_t nd[3]; if (!rd(node, nd, sizeof nd)) break;
+            uint64_t vt; uint16_t fl; float r[4];
+            if (nd[2] && rd(nd[2], &vt, 8) && vt == ma(O_VT_LIST) && rd(nd[2] + 0x18, &fl, 2) && (fl & 4) && rd(nd[2] + 0x88, r, sizeof r) && r[2] > r[0] && r[3] > r[1])
+                tmp[n++] = (list_rect){nd[1], ux2px(&m, r[0]) / m.w, uy2px(&m, r[1]) / m.h, ux2px(&m, r[2]) / m.w, uy2px(&m, r[3]) / m.h};
+            node = nd[0];
+        }
+    }
+    atomic_fetch_add_explicit(&g_lists_seq, 1, memory_order_acq_rel);   // odd: writing
+    memcpy(g_lists, tmp, sizeof tmp[0] * (size_t)n); g_nlists = n;
+    atomic_fetch_add_explicit(&g_lists_seq, 1, memory_order_release);
+}
+int dm_d3_ui_scroll(float x, float y, float dy);
+int dm_d3_ui_scroll(float x, float y, float dy) {
+    if (g_ok <= 0 || g_tap_mode <= 0 || !atomic_load_explicit(&g_menu_open, memory_order_acquire) || !(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return 0;
+    uint64_t best = 0; float area = 1e9f;
+    for (int tries = 0; tries < 4; tries++) {
+        unsigned s0 = atomic_load_explicit(&g_lists_seq, memory_order_acquire); if (s0 & 1) continue;
+        list_rect v[MAX_LISTS]; int n = g_nlists; if (n > MAX_LISTS) n = MAX_LISTS; memcpy(v, g_lists, sizeof v[0] * (size_t)n);
+        if (atomic_load_explicit(&g_lists_seq, memory_order_acquire) != s0) continue;
+        for (int i = 0; i < n; i++) {   // the smallest list under the finger (a list inside a popup over a full-height one)
+            float a = (v[i].r - v[i].l) * (v[i].b - v[i].t);
+            if (x >= v[i].l && x < v[i].r && y >= v[i].t && y < v[i].b && a < area) { area = a; best = v[i].id; }
+        }
+        break;
+    }
+    if (!best) return 0;
+    if (atomic_exchange(&g_scroll_id, best) != best) atomic_store(&g_scroll_pend, 0);
+    if (isfinite(dy)) atomic_fetch_add(&g_scroll_pend, (int)lrintf(dy * 100000.0f));
+    return 1;
+}
+static void do_scroll(uint64_t mgr) {   // game thread
+    static uint64_t last_id; static float acc;
+    int pend = atomic_exchange(&g_scroll_pend, 0); uint64_t id = atomic_load(&g_scroll_id);
+    if (!id) return;
+    if (id != last_id) { last_id = id; acc = 0; }
+    if (!pend) return;
+    uint64_t L = map_get(mgr, id), vt, items; uint16_t fl;
+    if (!L || !rd(L, &vt, 8) || vt != ma(O_VT_LIST) || !rd(L + 0x18, &fl, 2) || !(fl & 4) || !(items = rq(L + 0x210))) return;
+    float rr[4]; uint64_t it0 = map_get(mgr, rq(items));
+    if (!it0 || !rd(it0 + 0x88, rr, sizeof rr) || rr[3] - rr[1] < 4) return;
+    float rowh = rr[3] - rr[1];
+    acc += pend / 100000.0f * UI_H;   // picture height = the 720 UI units
+    int rows = (int)(acc / rowh); if (!rows) return;
+    acc -= rows * rowh;
+    int sel = ri(L + 0x1e0), first = ri(L + 0x1e4), per = ri(L + 0x2a4), shown = ri(L + 0x1e8), layout = ri(L + 0x2a0);
+    if (per < 1) per = 1;
+    if (first < 0) first = 0;
+    if (layout == 2) return;   // horizontal lists (dialog buttons) do not scroll vertically
+    uint64_t ds = rq(L + 0x258), cf = ds ? rq(rq(ds) + 0x10) : 0;   // data source vtable+0x10 = number of entries (what SetSelected checks)
+    if (!in_image(cf)) return;
+    int count = ((int (*)(uint64_t))(uintptr_t)cf)(ds), col = sel >= 0 ? sel % per : 0, to;
+    if (count <= 0) return;
+    if (rows > 0) to = (first - rows) * per + col;                    // finger down: pull in earlier rows at the top
+    else to = first * per + (shown > 0 ? shown - 1 : 0) + (-rows) * per;   // finger up: later rows at the bottom
+    if (to < 0) to = col < count ? col : 0;
+    if (to > count - 1) to = count - 1;
+    if (to == sel) return;
+    if (!g_dry) ((void (*)(uint64_t, int))(g_base + O_SETSEL))(L, to);
+    LOG("[d3ui] scroll %016llx %s: %+d rows (row %.0f UI) -> List_SetSelected(%d): selected %d -> %d, first %d -> %d", (unsigned long long)id, name_of(id), rows,
+        rowh, to, sel, ri(L + 0x1e0), first, ri(L + 0x1e4));
 }
 
 // ---- full dump
@@ -577,6 +787,20 @@ static void dump(uint64_t mgr) {
     fprintf(f, "# input listeners (mgr+0x10): %u:", lc);
     for (uint32_t k = 0; la && k < lc && k < 64; k++) { uint64_t c = rq(la + 8ull * k), id = c ? rq(c + 0x30) : 0; fprintf(f, " %016llx %s;", (unsigned long long)id, name_of(id)); }
     fputc('\n', f);
+    fprintf(f, "# button legend model (slot: action):");   // slots: 4 A, 5 X, 6 Y, 7 B, 8/9 L/R, 0xa/0xb ZL/ZR, 0xc..0xf D-pad, 0x12 +, 0x13 -
+    for (int k = 0; k < 0x17; k++) { int a = legend_action(k); if (a != -1) fprintf(f, " %#x:%d", k, a); }
+    fputc('\n', f);
+    { uint64_t o = rq(ma(V_SKILLS)), root = rq(ma(V_SKILLS_ROOT));
+      if (o && vis(find(root))) {
+          fprintf(f, "# skills %#llx: mode %d, category %d;", (unsigned long long)o, ri(o + 0x1f8), ri(o + 0x6c0));
+          for (int gm = 1; gm <= 3; gm++) {
+              uint64_t g = o + 0x200 + 0x38ull * (gm - 1), items = rq(g + 8); int cnt = ri(g + 0x10);
+              fprintf(f, " %s: %d of %d [", k_grp_name[gm], ri(g + 0x20), cnt);
+              for (int k = 0; items && k < cnt && k < 16; k++) { uint64_t id = rq(items + 8ull * k); fprintf(f, "%s%016llx %s", k ? ", " : "", (unsigned long long)id, name_of(id)); }
+              fprintf(f, "];");
+          }
+          fputc('\n', f);
+      } }
     ring rs[16]; int nr = find_rings(rs, 16, ui_player(mgr));
     for (int i = 0; i < nr; i++) {
         uint64_t h = rs[i].h, v = rq(h), rid = rq(h + 0x18), cur = rq(h + 0x20); int cnt = (int)rq(h + 8);
@@ -652,6 +876,9 @@ void dm_d3_ui_pump(uint64_t *buttons) {
         if (open) do_tap(mgr, x, y); else LOG("[d3ui] tap %.3f,%.3f: no menu open, ignored", x, y);
     }
     static unsigned tick; ++tick;
+    if (g_tap_mode && open && tick % 10 == 3) refresh_lists(mgr);
+    if (!open && g_nlists) { atomic_fetch_add(&g_lists_seq, 1); g_nlists = 0; atomic_fetch_add(&g_lists_seq, 1); }
+    if (g_tap_mode) { g_dry = g_tap_mode == 2; if (open) do_scroll(mgr); else atomic_store(&g_scroll_pend, 0); }
     if (g_tap_mode && tick % 30 == 15) {   // test path without the front end: dm/ui-tap-now holding "x y" (picture fractions)
         char t[1200]; snprintf(t, sizeof t, "%s/ui-tap-now", g_dir); FILE *f = fopen(t, "r");
         if (f) { float x = -1, y = -1; int ok = fscanf(f, "%f %f", &x, &y) == 2; fclose(f); remove(t);

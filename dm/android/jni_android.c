@@ -626,6 +626,18 @@ JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiTap(JNIEn
     (void)x; (void)y; return JNI_FALSE;
 #endif
 }
+// [D3] Swipe over a console menu list (hle_d3_ui.c dm_d3_ui_scroll): x / y = picture fractions of the finger, dy = finger travel since the last
+// call in picture-height fractions (+ = down = earlier rows). true = a visible list is under the finger and the travel was queued (the next npad
+// poll moves its selection one row per row height, which scrolls it); false = no list there (use the gesture for the stick / world).
+// Java: `static native boolean nativeD3UiScroll(float x, float y, float dy);`
+JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiScroll(JNIEnv *env, jclass cls, jfloat x, jfloat y, jfloat dy) {
+    (void)env; (void)cls;
+#ifdef DM_GAME_D3
+    int dm_d3_ui_scroll(float x, float y, float dy); return dm_d3_ui_scroll(x, y, dy) ? JNI_TRUE : JNI_FALSE;
+#else
+    (void)x; (void)y; (void)dy; return JNI_FALSE;
+#endif
+}
 // [D3] A console menu is up (front end, a console screen group such as pause or the "+" hero menu, a focused or modal control); published by
 // every npad poll. Java: `static native boolean nativeD3UiMenuOpen();`
 JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiMenuOpen(JNIEnv *env, jclass cls) {
