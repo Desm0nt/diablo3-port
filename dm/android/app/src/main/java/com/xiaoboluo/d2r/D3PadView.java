@@ -498,12 +498,32 @@ public class D3PadView extends View implements FrontMenu.Pad {
     // ---------------- drawing ----------------
     private boolean showFps; private final float[] fstats = new float[4];
     private final Runnable fpsTick = new Runnable() { public void run() { if (!showFps) return; DmActivity.nativeFrameStats(fstats); invalidate(); postDelayed(this, 500); } };
+    // The top left screen corner as the window insets report it (Android 12+): the rounded corner's centre and radius and the cutout's
+    // safe left inset. Phones with a bigger corner radius than the Mi 14 Ultra's cut the counter off at the fixed 18 dp (issue #1, Poco F8 Ultra).
+    private float cornerCx, cornerCy, cornerR, safeLeft;
+    @Override public android.view.WindowInsets onApplyWindowInsets(android.view.WindowInsets in) {
+        cornerR = 0; safeLeft = 0;
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            android.view.RoundedCorner rc = in.getRoundedCorner(android.view.RoundedCorner.POSITION_TOP_LEFT);
+            if (rc != null) { cornerR = rc.getRadius(); cornerCx = rc.getCenter().x; cornerCy = rc.getCenter().y; }
+            safeLeft = in.getInsets(android.view.WindowInsets.Type.displayCutout()).left;
+        }
+        invalidate();
+        return super.onApplyWindowInsets(in);
+    }
+    // Leftmost x at which a line at height y (view coordinates) is inside the rounded top left corner.
+    private float cornerLeft(float y) {
+        if (cornerR <= 0 || y >= cornerCy) return 0;
+        float dy = cornerCy - y; return dy >= cornerR ? cornerCx : cornerCx - (float) Math.sqrt(cornerR * cornerR - dy * dy);
+    }
     private void drawFps(Canvas c) {
         if (!showFps || fstats[0] <= 0) return;
         String t = String.format(Locale.ROOT, "%.0f fps  %.1f ms (max %.0f)%s", fstats[0], fstats[1], fstats[2],
             fstats[3] >= 0 ? String.format(Locale.ROOT, "  GPU %.1f", fstats[3]) : "");
         text.setTextSize(15 * dp); text.setColor(0xd0ffffff);
-        float w = text.measureText(t), x = 18 * dp + w / 2, y = text.getTextSize();   // top left, clear of the rounded screen corner
+        float y = text.getTextSize(), top = y + text.ascent();   // top of the glyphs
+        float left = Math.max(18 * dp, Math.max(safeLeft, cornerLeft(top)) + 6 * dp);   // clear of the rounded screen corner and the cutout
+        float w = text.measureText(t), x = left + w / 2;
         fill.setColor(0x80000000); c.drawRect(0, 0, x + w / 2 + 6 * dp, y + 5 * dp, fill);
         c.drawText(t, x, y, text);
     }
