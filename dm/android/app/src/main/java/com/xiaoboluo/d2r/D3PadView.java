@@ -111,6 +111,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private Stick left, right;   // right: gamepad layout only
     private final Map<String, float[]> pos = new HashMap<>();   // group -> saved anchor (fractions of the view)
     private float deadzone, op = 1f, scale = 1f, heroFy = HERO_Y_DEFAULT / 100f, depth = DEPTH_DEFAULT / 100f;
+    private int aspect;   // gear "Picture shape": 0 the 16:9 picture with bars, 1 stretched, 2 widescreen (game at the screen's aspect)
     private boolean stretched;   // gear "Picture shape" 1: the 16:9 picture stretched to the view; 0 bars / 2 widescreen (game at the screen's aspect) keep square pixels and the full height
     private int menuSwipe = MENU_SWIPE_STICK;
     private String menuLabel = "MENU", editHint = "", resetLabel = "Reset", doneLabel = "Done";
@@ -192,7 +193,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         heroFy = clamp(p.getInt("d3_hero_y", HERO_Y_DEFAULT), HERO_Y_MIN, HERO_Y_MAX) / 100f;
         depth = clamp(p.getInt("d3_depth", DEPTH_DEFAULT), DEPTH_MIN, DEPTH_MAX) / 100f;
         menuSwipe = p.getInt("d3_menu_swipe", MENU_SWIPE_STICK) == MENU_SWIPE_DPAD ? MENU_SWIPE_DPAD : MENU_SWIPE_STICK;
-        stretched = c.getSharedPreferences("doom_graphics", Context.MODE_PRIVATE).getInt("aspect", 0) == 1;
+        aspect = c.getSharedPreferences("doom_graphics", Context.MODE_PRIVATE).getInt("aspect", 0); stretched = aspect == 1;
         iconsOn = p.getBoolean("d3_icons", true);
         hideSticks = p.getBoolean("d3_hide_sticks", true);
         skinPack = p.getString("skin", PadSkin.CLASSIC);   // [front] PadSkin pack or classic
@@ -370,7 +371,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
             swipeKey = menuDpad; swipeStick = true; menuDpad = 0; menuSwiping = false;
             long wait = cancel ? 0 : MENU_MIN_SWIPE_MS - (SystemClock.uptimeMillis() - swipeT0);
             if (wait > 0) postDelayed(swipeEnd, wait); else finishSwipe();
-        } else if (!cancel) pulse(K_A);
+        } else if (!cancel && !uiTap(menuX0, menuY0)) pulse(K_A);
     }
     void setMenuMode(boolean on) {
         releaseAll(); menuMode = on; axes(); iconGate(); invalidate();
@@ -384,6 +385,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         if (right != null && right.pointer >= 0) { release(right, false); any = true; }
         if (worldPtr >= 0) { worldPtr = -1; any = true; }
         if (menuPtr >= 0) { menuEnd(true); any = true; }
+        uiPtr = -1;
         if (swipeKey != 0 || swipeStick) { finishSwipe(); any = true; }
         if (evadeUntil > SystemClock.uptimeMillis()) any = true;
         evadeUntil = 0;
@@ -468,10 +470,8 @@ public class D3PadView extends View implements FrontMenu.Pad {
             else if (b != null && b.key == MENU_TOGGLE) setMenuMode(!menuMode);
             else if (b != null) { if (b.pointer < 0) { b.pointer = id; key(b.key, true); } }
             else if (menuMode) { if (menuPtr < 0) menuStart(id, x, y); }
-            else if (left.pointer < 0 && near(left, x, y, left.grab)) grab(left, id, x, y);   // the stick takes touches around its home
-            else if (left.pointer < 0 && floatZone(left, x, y)) grabFloating(left, id, x, y);
-            else if (right != null) { if (right.pointer < 0 && near(right, x, y, right.grab)) grab(right, id, x, y); else if (right.pointer < 0 && floatZone(right, x, y)) grabFloating(right, id, x, y); }   // gamepad: other free taps do nothing
-            else if (worldPtr < 0 && y > TOP_STRIP_F * getHeight()) worldStart(id, x, y);
+            else if (uiPtr < 0 && gameMenuOpen()) { uiPtr = id; uiX0 = x; uiY0 = y; uiT0 = SystemClock.uptimeMillis(); }
+            else freeDown(id, x, y);
             break;
         }
         case MotionEvent.ACTION_MOVE:
@@ -481,6 +481,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
                 if (right != null && pid == right.pointer) moveStick(right, px, py);
                 if (pid == worldPtr) worldMove(px, py);
                 if (pid == menuPtr) menuMove(px, py);
+                if (pid == uiPtr && Math.hypot(px - uiX0, py - uiY0) > TAP_SLOP_DP * dp) { uiPtr = -1; freeDown(pid, uiX0, uiY0); freeMove(pid, px, py); }
             }
             break;
         case MotionEvent.ACTION_UP: case MotionEvent.ACTION_POINTER_UP: case MotionEvent.ACTION_CANCEL: {
@@ -490,11 +491,39 @@ public class D3PadView extends View implements FrontMenu.Pad {
             if (right != null && right.pointer >= 0 && (id == right.pointer || all)) release(right, !cancel);
             if (worldPtr >= 0 && (id == worldPtr || all)) worldEnd(cancel);
             if (menuPtr >= 0 && (id == menuPtr || all)) menuEnd(cancel);
+            if (uiPtr >= 0 && (id == uiPtr || all)) { if (!cancel && SystemClock.uptimeMillis() - uiT0 < UI_TAP_MS) uiTap(uiX0, uiY0); uiPtr = -1; }
             break;
         }
         }
         axes(); invalidate();
         return true;
+    }
+
+    // ---------------- touch on the game's own menus (hle_d3_ui.c) ----------------
+    // While a console menu has the UI focus, a free finger (not on a pad button) waits: a short still tap goes to the game's UI as a tap on
+    // the element under it (its own select / press / tab / ring code, no pad buttons); moved past the slop it becomes the stick / world finger
+    // it would have been without the menu. The manual MENU mode (touch layout) sends its taps there too and falls back to A.
+    static final long UI_TAP_MS = 400;
+    private int uiPtr = -1; private float uiX0, uiY0; private long uiT0;
+    private static boolean gameMenuOpen() { try { return DmActivity.nativeD3UiMenuOpen(); } catch (UnsatisfiedLinkError e) { return false; } }
+    // View point -> fractions of the game picture: bars = the centred 16:9 box; stretched and widescreen fill the view.
+    private boolean uiTap(float x, float y) {
+        float w = getWidth(), h = getHeight(), pw = w, ph = h;
+        if (aspect == 0) { if (w * 9 > h * 16) pw = h * 16 / 9; else ph = w * 9 / 16; }
+        float fx = (x - (w - pw) * 0.5f) / pw, fy = (y - (h - ph) * 0.5f) / ph;
+        if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return false;
+        try { return DmActivity.nativeD3UiTap(fx, fy); } catch (UnsatisfiedLinkError e) { return false; }
+    }
+    private void freeDown(int id, float x, float y) {
+        if (left.pointer < 0 && near(left, x, y, left.grab)) grab(left, id, x, y);   // the stick takes touches around its home
+        else if (left.pointer < 0 && floatZone(left, x, y)) grabFloating(left, id, x, y);
+        else if (right != null) { if (right.pointer < 0 && near(right, x, y, right.grab)) grab(right, id, x, y); else if (right.pointer < 0 && floatZone(right, x, y)) grabFloating(right, id, x, y); }   // gamepad: other free taps do nothing
+        else if (worldPtr < 0 && y > TOP_STRIP_F * getHeight()) worldStart(id, x, y);
+    }
+    private void freeMove(int id, float x, float y) {
+        if (id == left.pointer) moveStick(left, x, y);
+        if (right != null && id == right.pointer) moveStick(right, x, y);
+        if (id == worldPtr) worldMove(x, y);
     }
 
     // ---------------- drawing ----------------

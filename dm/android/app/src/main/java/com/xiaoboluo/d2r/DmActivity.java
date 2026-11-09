@@ -62,6 +62,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native void nativeSurface(Object surface, int w, int h);
     static native void nativeRefresh(float hz);
     static native void nativeFrameStats(float[] out);   // [DOOM] {fps, mean ms, max ms, GPU ms} over the last 0.5 s
+    // [D3] touch on the console UI (hle_d3_ui.c, docs/d3/TOUCH_DESIGN.md §7-8): a menu has the UI focus; a tap at picture fractions x, y
+    // runs the tapped element's own action on the game thread. Both false when the host has it off.
+    static native boolean nativeD3UiMenuOpen();
+    static native boolean nativeD3UiTap(float x, float y);
     static native void nativeTouch(int n, int[] ids, float[] xs, float[] ys);
     static native void nativeSetDrs(boolean on);   // [XC2] dynamic resolution on / off, live (hle_xc2.c)
     static native void nativeFocus(int ev);
