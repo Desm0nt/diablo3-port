@@ -614,15 +614,26 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativePadRemoved(JNIEnv
     (void)env; (void)cls;
     front_android_pad_removed(device);
 }
-// [D3] Tap on a UI element (touch phase 3, hle_d3_ui.c, docs/d3/TOUCH_DESIGN.md §7): x / y = fractions of the game picture (0..1, top left
-// origin). Queued only; the next npad poll (game thread) focuses the topmost visible activatable control under the point and presses A.
-// Java: `static native boolean nativeD3UiTap(float x, float y);` -> false when DM_D3_UITAP is off or the point is outside 0..1.
+// [D3] Tap on a UI element (touch phase 3, hle_d3_ui.c, docs/d3/TOUCH_DESIGN.md §8): x / y = fractions of the game picture (0..1, top left
+// origin). Queued only; the next npad poll (game thread) works the element under the point through the game's own UI code (list row select,
+// accept event, ring segment, tab, checkbox, selector). No pad buttons.
+// Java: `static native boolean nativeD3UiTap(float x, float y);` -> false when DM_D3_UITAP=0 or the point is outside 0..1.
 JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiTap(JNIEnv *env, jclass cls, jfloat x, jfloat y) {
     (void)env; (void)cls;
 #ifdef DM_GAME_D3
     int dm_d3_ui_tap(float x, float y); return dm_d3_ui_tap(x, y) ? JNI_TRUE : JNI_FALSE;
 #else
     (void)x; (void)y; return JNI_FALSE;
+#endif
+}
+// [D3] A console menu is up (front end, a console screen group such as pause or the "+" hero menu, a focused or modal control); published by
+// every npad poll. Java: `static native boolean nativeD3UiMenuOpen();`
+JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiMenuOpen(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+#ifdef DM_GAME_D3
+    int dm_d3_ui_menu_open(void); return dm_d3_ui_menu_open() ? JNI_TRUE : JNI_FALSE;
+#else
+    return JNI_FALSE;
 #endif
 }
 
