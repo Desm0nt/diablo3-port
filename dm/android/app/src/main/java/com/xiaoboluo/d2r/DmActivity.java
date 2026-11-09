@@ -66,6 +66,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // runs the tapped element's own action on the game thread. Both false when the host has it off.
     static native boolean nativeD3UiMenuOpen();
     static native boolean nativeD3UiTap(float x, float y);
+    static native boolean nativeD3UiScroll(float x, float y, float dy);   // [D3] dy = finger travel in picture heights since the last call (+ = down); false = no list under it
     static native void nativeTouch(int n, int[] ids, float[] xs, float[] ys);
     static native void nativeSetDrs(boolean on);   // [XC2] dynamic resolution on / off, live (hle_xc2.c)
     static native void nativeFocus(int ev);
