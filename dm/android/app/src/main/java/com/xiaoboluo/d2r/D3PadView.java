@@ -267,7 +267,9 @@ public class D3PadView extends View implements FrontMenu.Pad {
         if (d > r) { dx *= r / d; dy *= r / d; }
         s.x = dx; s.y = dy; s.travel = Math.max(s.travel, d);
     }
-    private void grab(Stick s, int id, float x, float y) { s.onKnob = near(s, x, y, 1.0f); s.pointer = id; s.down = SystemClock.uptimeMillis(); moveStick(s, x, y); s.travel = 0; }
+    // A touch near the home also puts the base under the finger: tilting from the home centre made a touch beside the knob start at
+    // full tilt in a "random" direction (issue #6). onKnob still tells a tap on the knob (L3 / R3) from a drag.
+    private void grab(Stick s, int id, float x, float y) { boolean knob = near(s, x, y, 1.0f); grabFloating(s, id, x, y); s.onKnob = knob; }
     private void grabFloating(Stick s, int id, float x, float y) { s.baseX = x; s.baseY = y; s.onKnob = false; s.pointer = id; s.down = SystemClock.uptimeMillis(); s.x = s.y = 0; s.travel = 0; }
     private void release(Stick s, boolean click) {   // a short tap on a stick's home knob presses L3 / R3
         if (click && s.onKnob && s.travel < 0.5f * rad(s) && SystemClock.uptimeMillis() - s.down < 300) pulse(s.clickKey);
