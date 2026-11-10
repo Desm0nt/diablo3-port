@@ -424,7 +424,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         if (right != null && right.pointer >= 0) { release(right, false); any = true; }
         if (worldPtr >= 0) { worldPtr = -1; any = true; }
         if (menuPtr >= 0) { menuEnd(true); any = true; }
-        uiPtr = -1; uiScrolling = false;
+        uiPtr = -1; uiScrolling = uiPanning = false; pinchPtr = -1;
         if (swipeKey != 0 || swipeStick) { finishSwipe(); any = true; }
         if (evadeUntil > SystemClock.uptimeMillis()) any = true;
         evadeUntil = 0;
@@ -589,18 +589,20 @@ public class D3PadView extends View implements FrontMenu.Pad {
             else if (b != null && b.key == MENU_TOGGLE) setMenuMode(!menuMode);
             else if (b != null) { if (b.pointer < 0) { b.pointer = id; key(b.key, true); } }
             else if (menuMode) { if (menuPtr < 0) menuStart(id, x, y); }
-            else if (uiPtr < 0 && (gameMenuOpen() || minimapHit(x, y))) { uiPtr = id; uiX0 = x; uiY0 = y; uiT0 = SystemClock.uptimeMillis(); uiScrolling = false; }
+            else if (uiPtr >= 0 && pinchPtr < 0 && mapOpen()) pinchStart(e, id, x, y);   // a second finger on the big map: pinch zoom
+            else if (uiPtr < 0 && (gameMenuOpen() || minimapHit(x, y))) { uiPtr = id; uiX0 = x; uiY0 = y; uiT0 = SystemClock.uptimeMillis(); uiScrolling = uiPanning = false; }
             else freeDown(id, x, y);
             break;
         }
         case MotionEvent.ACTION_MOVE:
+            if (pinchPtr >= 0) pinchMove(e);
             for (int k = 0; k < e.getPointerCount(); k++) {
                 int pid = e.getPointerId(k); float px = e.getX(k), py = e.getY(k);
                 if (pid == left.pointer) moveStick(left, px, py);
                 if (right != null && pid == right.pointer) moveStick(right, px, py);
                 if (pid == worldPtr) worldMove(px, py);
                 if (pid == menuPtr) menuMove(px, py);
-                if (pid == uiPtr) uiMove(pid, px, py);
+                if (pid == uiPtr && pinchPtr < 0) uiMove(pid, px, py);
             }
             break;
         case MotionEvent.ACTION_UP: case MotionEvent.ACTION_POINTER_UP: case MotionEvent.ACTION_CANCEL: {
@@ -610,7 +612,8 @@ public class D3PadView extends View implements FrontMenu.Pad {
             if (right != null && right.pointer >= 0 && (id == right.pointer || all)) release(right, !cancel);
             if (worldPtr >= 0 && (id == worldPtr || all)) worldEnd(cancel);
             if (menuPtr >= 0 && (id == menuPtr || all)) menuEnd(cancel);
-            if (uiPtr >= 0 && (id == uiPtr || all)) { if (!cancel && !uiScrolling && SystemClock.uptimeMillis() - uiT0 < UI_TAP_MS) uiTap(uiX0, uiY0); uiPtr = -1; uiScrolling = false; }
+            if (pinchPtr >= 0 && (id == pinchPtr || id == uiPtr || all)) { pinchPtr = -1; uiPtr = -1; uiScrolling = uiPanning = false; }   // a pinch ends both fingers' gesture, no tap
+            if (uiPtr >= 0 && (id == uiPtr || all)) { if (!cancel && !uiScrolling && !uiPanning && SystemClock.uptimeMillis() - uiT0 < UI_TAP_MS) uiTap(uiX0, uiY0); uiPtr = -1; uiScrolling = uiPanning = false; }
             break;
         }
         }
@@ -650,9 +653,37 @@ public class D3PadView extends View implements FrontMenu.Pad {
     }
     private void uiMove(int id, float x, float y) {
         if (uiScrolling) { uiScroll(y - uiLastY); uiLastY = y; return; }
+        if (uiPanning) { mapPan(x - uiLastX, y - uiLastY); uiLastX = x; uiLastY = y; return; }
         if (Math.hypot(x - uiX0, y - uiY0) <= TAP_SLOP_DP * dp) return;
         if (Math.abs(y - uiY0) > Math.abs(x - uiX0) && uiScroll(y - uiY0)) { uiScrolling = true; uiLastY = y; return; }
+        if (mapOpen() && mapPan(x - uiX0, y - uiY0)) { uiPanning = true; uiLastX = x; uiLastY = y; return; }   // the big map: one finger pans it
         uiPtr = -1; freeDown(id, uiX0, uiY0); freeMove(id, x, y);
+    }
+    // ---- the game's big map (zone view): one finger drags it, two fingers pinch-zoom it about their middle (and drag it along)
+    private boolean uiPanning; private float uiLastX; private int pinchPtr = -1; private float pinchD, pinchMx, pinchMy;
+    private static boolean mapOpen() { try { return DmActivity.nativeD3UiMapOpen(); } catch (UnsatisfiedLinkError e) { return false; } }
+    private boolean mapPan(float dxPx, float dyPx) {
+        float w = getWidth(), h = getHeight(), pw = w, ph = h;
+        if (aspect == 0) { if (w * 9 > h * 16) pw = h * 16 / 9; else ph = w * 9 / 16; }
+        if (pw <= 0 || ph <= 0) return false;
+        try { return DmActivity.nativeD3UiMapPan(dxPx / pw, dyPx / ph); } catch (UnsatisfiedLinkError e) { return false; }
+    }
+    private void pinchStart(MotionEvent e, int id, float x, float y) {
+        int k1 = e.findPointerIndex(uiPtr); if (k1 < 0) return;
+        float x1 = e.getX(k1), y1 = e.getY(k1);
+        pinchPtr = id; pinchD = (float) Math.hypot(x - x1, y - y1); pinchMx = (x + x1) / 2; pinchMy = (y + y1) / 2;
+        uiScrolling = false; uiPanning = true;   // no tap from the first finger any more
+    }
+    private void pinchMove(MotionEvent e) {
+        int k1 = e.findPointerIndex(uiPtr), k2 = e.findPointerIndex(pinchPtr); if (k1 < 0 || k2 < 0) return;
+        float x1 = e.getX(k1), y1 = e.getY(k1), x2 = e.getX(k2), y2 = e.getY(k2);
+        float d = (float) Math.hypot(x2 - x1, y2 - y1), mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+        if (pinchD > 8 * dp && d > 8 * dp && Math.abs(d / pinchD - 1) > 0.01f) {
+            float[] c = picture(mx, my);
+            try { DmActivity.nativeD3UiMapZoom(d / pinchD, c[0], c[1]); } catch (UnsatisfiedLinkError ex) { /* old library */ }
+            pinchD = d;
+        }
+        if (Math.hypot(mx - pinchMx, my - pinchMy) > 1) { mapPan(mx - pinchMx, my - pinchMy); pinchMx = mx; pinchMy = my; }
     }
     private void freeDown(int id, float x, float y) {
         if (left.pointer < 0 && near(left, x, y, left.grab)) grab(left, id, x, y);   // the stick takes touches around its home

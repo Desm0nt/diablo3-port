@@ -67,7 +67,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native boolean nativeD3UiMenuOpen();
     static native boolean nativeD3UiTap(float x, float y);
     static native boolean nativeD3UiMinimapHit(float x, float y);   // [D3] the point is on the HUD minimap (a tap there opens the big map)
-    static native boolean nativeD3UiScroll(float x, float y, float dy);   // [D3] dy = finger travel in picture heights since the last call (+ = down); false = no list under it
+    static native boolean nativeD3UiScroll(float x, float y, float dy);
+    static native boolean nativeD3UiMapOpen();   // [D3] the game's big map (zone view) is up: one finger pans it, two fingers zoom it
+    static native boolean nativeD3UiMapZoom(float factor, float cx, float cy);   // pinch ratio since the last call (> 1 = closer), centre in picture fractions
+    static native boolean nativeD3UiMapPan(float dx, float dy);   // finger travel in picture fractions   // [D3] dy = finger travel in picture heights since the last call (+ = down); false = no list under it
     static native void nativeTouch(int n, int[] ids, float[] xs, float[] ys);
     static native void nativeSetDrs(boolean on);   // [XC2] dynamic resolution on / off, live (hle_xc2.c)
     static native void nativeFocus(int ev);
