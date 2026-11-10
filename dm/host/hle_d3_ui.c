@@ -344,6 +344,10 @@ static int is_under(const ctrl *c, uint64_t anc) {   // c == anc or a descendant
     for (int n = 0; c && n < MAX_DEPTH; n++, c = find(c->parent)) if (c->id == anc) return 1;
     return 0;
 }
+static ctrl *screen_root(ctrl *c) {   // the ancestor whose parent is a layer (Root.NormalLayer 1 / WindowLayer 2 / TopLayer 3): its screen's *_main
+    for (int n = 0; c && n < MAX_DEPTH; n++, c = find(c->parent)) if (c->parent >= 1 && c->parent <= 3) return c;
+    return NULL;
+}
 static int vis(const ctrl *c) { return c && (c->flags & 4); }
 static int hit(const ctrl *c, float x, float y) { return vis(c) && c->has_rect && x >= c->r[0] && x < c->r[2] && y >= c->r[1] && y < c->r[3]; }
 static uint64_t press_handler(const ctrl *c, int button) {   // the control's own handler for a button press (table +0x118: +0x20 + 8 * button)
@@ -731,8 +735,10 @@ static int tap_list(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
         }
     }
     if (!L) return 0;
-    ctrl *fl = find(rq(mgr + 0x50));   // a focused list drawn above this one (a popup over the menu, e.g. ConsolePlayerOptions over the main menu)
-    if (fl && fl != L && fl->kind == K_LIST && vis(fl) && above(fl, L)) {
+    // a focused list of ANOTHER screen drawn above this one (a popup over the menu, e.g. ConsolePlayerOptions over the main menu): higher layer,
+    // or its screen root (the child of Root.<Layer>) a later sibling. Lists of the same screen never block each other (hero menu: ring + item list).
+    ctrl *fl = find(rq(mgr + 0x50)), *fr = fl ? screen_root(fl) : NULL, *lr = screen_root(L);
+    if (fl && fl != L && fl->kind == K_LIST && vis(fl) && fr && lr && fr != lr && (fl->layer > L->layer || (fl->layer == L->layer && above(fr, lr)))) {
         LOG("[d3ui] tap UI %.0f,%.0f -> list %016llx %s under the focused popup list %016llx %s: nothing done", ux, uy, (unsigned long long)L->id, name_of(L->id),
             (unsigned long long)fl->id, name_of(fl->id));
         return 1;
