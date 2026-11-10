@@ -34,9 +34,14 @@ import java.util.Map;
 //       left stick (or the d-pad, "d3_menu_swipe") toward the swipe, a tap = A, a long press = hold A; B, L/R, ZL/ZR, d-pad, -/+ stay.
 // Both layouts: skill icons on the buttons (gear "Skill icons on buttons", "d3_icons", default on: D3SkillIcons copies each HUD slot's
 // icon onto the button whose letter the HUD shows under it; the button's own label moves to a small badge in its lower right),
-// opacity ("d3_opacity" %), size ("d3_scale" %: radii and cluster offsets), and an edit mode (gear dialog "Edit control
-// positions") where each control (a d-pad or the A/B/X/Y diamond moves as one) is dragged to a new spot; positions are saved per layout
-// as fractions of the view ("d3_pos_<layout>_<group>" = "fx,fy"), "Reset layout" drops them. The ⚙ button keeps its own look
+// opacity ("d3_opacity" %), size ("d3_scale" %: radii and cluster offsets), and a layout editor (TL2's / DOOM's editor UX): toolbar
+// − + Grouped/Separate Hide/Show Reset Cancel Save; drag a control, a second finger resizes it, − / + with none chosen resize every
+// group. Grouped (default): a control drags / resizes its whole group (a d-pad, the A/B/X/Y diamond): "d3_pos_<layout>_<group>" =
+// "fx,fy[,scale]" (anchor as fractions of the view; 2 fields = older builds, scale 1). Separate ("d3_split"): every control on its own,
+// "d3_btn_<layout>_<name>" = "dx;dy;scale;hidden" (dx / dy fractions of the view inside its group, scale x the group's). Hide / Show:
+// the chosen button (Separate) or its group (Grouped) is neither drawn nor hit in play; the editor draws it dimmed and struck through
+// so it can be shown again (⚙ and the sticks never hide). Nothing is written before Save; Cancel / Back drops the changes; "Reset
+// layout" in the pause menu clears everything at once. The ⚙ button keeps its own look
 // ("gear_mode" / "gear_alpha", as in DoomPadView). With a real controller in use only ⚙ is shown and nothing is sent.
 // Output: the native controller channel of the pad (DmActivity.nativePadKey / nativePadAxes, device PAD_DEVICE), keycodes as
 // front_android.c maps them (Enter=A, Esc=B, R=X, F=Y, Q=L, E=R, Shift=ZL, Ctrl=ZR, Tab=+, M=-, d-pad, BUTTON_THUMBL/R = L3/R3).
@@ -83,15 +88,16 @@ public class D3PadView extends View implements FrontMenu.Pad {
     // A control's place: anchor = (fx, fy) fraction of the view + (gx, gy) dp, or the saved position of its group; centre = anchor +
     // (ox, oy) dp. Members of one group (d-pad, A/B/X/Y diamond) share the anchor and move together in the edit mode.
     private static class Ctl {
-        final String group; final float fx, fy, gx, gy, ox, oy, r; final boolean menu; int pointer = -1;
-        Ctl(String group, float fx, float fy, float gx, float gy, float ox, float oy, float r, boolean menu) {
-            this.group = group; this.fx = fx; this.fy = fy; this.gx = gx; this.gy = gy; this.ox = ox; this.oy = oy; this.r = r; this.menu = menu;
+        final String group, name; final float fx, fy, gx, gy, ox, oy, r; final boolean menu; int pointer = -1;
+        float dx, dy, ps = 1; boolean hidden;   // the player's own place inside its group (fractions of the view), size and hide (editor)
+        Ctl(String group, String name, float fx, float fy, float gx, float gy, float ox, float oy, float r, boolean menu) {
+            this.group = group; this.name = name; this.fx = fx; this.fy = fy; this.gx = gx; this.gy = gy; this.ox = ox; this.oy = oy; this.r = r; this.menu = menu;
         }
     }
     private static final class Btn extends Ctl {
         final String label; final int key;
         Btn(String label, int key, String group, float fx, float fy, float gx, float gy, float ox, float oy, float r, boolean menu) {
-            super(group, fx, fy, gx, gy, ox, oy, r, menu); this.label = label; this.key = key;
+            super(group, group + "_" + (key < 0 ? "k" + (-key) : String.valueOf(key)), fx, fy, gx, gy, ox, oy, r, menu); this.label = label; this.key = key;
         }
     }
     // zoneW > 0: floating; a touch within zoneW (fraction of the width) left / right of the home and below (home - zoneUp of the height)
@@ -100,7 +106,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         final int clickKey; final float grab, zoneW, zoneUp;
         float x, y, travel, baseX = Float.NaN, baseY; long down; boolean onKnob;
         Stick(String group, float fx, float fy, float r, int clickKey, float grab, float zoneW, float zoneUp) {
-            super(group, fx, fy, 0, 0, 0, 0, r, false); this.clickKey = clickKey; this.grab = grab; this.zoneW = zoneW; this.zoneUp = zoneUp;
+            super(group, group, fx, fy, 0, 0, 0, 0, r, false); this.clickKey = clickKey; this.grab = grab; this.zoneW = zoneW; this.zoneUp = zoneUp;
         }
     }
 
@@ -109,7 +115,8 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private String layout = "";
     private final List<Btn> btns = new ArrayList<>();
     private Stick left, right;   // right: gamepad layout only
-    private final Map<String, float[]> pos = new HashMap<>();   // group -> saved anchor (fractions of the view)
+    private final Map<String, float[]> pos = new HashMap<>();   // group -> saved anchor (fractions of the view) and scale: {fx, fy, scale}
+    private boolean split;   // the editor's Separate mode (every control on its own), "d3_split"
     private float deadzone, op = 1f, scale = 1f, heroFy = HERO_Y_DEFAULT / 100f, depth = DEPTH_DEFAULT / 100f;
     private int aspect;   // gear "Picture shape": 0 the 16:9 picture with bars, 1 stretched, 2 widescreen (game at the screen's aspect)
     private boolean stretched;   // gear "Picture shape" 1: the 16:9 picture stretched to the view; 0 bars / 2 widescreen (game at the screen's aspect) keep square pixels and the full height
@@ -176,6 +183,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private boolean touch() { return LAYOUT_TOUCH.equals(layout); }
     private List<Ctl> all() { List<Ctl> a = new ArrayList<>(btns); a.add(left); if (right != null) a.add(right); return a; }
     private String posKey(String group) { return "d3_pos_" + layout + "_" + group; }
+    private String btnKey(Ctl k) { return "d3_btn_" + layout + "_" + k.name; }
 
     // Gear dialog options (DmActivity.showD3Settings), all "doom_controls" except the picture shape.
     @Override public void reloadSettings() {
@@ -202,15 +210,44 @@ public class D3PadView extends View implements FrontMenu.Pad {
             releaseAll(); menuMode = false; layout = want; btns.clear();
             if (touch()) buildTouch(); else buildGamepad();
         }
+        split = p.getBoolean("d3_split", false);
+        edRu = "ru".equals(ui.getResources().getConfiguration().getLocales().get(0).getLanguage());
+        if (!editMode) loadPlaces(p);
+        iconGate(); invalidate();
+    }
+
+    // group anchors "fx,fy[,scale]" and every control's "dx;dy;scale;hidden" (⚙ and the sticks never hidden)
+    private void loadPlaces(SharedPreferences p) {
         pos.clear();
         for (Ctl k : all()) {
             String v = p.getString(posKey(k.group), null);
-            if (v == null) continue;
-            String[] f = v.split(",");
-            try { if (f.length == 2) pos.put(k.group, new float[] {clampF(Float.parseFloat(f[0])), clampF(Float.parseFloat(f[1]))}); } catch (NumberFormatException e) { /* ignore */ }
+            if (v != null) {
+                String[] f = v.split(",");
+                try { if (f.length >= 2) pos.put(k.group, new float[] {clampF(Float.parseFloat(f[0])), clampF(Float.parseFloat(f[1])), f.length >= 3 ? clampS(Float.parseFloat(f[2])) : 1f}); }
+                catch (NumberFormatException e) { /* ignore */ }
+            }
+            k.dx = k.dy = 0; k.ps = 1; k.hidden = false;
+            String b = p.getString(btnKey(k), null);
+            if (b == null) continue;
+            String[] f = b.split(";");
+            try { if (f.length >= 3) { k.dx = Float.parseFloat(f[0]); k.dy = Float.parseFloat(f[1]); k.ps = clampS(Float.parseFloat(f[2])); k.hidden = f.length >= 4 && "1".equals(f[3]) && canHide(k); } }
+            catch (NumberFormatException e) { k.dx = k.dy = 0; k.ps = 1; k.hidden = false; }
         }
-        iconGate(); invalidate();
     }
+    private void savePlaces() {
+        SharedPreferences.Editor ed = getContext().getSharedPreferences("doom_controls", Context.MODE_PRIVATE).edit();
+        for (Ctl k : all()) {
+            float[] o = pos.get(k.group);
+            if (o == null) ed.remove(posKey(k.group));
+            else ed.putString(posKey(k.group), o[2] == 1f ? String.format(Locale.ROOT, "%.4f,%.4f", o[0], o[1]) : String.format(Locale.ROOT, "%.4f,%.4f,%.4f", o[0], o[1], o[2]));
+            if (k.dx == 0 && k.dy == 0 && k.ps == 1 && !k.hidden) ed.remove(btnKey(k));
+            else ed.putString(btnKey(k), String.format(Locale.ROOT, "%.5f;%.5f;%.4f;%d", k.dx, k.dy, k.ps, k.hidden ? 1 : 0));
+        }
+        ed.apply();
+    }
+    static final float EDIT_SCALE_MIN = 0.5f, EDIT_SCALE_MAX = 2.5f;   // DOOM's / TL2's editor limits
+    private static float clampS(float v) { return Math.max(EDIT_SCALE_MIN, Math.min(EDIT_SCALE_MAX, v)); }
+    private static boolean canHide(Ctl k) { return k instanceof Btn && ((Btn) k).key != SETTINGS; }
 
     // ---------------- skill icons ----------------
     private void iconGate() { if (icons != null) icons.setGate(iconsOn && padVisible && hostResumed && !menuMode && !controllerMode && !editMode); }
@@ -234,15 +271,17 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private float u() { return dp * scale; }
     private float ax(Ctl c) { float[] o = pos.get(c.group); return o != null ? o[0] * getWidth() : c.fx * getWidth() + c.gx * u(); }
     private float ay(Ctl c) { float[] o = pos.get(c.group); return o != null ? o[1] * getHeight() : c.fy * getHeight() + c.gy * u(); }
-    private float cx(Ctl c) { return ax(c) + c.ox * u(); }
-    private float cy(Ctl c) { return ay(c) + c.oy * u(); }
-    private float rad(Ctl c) { return c.r * u(); }
+    private float gs(Ctl c) { float[] o = pos.get(c.group); return o != null ? o[2] : 1f; }   // the group's own size (editor)
+    private float cx(Ctl c) { return ax(c) + (c.ox * u() + c.dx * getWidth()) * gs(c); }
+    private float cy(Ctl c) { return ay(c) + (c.oy * u() + c.dy * getHeight()) * gs(c); }
+    private float rad(Ctl c) { return c.r * u() * gs(c) * c.ps; }
     private float sx(Stick s) { return Float.isNaN(s.baseX) ? cx(s) : s.baseX; }
     private float sy(Stick s) { return Float.isNaN(s.baseX) ? cy(s) : s.baseY; }
 
     private boolean shown(Btn b) {
         if (editMode) return true;
         if (controllerMode) return b.key == SETTINGS;
+        if (b.hidden) return false;   // the editor's Hide: neither drawn nor hit in play
         return !menuMode || b.menu;
     }
     private Btn hit(float x, float y) {
@@ -389,7 +428,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         if (swipeKey != 0 || swipeStick) { finishSwipe(); any = true; }
         if (evadeUntil > SystemClock.uptimeMillis()) any = true;
         evadeUntil = 0;
-        lastTapT = 0; editPtr = -1;
+        lastTapT = 0; edPtr = edPtr2 = edBtnDown = -1;
         if (any && !controllerMode && !editMode) DmActivity.nativePadAxes(PAD_DEVICE, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
@@ -399,8 +438,8 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private Runnable editDone;
     @Override public void startEdit(Runnable done) { editDone = done; startEdit(); }
     @Override public boolean editing() { return editMode; }
-    @Override public void endEdit(boolean save) { endEdit(); }   // D3's editor keeps every drag at once ("Reset" / "Done" on its panel)
-    @Override public void resetLayout() { resetPlaces(); }
+    @Override public void endEdit(boolean save) { endEdit(save, true); }   // Back in the editor = Cancel
+    @Override public void resetLayout() { clearPlaces(); savePlaces(); invalidate(); }   // pause menu "Reset layout": saved at once
     @Override public String prefsName() { return "doom_controls"; }
     @Override public String[] sliderKeys() { return new String[] {"d3_opacity", "d3_scale"}; }
     @Override public int[] sliderDefaults() { return new int[] {OPACITY_DEFAULT, SCALE_DEFAULT}; }
@@ -414,42 +453,122 @@ public class D3PadView extends View implements FrontMenu.Pad {
     }
 
     // ---------------- edit mode ----------------
-    private int editPtr = -1; private Ctl editCtl; private float editAx, editAy, editX0, editY0;
-    private final RectF resetRect = new RectF(), doneRect = new RectF(), panelRect = new RectF();
-    void startEdit() { releaseAll(); editMode = true; iconGate(); invalidate(); }
-    private void endEdit() { editPtr = -1; editMode = false; iconGate(); invalidate(); Runnable d = editDone; editDone = null; if (d != null) d.run(); }
-    private void resetPlaces() {
-        SharedPreferences.Editor e = getContext().getSharedPreferences("doom_controls", Context.MODE_PRIVATE).edit();
-        for (Ctl k : all()) e.remove(posKey(k.group));
-        e.apply(); pos.clear(); invalidate();
+    // TL2's / DOOM's layout editor: drag a control; a second finger resizes it; toolbar − + Grouped/Separate Hide/Show Reset Cancel Save.
+    // Grouped moves / resizes the chosen control's whole group, Separate the chosen control alone (inside its group). − / + with nothing
+    // chosen resize every group. Nothing is written before Save.
+    private static final int ED_BUTTONS = 7;
+    private int edPtr = -1, edPtr2 = -1, edBtnDown = -1; private Ctl edSel; private boolean edRu;
+    private float edX0, edY0, edD0, edDx0, edDy0, edPs0; private float[] edO0 = {0, 0, 1};
+    private final Map<String, float[]> edSavedPos = new HashMap<>(); private final Map<Ctl, float[]> edSavedCtl = new HashMap<>();
+    private final RectF[] edRects = new RectF[ED_BUTTONS]; private final RectF selRect = new RectF();
+    void startEdit() {
+        releaseAll(); editMode = true; edSel = null; edPtr = edPtr2 = edBtnDown = -1;
+        edSavedPos.clear(); for (Map.Entry<String, float[]> en : pos.entrySet()) edSavedPos.put(en.getKey(), en.getValue().clone());
+        edSavedCtl.clear(); for (Ctl k : all()) edSavedCtl.put(k, new float[] {k.dx, k.dy, k.ps, k.hidden ? 1 : 0});
+        iconGate(); invalidate();
     }
-    private Ctl hitAny(float x, float y) {
+    // save: write every place / size / hide (Save); else back to what it was when the editor opened (Cancel, Back)
+    private void endEdit(boolean save, boolean notify) {
+        if (!editMode) return;
+        if (save) savePlaces();
+        else {
+            pos.clear(); for (Map.Entry<String, float[]> en : edSavedPos.entrySet()) pos.put(en.getKey(), en.getValue().clone());
+            for (Ctl k : all()) { float[] v = edSavedCtl.get(k); if (v != null) { k.dx = v[0]; k.dy = v[1]; k.ps = v[2]; k.hidden = v[3] != 0; } }
+        }
+        editMode = false; edPtr = edPtr2 = edBtnDown = -1; edSel = null; iconGate(); invalidate();
+        Runnable d = editDone; editDone = null; if (notify && d != null) d.run();
+    }
+    private void clearPlaces() { pos.clear(); for (Ctl k : all()) { k.dx = k.dy = 0; k.ps = 1; k.hidden = false; } }
+    private boolean selOne() { return edSel != null && (split || edSel instanceof Stick); }   // Separate (a stick is its own group anyway)
+    private boolean inSel(Ctl k) { return editMode && edSel != null && (k == edSel || (!selOne() && k.group.equals(edSel.group))); }
+    private Ctl hitAny(float x, float y) {   // hidden buttons too: the editor shows them so they can be shown again
         Ctl best = null; float bestD = Float.MAX_VALUE;
         for (Ctl c : all()) {
-            float dx = x - cx(c), dy = y - cy(c), r = rad(c) * (c instanceof Stick ? 1.0f : 1.25f), d = dx * dx + dy * dy;
+            float dx = x - cx(c), dy = y - cy(c), r = Math.max(rad(c), 18 * dp) * (c instanceof Stick ? 1.0f : 1.25f), d = dx * dx + dy * dy;
             if (d <= r * r && d < bestD) { best = c; bestD = d; }
         }
         return best;
     }
+    private void edGrab(float x, float y) {   // the chosen control's place / size when the finger went down (or the pinch changed)
+        edX0 = x; edY0 = y;
+        if (edSel == null) return;
+        float[] o = pos.get(edSel.group);
+        edO0 = o != null ? o.clone() : new float[] {ax(edSel) / getWidth(), ay(edSel) / getHeight(), 1f};
+        edDx0 = edSel.dx; edDy0 = edSel.dy; edPs0 = edSel.ps;
+    }
+    private void edMove(float x, float y) {
+        float w = getWidth(), h = getHeight(); if (w <= 0 || h <= 0 || edSel == null) return;
+        float ddx = x - edX0, ddy = y - edY0;
+        if (selOne() && !(edSel instanceof Stick)) { float g = gs(edSel); edSel.dx = edDx0 + ddx / (g * w); edSel.dy = edDy0 + ddy / (g * h); }
+        else pos.put(edSel.group, new float[] {clampF(edO0[0] + ddx / w), clampF(edO0[1] + ddy / h), edO0[2]});
+    }
+    private void edScale(float f) {   // f relative to the grab
+        if (edSel == null) return;
+        if (selOne() && !(edSel instanceof Stick)) edSel.ps = clampS(edPs0 * f);
+        else pos.put(edSel.group, new float[] {edO0[0], edO0[1], clampS(edO0[2] * f)});
+    }
+    private void edScaleAll(float f) {
+        java.util.Set<String> done = new java.util.HashSet<>();
+        for (Ctl k : all()) {
+            if (!done.add(k.group)) continue;
+            float[] o = pos.get(k.group);
+            pos.put(k.group, o != null ? new float[] {o[0], o[1], clampS(o[2] * f)} : new float[] {ax(k) / getWidth(), ay(k) / getHeight(), clampS(f)});
+        }
+    }
+    private boolean canHideSel() { for (Ctl k : all()) if (inSel(k) && canHide(k)) return true; return false; }
+    private boolean selHidden() {   // the toolbar says Show when everything chosen is hidden
+        boolean any = false;
+        for (Ctl k : all()) if (inSel(k) && canHide(k)) { if (!k.hidden) return false; any = true; }
+        return any;
+    }
+    private void edToggleHide() {
+        if (!canHideSel()) return;
+        boolean hide = !selHidden();
+        for (Ctl k : all()) if (inSel(k) && canHide(k)) k.hidden = hide;
+    }
+    private RectF edButton(int i) {   // the toolbar (DOOM's / TL2's look), centred a little above the middle
+        float W = getWidth(), H = getHeight(), gap = H * 0.02f, bw = Math.min(H * 0.17f, (W - 32 * dp - (ED_BUTTONS - 1) * gap) / ED_BUTTONS), bh = H * 0.085f;
+        float total = ED_BUTTONS * bw + (ED_BUTTONS - 1) * gap, x0 = (W - total) / 2, y0 = H * 0.30f;
+        if (edRects[i] == null) edRects[i] = new RectF();
+        edRects[i].set(x0 + i * (bw + gap), y0, x0 + i * (bw + gap) + bw, y0 + bh); return edRects[i];
+    }
+    private int edButtonAt(float x, float y) { for (int i = 0; i < ED_BUTTONS; i++) if (edButton(i).contains(x, y)) return i; return -1; }
+    private boolean edAction(int bt) {   // true = the editor closed
+        switch (bt) {
+        case 0: case 1: { float f = bt == 1 ? 1.1f : 1 / 1.1f; if (edSel == null) edScaleAll(f); else { edGrab(edX0, edY0); edScale(f); } break; }
+        case 2: split = !split; getContext().getSharedPreferences("doom_controls", Context.MODE_PRIVATE).edit().putBoolean("d3_split", split).apply(); break;
+        case 3: edToggleHide(); break;
+        case 4: clearPlaces(); edSel = null; break;
+        case 5: endEdit(false, true); return true;
+        default: endEdit(true, true); return true;
+        }
+        return false;
+    }
     private void editTouch(MotionEvent e, int a, int id, float x, float y) {
-        switch (a) {
-        case MotionEvent.ACTION_DOWN: case MotionEvent.ACTION_POINTER_DOWN:
-            if (resetRect.contains(x, y)) { resetPlaces(); break; }
-            if (doneRect.contains(x, y)) { endEdit(); break; }
-            if (editPtr < 0) { Ctl c = hitAny(x, y); if (c != null) { editPtr = id; editCtl = c; editAx = ax(c); editAy = ay(c); editX0 = x; editY0 = y; } }
-            break;
-        case MotionEvent.ACTION_MOVE:
-            for (int k = 0; k < e.getPointerCount(); k++) if (e.getPointerId(k) == editPtr && getWidth() > 0 && getHeight() > 0)
-                pos.put(editCtl.group, new float[] {clampF((editAx + e.getX(k) - editX0) / getWidth()), clampF((editAy + e.getY(k) - editY0) / getHeight())});
-            break;
-        case MotionEvent.ACTION_UP: case MotionEvent.ACTION_POINTER_UP: case MotionEvent.ACTION_CANCEL:
-            if (editPtr >= 0 && (id == editPtr || a != MotionEvent.ACTION_POINTER_UP)) {
-                float[] o = pos.get(editCtl.group);
-                if (o != null) getContext().getSharedPreferences("doom_controls", Context.MODE_PRIVATE).edit()
-                    .putString(posKey(editCtl.group), String.format(Locale.ROOT, "%.4f,%.4f", o[0], o[1])).apply();
-                editPtr = -1;
+        if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_POINTER_DOWN) {
+            int bt = edButtonAt(x, y);
+            if (bt >= 0 && edPtr < 0) { edBtnDown = bt; edPtr = id; }
+            else if (edPtr >= 0 && edBtnDown < 0 && edPtr2 < 0 && edSel != null) {   // a second finger pinches the chosen control
+                int k1 = e.findPointerIndex(edPtr);
+                if (k1 >= 0) { edD0 = (float) Math.hypot(x - e.getX(k1), y - e.getY(k1)); edPtr2 = id; edGrab(e.getX(k1), e.getY(k1)); }
+            } else if (edPtr < 0) {   // a control (hidden ones too); elsewhere = none chosen
+                edSel = hitAny(x, y); edBtnDown = -1;
+                edPtr = edSel != null ? id : -1;
+                if (edSel != null) edGrab(x, y);
             }
-            break;
+        } else if (a == MotionEvent.ACTION_MOVE) {
+            if (edPtr >= 0 && edBtnDown < 0 && edSel != null) {
+                int k1 = e.findPointerIndex(edPtr), k2 = edPtr2 >= 0 ? e.findPointerIndex(edPtr2) : -1;
+                if (k1 >= 0 && k2 >= 0 && edD0 > 1) edScale((float) Math.hypot(e.getX(k1) - e.getX(k2), e.getY(k1) - e.getY(k2)) / edD0);
+                else if (k1 >= 0) edMove(e.getX(k1), e.getY(k1));
+            }
+        } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_POINTER_UP || a == MotionEvent.ACTION_CANCEL) {
+            if (a == MotionEvent.ACTION_POINTER_UP && id == edPtr2) {   // the pinch ends: the drag goes on from where the first finger is now
+                edPtr2 = -1; int k1 = e.findPointerIndex(edPtr); if (k1 >= 0) edGrab(e.getX(k1), e.getY(k1));
+            } else if (id == edPtr || a != MotionEvent.ACTION_POINTER_UP) {
+                int bt = edBtnDown; edPtr = edPtr2 = edBtnDown = -1;
+                if (bt >= 0 && a != MotionEvent.ACTION_CANCEL && bt == edButtonAt(x, y) && edAction(bt)) return;
+            }
         }
         invalidate();
     }
@@ -587,7 +706,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
             c.drawColor(0x50000000);
             drawStick(c, left); if (right != null) drawStick(c, right);
             for (Btn b : btns) drawBtn(c, b);
-            drawEditPanel(c);
+            drawEditor(c);
             return;
         }
         if (!controllerMode && !menuMode) {
@@ -599,6 +718,10 @@ public class D3PadView extends View implements FrontMenu.Pad {
         for (Btn b : btns) if (shown(b)) drawBtn(c, b);
     }
     private float k() { return editMode ? Math.max(op, 0.5f) : op; }
+    private float k(Ctl b) { return editMode ? (inSel(b) ? 1f : Math.max(op, 0.5f)) * (b.hidden ? 0.4f : 1f) : op; }
+    private void strike(Canvas c, float x, float y, float r) {   // the editor's mark on a hidden control: a red slash across it
+        line.setColor(0xffff5050); line.setAlpha(0xe0); float d = r * 0.75f; c.drawLine(x - d, y + d, x + d, y - d, line);
+    }
     // Hidden sticks ("d3_hide_sticks", default on, as D2R Mobile): an idle stick is not drawn at all; while a finger holds it, a faint
     // ring (half the layout opacity) shows where its base is. The edit mode always draws them so they can be placed.
     private void drawStick(Canvas c, Stick s) {
@@ -611,8 +734,12 @@ public class D3PadView extends View implements FrontMenu.Pad {
     }
     private void drawBtn(Canvas c, Btn b) {
         boolean gear = b.key == SETTINGS, on = b.pointer >= 0 || (b.key == MENU_TOGGLE && menuMode);
-        float k = gear ? (gearMode == GEAR_FADED && !editMode ? gearAlpha / 100f : 1f) : k();
+        float k = gear ? (gearMode == GEAR_FADED && !editMode ? gearAlpha / 100f : 1f) : k(b);
         float x = cx(b), y = cy(b), r = rad(b);
+        if (editMode && b.hidden) { drawBtnBody(c, b, x, y, r, k, on); strike(c, x, y, r); return; }
+        drawBtnBody(c, b, x, y, r, k, on);
+    }
+    private void drawBtnBody(Canvas c, Btn b, float x, float y, float r, float k, boolean on) {
         fill.setColor(b.key == MENU_TOGGLE && menuMode ? 0xffffb030 : 0xffffffff); fill.setAlpha(Math.round((on ? 0x80 : 0x30) * k));
         line.setColor(editMode ? 0xffffd040 : 0xffffffff); line.setAlpha(editMode ? 0xe0 : Math.round(0x90 * k));
         Bitmap ic = iconsOn && icons != null && b.key >= 0 ? icons.icon(b.key) : null;
@@ -655,18 +782,28 @@ public class D3PadView extends View implements FrontMenu.Pad {
         float w = n.equals("l") || n.equals("r") || n.equals("zl") || n.equals("zr") || n.equals("menu") ? r * 1.6f : r;
         return s.draw(c, n, x, y, w, r, on, 0, 0, 0, sa, getHeight());
     }
-    private void drawEditPanel(Canvas c) {
-        float w = getWidth(), h = getHeight(), pw = Math.min(w * 0.8f, 440 * dp), bh = 44 * dp, bw = (pw - 36 * dp) / 2, top = h * 0.30f;
-        text.setTextSize(16 * dp);
-        panelRect.set((w - pw) / 2, top, (w + pw) / 2, top + 28 * dp + bh + 24 * dp);
-        fill.setColor(0xc0202020); c.drawRoundRect(panelRect, 12 * dp, 12 * dp, fill);
-        text.setColor(0xffffffff); c.drawText(editHint, w / 2, top + 26 * dp, text);
-        float by = top + 40 * dp;
-        resetRect.set(panelRect.left + 12 * dp, by, panelRect.left + 12 * dp + bw, by + bh);
-        doneRect.set(panelRect.right - 12 * dp - bw, by, panelRect.right - 12 * dp, by + bh);
-        fill.setColor(0xff505050); c.drawRoundRect(resetRect, 8 * dp, 8 * dp, fill);
-        fill.setColor(0xff2f7d32); c.drawRoundRect(doneRect, 8 * dp, 8 * dp, fill);
-        c.drawText(resetLabel, resetRect.centerX(), resetRect.centerY() + 6 * dp, text);
-        c.drawText(doneLabel, doneRect.centerX(), doneRect.centerY() + 6 * dp, text);
+    private void drawEditor(Canvas c) {   // DOOM's / TL2's toolbar look, the chosen control (or its group) framed
+        boolean sh = selHidden(), ch = canHideSel();
+        String[] names = edRu ? new String[] {"−", "+", split ? "Раздельно" : "Группами", sh ? "Показать" : "Скрыть", "Сброс", "Отмена", "Сохранить"}
+                              : new String[] {"−", "+", split ? "Separate" : "Grouped", sh ? "Show" : "Hide", "Reset", "Cancel", "Save"};
+        float H = getHeight(), W = getWidth();
+        line.setStrokeWidth(1.5f * dp);
+        for (int i = 0; i < ED_BUTTONS; i++) {
+            RectF r = edButton(i);
+            fill.setColor(i == edBtnDown ? 0xff1fb6c9 : i == ED_BUTTONS - 1 ? 0xe0157c8a : 0xd0202833); line.setColor(0xff7fe3f0);
+            float rr = r.height() / 2; c.drawRoundRect(r, rr, rr, fill); c.drawRoundRect(r, rr, rr, line);
+            float ts = H * 0.04f; text.setTextSize(ts); float tw = text.measureText(names[i]); if (tw > r.width() * 0.9f) { ts *= r.width() * 0.9f / tw; text.setTextSize(ts); }
+            text.setColor(0xffffffff); text.setAlpha(i == 3 && !ch ? 0x60 : 0xff);   // Hide is grey while nothing hideable is chosen
+            c.drawText(names[i], r.centerX(), r.centerY() + ts * 0.35f, text);
+        }
+        line.setStrokeWidth(2 * dp);
+        selRect.setEmpty();
+        for (Ctl k : all()) if (inSel(k)) { float x = cx(k), y = cy(k), r = rad(k); selRect.union(x - r, y - r, x + r, y + r); }
+        if (!selRect.isEmpty()) { line.setColor(0xff7fe3f0); selRect.inset(-4 * dp, -4 * dp); c.drawRoundRect(selRect, 12 * dp, 12 * dp, line); }
+        String hint = edRu ? (split ? "Тяните кнопку пальцем (каждая отдельно)" : "Тяните кнопку пальцем (группа — целиком)") + ", второй палец — размер; −/+ без выбора меняют все; «Скрыть» убирает выбранное из игры"
+                           : (split ? "Drag a button (every button on its own)" : "Drag a button (its group moves as one)") + "; a second finger resizes it; − / + with none chosen resize all; Hide takes the chosen out of the game";
+        float ts = H * 0.032f; text.setTextSize(ts); float tw = text.measureText(hint); if (tw > W * 0.96f) { ts *= W * 0.96f / tw; text.setTextSize(ts); }
+        text.setColor(0xffffffff); text.setAlpha(220);
+        c.drawText(hint, W / 2f, edButton(0).bottom + H * 0.06f, text);
     }
 }
