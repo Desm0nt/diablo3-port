@@ -470,7 +470,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
             else if (b != null && b.key == MENU_TOGGLE) setMenuMode(!menuMode);
             else if (b != null) { if (b.pointer < 0) { b.pointer = id; key(b.key, true); } }
             else if (menuMode) { if (menuPtr < 0) menuStart(id, x, y); }
-            else if (uiPtr < 0 && gameMenuOpen()) { uiPtr = id; uiX0 = x; uiY0 = y; uiT0 = SystemClock.uptimeMillis(); uiScrolling = false; }
+            else if (uiPtr < 0 && (gameMenuOpen() || minimapHit(x, y))) { uiPtr = id; uiX0 = x; uiY0 = y; uiT0 = SystemClock.uptimeMillis(); uiScrolling = false; }
             else freeDown(id, x, y);
             break;
         }
@@ -500,13 +500,19 @@ public class D3PadView extends View implements FrontMenu.Pad {
     }
 
     // ---------------- touch on the game's own menus (hle_d3_ui.c) ----------------
-    // While a console menu is open (hle_d3_ui.c menu-open signal), a free finger (not on a pad button) waits: a short still tap goes to the
+    // While a console menu is open (hle_d3_ui.c menu-open signal) or on the minimap, a free finger (not on a pad button) waits: a short still tap goes to the
     // game's UI as a tap on the element under it (its own select / press / tab / ring code, no pad buttons); moved past the slop mostly
     // vertically over a list, it scrolls that list (nativeD3UiScroll, the list's own selection move, one row per row height of travel);
     // otherwise it becomes the stick / world finger it would have been without the menu. The manual MENU mode taps there too, A as fallback.
     static final long UI_TAP_MS = 400;
     private int uiPtr = -1; private float uiX0, uiY0, uiLastY; private long uiT0; private boolean uiScrolling;
     private static boolean gameMenuOpen() { try { return DmActivity.nativeD3UiMenuOpen(); } catch (UnsatisfiedLinkError e) { return false; } }
+    // In play a finger on the HUD minimap waits the same way: a short still tap opens the game's big map (nativeD3UiTap), a drag is the stick.
+    private boolean minimapHit(float x, float y) {
+        float[] f = picture(x, y);
+        if (f[0] < 0 || f[0] > 1 || f[1] < 0 || f[1] > 1) return false;
+        try { return DmActivity.nativeD3UiMinimapHit(f[0], f[1]); } catch (UnsatisfiedLinkError e) { return false; }
+    }
     // View point -> {fx, fy, picture height}: bars = the centred 16:9 box; stretched and widescreen fill the view.
     private float[] picture(float x, float y) {
         float w = getWidth(), h = getHeight(), pw = w, ph = h;
