@@ -14,7 +14,13 @@
 //                                         event queue calls; never the pad state.
 //                      skills icons / category arrows -> the skills screen's selection group 0x23ace0 / its own step 0x37b5f0;
 //                      button legend entry -> that console button's logical press through the same dispatcher (A, B, X, Y, ...);
+//                      rings of achievements / banner / season journey / leaderboards / equipment manager (their own 0x389d40 callbacks);
+//                      waypoint / big map: waypoint (or act) = the stick selection's own effect (+0x44, flyout 0x239f60, legend refresh),
+//                        the selected one = accept (UI_WaypointMapAccept); nothing else on the big map = UI_MapClose;
+//                      hero create: hero type / gender radio children -> HeroCreate_SetHeroType 0x34de90 / SetGender 0x3514c0;
+//                      button legend: the entry under the finger from the control's own text hit test 0x3a9390 (real glyph metrics);
 //                    Unknown targets are logged (topmost control + class) and left alone.
+//                    No menu open: a tap on the HUD minimap (dm_d3_ui_minimap_hit) = UI_MapOpen, the big map.
 //   dm_d3_ui_scroll(x, y, dy) (UI thread): a swipe over a visible list queues the travel; the poll moves the list's selection past its edge
 //                    one row per row height (the game scrolls lists only through the selection), which scrolls it. 0 = no list there.
 //                    Test without the front end: a file dm/ui-tap-now holding "x y" queues the same tap (checked every 30 polls).
@@ -90,6 +96,22 @@ enum {
     V_SKILLS_ROOT = 0x185fc40,   // UIID var: Root.NormalLayer.ConsoleSkillSelection_main (UISkills_On* run only while it is shown)
     O_GRP_SET     = 0x23ace0,    // int SelGroup_Set(group *, index, notify): +8 item UIIDs, +0x10 count, +0x20 selected, +0x28 may-select, +0x30 changed
     O_SKL_STEP    = 0x37b5f0,    // void Skills_Step(skills *, 0 left / 1 right): D-pad / stick left-right of UISkills; past the edge pages the category (+0x6c0)
+    O_TEXT_HIT    = 0x3a9390,    // int Text_HitChar(textctrl *, const float pt[2] UI units): text index under a point, real glyph metrics (the
+                                 //   mouse text-selection path 0x3aa890 uses it); the legend entry under the finger comes from it
+    O_MAPOPEN     = 0x3e79a0,    // UI_MapOpen(const UIID *, player): no console menu -> Console_OpenScreen(8, 0, player, 0) (the big map = waypoint map)
+    O_MAPCLOSE    = 0x3e7940,    // UI_MapClose(const UIID *, player): -> 0x166b90(1, 0) close the console menu
+    O_WP_FLY      = 0x239f60,    // WaypointMap_ShowFlyout(index) and O_CAP4 0x4caf60 (its condition): what the stick selection 0x238fa0 calls
+    O_CAP4        = 0x4caf60,
+    O_SM_DIRTY    = 0x1bbb80,    // ButtonLegend_SetDirty(sm, 1): the screens' Update rebuilds the legend
+    O_HC_TYPE     = 0x34de90,    // HeroCreate_SetHeroType(index) (L1 / R1 0x351700 / 0x351760 on the HeroTypeRadioButtons radio group)
+    O_HC_GENDER   = 0x3514c0,    // HeroCreate_SetGender(index) (left stick 0x351620 on GenderRadioButtons)
+    V_WAYPOINT    = 0x17ff370,   // waypoint / big map state: +0 busy, +0x28 waypoints {f32 x, y; int id @8; UIID @0x10} x 0x18, +0x30 count, +0x40 current,
+                                 //   +0x44 selected, +0x48 moved, +0x54 overlay mode
+    V_WP_ROOT = 0x18624f8, V_WP_WORLD = 0x1862518,   // UIID vars: WaypointMap_main, ...OverlayContainer.WorldMap (acts as its children)
+    V_MINIMAP = 0x1861610,       // UIID var: Root.NormalLayer.minimap_dialog_backgroundScreen.minimap_dialog_pve (the HUD minimap)
+    V_LEGEND = 0x185f558, V_LEGEND_DEATH = 0x1861438,   // UIID vars: ConsoleButtonLegend_main...ButtonLegend, deathmenu_console_dialog...ButtonLegend
+    V_HC_ROOT = 0x185f0d8, V_HC_TYPES = 0x185f1c0, V_HC_GENDERS = 0x185f110,   // ConsoleHeroCreate_main, HeroTypeRadioButtons, GenderRadioButtons
+    V_HC_FLAG1 = 0x18626bc, V_HC_FLAG2 = 0x18627a4,   // 0x351760: last hero type = (flag1 || !flag2) ? 1 : 5
     SM_OFF        = 0x110,       // console screen manager + 0x110: button legend model, 0x17 slots x 0x40 {int action (-1 none); string label @8; int n @0x38};
                                  //   +0x5c0 != 0 = being rebuilt (0x1bb820 reads -1). Screens switch on their slot's action: OnButton1 = slot 4, OnButton2 = slot 7
     UI_W = 960, UI_H = 720,      // UI virtual space (main 0x34bc80: 960.0 / 720.0 at 0xeb09e0 / 0xeb0e68)
@@ -123,6 +145,22 @@ static const struct { uint32_t off; int n; uint32_t w[NW]; } k_sites[] = {
     {O_SOUND,      6, {0xd10283ff, 0xfd0013ea, 0x6d0323e9, 0xa9046ffc, 0xa90567fa, 0xa9065ff8}},
     {O_GRP_SET,    6, {0xd10143ff, 0xf9000bf7, 0xa90257f6, 0xa9034ff4, 0xa9047bfd, 0x910103fd}},
     {O_SKL_STEP,   6, {0xa9be4ff4, 0xa9017bfd, 0x910043fd, 0xb941f808, 0xaa0003f3, 0x71000d1f}},
+    {O_TEXT_HIT,   6, {0xd10343ff, 0xfd002bee, 0x6d0633ed, 0x6d072beb, 0x6d0823e9, 0xa9095ff8}},
+    {O_MAPOPEN,    6, {0xa9be4ff4, 0xa9017bfd, 0x910043fd, 0x2a0103e0, 0x2a0103f3, 0x9404e26b}},
+    {O_MAPCLOSE,   6, {0xf81e0ff3, 0xa9017bfd, 0x910043fd, 0x2a0103f3, 0x97fd0090, 0x6b13001f}},
+    {O_WP_FLY,     6, {0xd10183ff, 0xa9025ff8, 0xa90357f6, 0xa9044ff4, 0xa9057bfd, 0x910143fd}},
+    {O_CAP4,       6, {0xa9bf7bfd, 0x910003fd, 0x90006408, 0xf9446908, 0xf9400100, 0x97ecf917}},
+    {O_SM_DIRTY,   2, {0xb905c001, 0xd65f03c0}},
+    {O_HC_TYPE,    6, {0xd10143ff, 0xf90013f5, 0xa9034ff4, 0xa9047bfd, 0x910103fd, 0x2a0003f5}},
+    {O_HC_GENDER,  6, {0xf81d0ff5, 0xa9014ff4, 0xa9027bfd, 0x910083fd, 0x2a0003f5, 0x90007000}},
+    // ring callbacks passed to Ring_Select (8.3, round 3)
+    {0x1c1c50, 6, {0xd102c3ff, 0x6d0423e9, 0xa9056ffc, 0xa90667fa, 0xa9075ff8, 0xa90857f6}},
+    {0x1c7510, 6, {0xa9be4ff4, 0xa9017bfd, 0x910043fd, 0x2a0203f3, 0xaa0103f4, 0x9405ff77}},
+    {0x1740f0, 6, {0xd10343ff, 0xa9095ff8, 0xa90a57f6, 0xa90b4ff4, 0xa90c7bfd, 0x910303fd}},
+    {0x18d590, 6, {0xd10183ff, 0xf90013f7, 0xa90357f6, 0xa9044ff4, 0xa9057bfd, 0x910143fd}},
+    {0x199e40, 5, {0x90007da8, 0xf947ed08, 0xf9400108, 0x91130100, 0x17fffe1c}},
+    {0x198eb0, 6, {0xf81d0ff5, 0xa9014ff4, 0xa9027bfd, 0x910083fd, 0xb0007db5, 0xf947eeb5}},
+    {0x1a4d30, 6, {0xd0007d48, 0xf941f108, 0xf9400108, 0xb9400109, 0x7100053f, 0x54000061}},
 };
 static const struct { uint32_t vt, slot, fn; } k_vts[] = {   // relocated vtable slots that must point where the class tables above say
     {O_VT_LIST, 0x60, O_LIST_HM}, {O_VT_CHECK, 0x60, O_CHECK_HM}, {O_VT_SELECTOR, 0x60, O_SELECTOR_HM}, {O_VT_INVBASE, 0x28, O_INV_UPDATE},
@@ -352,6 +390,23 @@ static int find_rings(ring *out, int max, int player) {
     for (unsigned i = 0; i < sizeof k_inv_vars / sizeof *k_inv_vars && n < max; i++)   // inventory family: Update 0x1f7590 runs the ring while obj+0x10
         if (is_obj(o = rq(ma(k_inv_vars[i]))) && rq(rq(o) + 0x28) == ma(O_INV_UPDATE) && rq(o + 0x10) && ring_ok(o + 0xd0))
             out[n++] = (ring){o + 0xd0, ma(O_INV_RINGCB), ma(O_INV_RINGOK), o, rq(o) == ma(O_VT_INVBASE) ? "inventory" : "inventory-family", ri(o + 0xc)};
+    // the other hosts of 0x389d40 (call sites 0x1c3d7c, 0x1c7fe4, 0x1740e4, 0x18d42c, 0x198c90, 0x198cf8, 0x1a6240): {struct or pointer var, ring
+    // offset, condition}; each passes its own selection-changed callback
+    static const struct { uint32_t var; int deref; uint32_t off, cond_off; int cond; uint32_t cb; const char *host; } k_hosts[] = {
+        {0x17e5e50, 0, 0xb0, 0xdc, 1, 0x1c1c50, "achievements"},            // cond: +0xdc != 0
+        {0x17e5fe8, 0, 0x28, 0, 0, 0x1c7510, "banner"},
+        {0x17e5390, 0, 0x98, 0xc4, 1, 0x1740f0, "season journey"},
+        {0x17e5928, 0, 8, 0x34, 1, 0x18d590, "leaderboards"},
+        {0x17e5c18, 1, 0x4c0, 0, 0, 0x199e40, "leaderboards hero"},
+        {0x17e5c18, 1, 0xb0 + 0xd0, 0, 0, 0x198eb0, "leaderboards hero inventory"},
+        {0x17e5ce8, 1, 0x3e0, 0, 2, 0x1a4d30, "equipment manager"},          // cond: *(int *)obj == 1
+    };
+    for (unsigned i = 0; i < sizeof k_hosts / sizeof *k_hosts && n < max; i++) {
+        uint64_t b = k_hosts[i].deref ? rq(ma(k_hosts[i].var)) : ma(k_hosts[i].var); if (!b) continue;
+        if (k_hosts[i].cond == 1 && !ri(b + k_hosts[i].cond_off)) continue;
+        if (k_hosts[i].cond == 2 && ri(b) != 1) continue;
+        if (ring_ok(b + k_hosts[i].off)) out[n++] = (ring){b + k_hosts[i].off, ma(k_hosts[i].cb), 0, b, k_hosts[i].host, player};
+    }
     if (n < max && (o = rq(ma(V_SKILLS))) && ri(o + 0x1f8) == 0 && ring_ok(o + 0x168)) out[n++] = (ring){o + 0x168, ma(O_SKL_RINGCB), 0, o, "skills", player};
     if (n < max && (o = rq(ma(V_PARAGON))) && ri(o + 0xd8) == 0 && ring_ok(o + 8)) out[n++] = (ring){o + 8, ma(O_PAR_RINGCB), 0, o, "paragon", player};
     if (n < max && (o = rq(ma(V_JOURNAL))) && rq(o + 0x2858) && !ri(o + 0x2944) && ring_ok(o + 0x2860)) out[n++] = (ring){o + 0x2860, ma(O_JRN_RINGCB), 0, o, "journal", player};
@@ -378,6 +433,10 @@ static int menu_open_now(uint64_t mgr, int *why) {
     uint64_t f = map_get(mgr, rq(mgr + 0x50)), m = map_get(mgr, rq(mgr + 0x38)); uint16_t fl;   // present and shown (+0x18 bit 2)
     if (f && rd(f + 0x18, &fl, 2) && (fl & 4)) { *why = 3; return 1; }
     if (m && rd(m + 0x18, &fl, 2) && (fl & 4)) { *why = 4; return 1; }
+    for (int k = 0; k < 2; k++) {   // the console button legend or the death screen's legend shown (hidden in plain gameplay)
+        uint64_t c = map_get(mgr, rq(ma(k ? V_LEGEND_DEATH : V_LEGEND))); uint16_t f2;
+        if (c && rd(c + 0x18, &f2, 2) && (f2 & 4)) { *why = 6; return 1; }
+    }
     for (unsigned i = 0; i < sizeof k_inv_vars / sizeof *k_inv_vars; i++) {   // an inventory-family screen live (+0x18, what its handlers test: 0x370790)
         uint64_t o = rq(ma(k_inv_vars[i])), rc;
         if (o && ri(o + 0x18) && (rc = map_get(mgr, rq(o + 0xd0 + 0x18))) && rd(rc + 0x18, &fl, 2) && (fl & 4)) { *why = 5; return 1; }   // + its ring shown
@@ -579,12 +638,12 @@ static int tap_legend(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
         if (got < 16) continue;
         t[got] = 0;
         if (!strstr(t, "{icon:")) continue;
-        struct { float a, b; int btn; } e[16]; int ne = 0, spaces = 0; float x = 0;
+        struct { float a, b; int btn, at; } e[16]; int ne = 0, spaces = 0; float x = 0;
         for (const char *q = t; *q; ) {
             if (!strncasecmp(q, "{icon:", 6)) {
                 const char *nm = q + 6, *end = strchr(nm, '}'); if (!end) break;
                 size_t l = strcspn(nm, ",}"); int b = icon_button(nm, l);
-                if (b >= 0 && ne < 16) { if (ne) e[ne - 1].b = x - spaces * 5.8f; e[ne].a = x; e[ne].b = -1; e[ne].btn = b; ne++; }
+                if (b >= 0 && ne < 16) { if (ne) e[ne - 1].b = x - spaces * 5.8f; e[ne].a = x; e[ne].b = -1; e[ne].btn = b; e[ne].at = (int)(q - t); ne++; }
                 x += 18; spaces = 0; q = end + 1; continue;
             }
             unsigned char ch = (unsigned char)*q;
@@ -602,11 +661,61 @@ static int tap_legend(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
             float a = x0 + e[j].a * k, b = x0 + e[j].b * k, d = ux < a ? a - ux : ux > b ? ux - b : 0;
             if (d < best) { best = d; pick = j; }
         }
-        LOG("[d3ui] tap UI %.0f,%.0f -> button legend %016llx %s: %d entries over %.0f..%.0f, entry %d (button %d, %.0f off)", ux, uy, (unsigned long long)c->id,
-            name_of(c->id), ne, x0, x0 + w * k, pick, pick >= 0 ? e[pick].btn : -1, best);
+        // the real glyph layout: the control's own text hit test (font metrics, alignment) gives the text index under the finger; the entry is the
+        // last icon at or before it. Used when it lands inside the text; the estimate above stays for the log and as the fallback.
+        float pt[2] = {ux, uy}; int at = g_dry ? -1 : ((int (*)(uint64_t, const float *))(g_base + O_TEXT_HIT))(c->c, pt), real = -1;
+        if (at >= 0 && at <= (int)strlen(t)) { for (int j = 0; j < ne; j++) if (e[j].at <= at) real = j; if (real < 0) real = 0; }
+        LOG("[d3ui] tap UI %.0f,%.0f -> button legend %016llx %s: %d entries, text index %d -> entry %d; estimate over %.0f..%.0f -> entry %d (%.0f off)", ux, uy,
+            (unsigned long long)c->id, name_of(c->id), ne, at, real, x0, x0 + w * k, pick, best);
+        if (real >= 0) { pick = real; best = 0; }
         if (pick < 0 || best > 30) return 1;
         ui_button(mgr, e[pick].btn, "button legend entry");
         return 1;
+    }
+    return 0;
+}
+
+// waypoint / big map (WaypointMap_main; UI_MapOpen opens it as console screen group 8): the zone map's waypoints are V_WAYPOINT+0x28, the world
+// overview (OverlayContainer.WorldMap shown) lists its acts as that control's children. A tap on one does what the stick selection in
+// WaypointMap_OnUpdate does (0x238fa0..0x238fdc): selected (+0x44) = k, moved (+0x48) = 1, on the zone map the flyout 0x239f60 (when
+// 0x4caf60) and the legend refresh 0x1bbb80; a tap on the selected one = accept (UI_WaypointMapAccept 0x239b50: travel / open the act).
+static int tap_waypoint(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
+    uint64_t W = ma(V_WAYPOINT);
+    if (!vis(find(rq(ma(V_WP_ROOT)))) || ri(W)) return 0;
+    ctrl *world = find(rq(ma(V_WP_WORLD))); int overview = vis(world), n, pick = -1; uint64_t base, stride, idoff;
+    if (overview) { base = rq(world->c + 0x60); n = (int)rq(world->c + 0x68); stride = 0x18; idoff = 0; }
+    else { base = rq(W + 0x28); n = (int)rq(W + 0x30); stride = 0x18; idoff = 0x10; }
+    if (!base || n <= 0 || n > 256) return 0;
+    for (int i = 0; i < nh && pick < 0; i++)
+        for (int k = 0; k < n; k++) if (is_under(hits[i], rq(base + stride * k + idoff))) { pick = k; break; }
+    if (pick < 0) return 0;
+    int sel = ri(W + 0x44); uint64_t id = rq(base + stride * pick + idoff);
+    LOG("[d3ui] tap UI %.0f,%.0f -> %s %d/%d %016llx %s, selected %d, current %d", ux, uy, overview ? "map act" : "waypoint", pick, n, (unsigned long long)id, name_of(id),
+        sel, ri(W + 0x40));
+    if (pick == sel) { accept(mgr, "selected waypoint (UI_WaypointMapAccept)"); return 1; }
+    if (g_dry) return 1;
+    int32_t v = pick, one = 1; memcpy((void *)(uintptr_t)(W + 0x44), &v, 4); memcpy((void *)(uintptr_t)(W + 0x48), &one, 4);
+    if (!overview) {
+        if (((int (*)(void))(g_base + O_CAP4))()) ((void (*)(int))(g_base + O_WP_FLY))(pick);
+        uint64_t S = rq(ma(O_SCREENS)); if (S) ((void (*)(uint64_t, int))(g_base + O_SM_DIRTY))(S + SM_OFF, 1);
+    }
+    return 1;
+}
+// hero create: the hero type radio group (standard / hardcore / seasonal ...) and the gender radio group; a tap on child k = the screen's own
+// setter (what its L1 / R1 and left stick call), within the range its R1 allows
+static int tap_herocreate(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
+    (void)mgr;
+    if (!vis(find(rq(ma(V_HC_ROOT))))) return 0;
+    for (int g = 0; g < 2; g++) {
+        ctrl *grp = find(rq(ma(g ? V_HC_GENDERS : V_HC_TYPES))); if (!vis(grp)) continue;
+        uint64_t v = rq(grp->c + 0x60); int n = (int)rq(grp->c + 0x68);
+        for (int i = 0; i < nh; i++) for (int k = 0; v && k < n && k < 16; k++) {
+            if (!is_under(hits[i], rq(v + 0x18ull * k))) continue;
+            int last = g ? 1 : (ri(ma(V_HC_FLAG1)) || !ri(ma(V_HC_FLAG2))) ? 1 : 5;
+            LOG("[d3ui] tap UI %.0f,%.0f -> hero create %s %d (of %d, last allowed %d)", ux, uy, g ? "gender" : "hero type", k, n, last);
+            if (k <= last && !g_dry) ((void (*)(int))(g_base + (g ? O_HC_GENDER : O_HC_TYPE)))(k);
+            return 1;
+        }
     }
     return 0;
 }
@@ -662,6 +771,8 @@ static void do_tap(uint64_t mgr, float fx, float fy) {
     if (tap_nav(mgr, ux, uy, hits, nh)) return;
     if (tap_ring(mgr, ux, uy)) return;
     if (tap_skills(mgr, ux, uy, hits, nh)) return;
+    if (tap_waypoint(mgr, ux, uy, hits, nh)) return;
+    if (tap_herocreate(mgr, ux, uy, hits, nh)) return;
     if (tap_list(mgr, ux, uy, hits, nh)) return;
     if (tap_legend(mgr, ux, uy, hits, nh)) return;
     ctrl *w = NULL, *b = NULL;
@@ -680,6 +791,13 @@ static void do_tap(uint64_t mgr, float fx, float fy) {
     }
     ctrl *title = find(0x3eb11c1a52143430ull);   // Root.NormalLayer.ConsoleStart_main ("press any button"): a tap anywhere = accept
     if (vis(title) && !in_game()) { LOG("[d3ui] tap UI %.0f,%.0f -> title screen", ux, uy); accept(mgr, "title screen"); return; }
+    screens sg;   // the big map (console screen group 8): a tap on nothing else closes it with its own UI_MapClose
+    if (screen_group(&sg) && sg.gid == 8) {
+        uint64_t id = rq(ma(V_WP_ROOT)); int pl = sg.player >= 0 && sg.player < 8 ? sg.player : ui_player(mgr);
+        LOG("[d3ui] tap UI %.0f,%.0f -> big map background: UI_MapClose", ux, uy);
+        if (!g_dry) ((void (*)(const uint64_t *, int))(g_base + O_MAPCLOSE))(&id, pl);
+        return;
+    }
     LOG("[d3ui] tap %.3f,%.3f = UI %.0f,%.0f: nothing to do (topmost %016llx %s vt %#llx type %s, %d controls under the finger)", fx, fy, ux, uy,
         top ? (unsigned long long)top->id : 0ull, top ? name_of(top->id) : "", top ? (unsigned long long)mo(top->vt) : 0ull, top ? top->type : "", nh);
 }
@@ -763,6 +881,36 @@ static void do_scroll(uint64_t mgr) {   // game thread
         rowh, to, sel, ri(L + 0x1e0), first, ri(L + 0x1e4));
 }
 
+
+// ---- minimap -> big map. The HUD minimap's rect (picture fractions) is published every 10 polls while no menu is up; a tap on it (no menu
+// open) = UI_MapOpen 0x3e79a0 — the named callback behind the game's own map button: Console_OpenScreen(8, 0, player, 0), the big map.
+static _Atomic uint64_t g_mm_lt, g_mm_rb;   // packed float pairs; 0 = no minimap shown
+static uint64_t pack2(float a, float b) { uint32_t x, y; memcpy(&x, &a, 4); memcpy(&y, &b, 4); return (uint64_t)y << 32 | x; }
+static void unpack2(uint64_t v, float *a, float *b) { uint32_t x = (uint32_t)v, y = (uint32_t)(v >> 32); memcpy(a, &x, 4); memcpy(b, &y, 4); }
+static void refresh_minimap(uint64_t mgr, int open) {
+    uint64_t c = open ? 0 : map_get(mgr, rq(ma(V_MINIMAP))); uint16_t fl; float r[4]; pxmap m;
+    if (!c || !rd(c + 0x18, &fl, 2) || !(fl & 4) || !rd(c + 0x88, r, sizeof r) || r[2] <= r[0] || r[3] <= r[1] || !px_map(&m)) {
+        atomic_store(&g_mm_lt, 0); atomic_store(&g_mm_rb, 0); return; }
+    atomic_store(&g_mm_lt, pack2(ux2px(&m, r[0]) / m.w, uy2px(&m, r[1]) / m.h)); atomic_store(&g_mm_rb, pack2(ux2px(&m, r[2]) / m.w, uy2px(&m, r[3]) / m.h));
+}
+int dm_d3_ui_minimap_hit(float x, float y);
+int dm_d3_ui_minimap_hit(float x, float y) {   // any thread: the point is on the HUD minimap (and no menu is open)
+    if (g_ok <= 0 || g_tap_mode <= 0 || atomic_load_explicit(&g_menu_open, memory_order_acquire)) return 0;
+    uint64_t lt = atomic_load(&g_mm_lt), rb = atomic_load(&g_mm_rb); float l, t, r, b;
+    if (!lt || !rb) return 0;
+    unpack2(lt, &l, &t); unpack2(rb, &r, &b);
+    return x >= l && x < r && y >= t && y < b;
+}
+static void tap_minimap(uint64_t mgr, float x, float y) {   // game thread, no menu open
+    uint64_t lt = atomic_load(&g_mm_lt), rb = atomic_load(&g_mm_rb); float l, t, r, b;
+    if (!lt || !rb) { LOG("[d3ui] tap %.3f,%.3f: no menu open, no minimap: ignored", x, y); return; }
+    unpack2(lt, &l, &t); unpack2(rb, &r, &b);
+    if (!(x >= l && x < r && y >= t && y < b)) { LOG("[d3ui] tap %.3f,%.3f: no menu open, not on the minimap: ignored", x, y); return; }
+    uint64_t id = rq(ma(V_MINIMAP));
+    LOG("[d3ui] tap %.3f,%.3f -> minimap: UI_MapOpen (big map)", x, y);
+    if (g_tap_mode != 2) ((void (*)(const uint64_t *, int))(g_base + O_MAPOPEN))(&id, ui_player(mgr));
+}
+
 // ---- full dump
 static void dump(uint64_t mgr) {
     char p[1200], praw[1200]; snprintf(p, sizeof p, "%s/ui-dump.tsv", g_dir); snprintf(praw, sizeof praw, "%s/ui-dump-raw.tsv", g_dir);
@@ -775,7 +923,7 @@ static void dump(uint64_t mgr) {
             (unsigned long long)mgr, (unsigned long long)focus, name_of(focus), (unsigned long long)active, (unsigned long long)hover, (unsigned long long)modal,
             name_of(modal), ri(mgr + 0x58));
     if (havem) fprintf(f, "# window %ux%u px; UI 960x720 -> px rect %.1f %.1f %.1f %.1f (%s)\n", m.w, m.h, m.l, m.t, m.r, m.b, m.from_game ? "main 0x34baf0" : "4:3 formula");
-    fprintf(f, "# in game %d, menu open %d (why %d: 1 front end, 2 screen group, 3 focus, 4 modal, 5 inventory screen)\n", in_game(), open, why);
+    fprintf(f, "# in game %d, menu open %d (why %d: 1 front end, 2 screen group, 3 focus, 4 modal, 5 inventory screen, 6 legend)\n", in_game(), open, why);
     screens s;
     if (screen_group(&s)) {
         fprintf(f, "# screen group %d (%#llx): screen %d of %d, player %d; screens (open fn, close fn, enabled):", s.gid, (unsigned long long)s.grp, s.cur, s.count, s.player);
@@ -870,13 +1018,14 @@ void dm_d3_ui_pump(uint64_t *buttons) {
     int why, open = menu_open_now(mgr, &why);
     atomic_store_explicit(&g_menu_open, open, memory_order_release);
     { static int was = -1; if (open != was && (g_dump_mode || g_tap_mode)) LOG("[d3ui] menu %s (%s)", open ? "open" : "closed",
-          why == 1 ? "front end" : why == 2 ? "console screen group" : why == 3 ? "focus" : why == 4 ? "modal" : why == 5 ? "inventory screen" : "gameplay"); was = open; }
+          why == 1 ? "front end" : why == 2 ? "console screen group" : why == 3 ? "focus" : why == 4 ? "modal" : why == 5 ? "inventory screen" : why == 6 ? "button legend" : "gameplay"); was = open; }
     if (g_tap_mode && atomic_exchange_explicit(&g_tap_pending, 0, memory_order_acquire)) {
         uint64_t xy = atomic_load(&g_tap_xy); float x, y; uint32_t xb = (uint32_t)xy, yb = (uint32_t)(xy >> 32); memcpy(&x, &xb, 4); memcpy(&y, &yb, 4);
-        if (open) do_tap(mgr, x, y); else LOG("[d3ui] tap %.3f,%.3f: no menu open, ignored", x, y);
+        if (open) do_tap(mgr, x, y); else tap_minimap(mgr, x, y);
     }
     static unsigned tick; ++tick;
     if (g_tap_mode && open && tick % 10 == 3) refresh_lists(mgr);
+    if (g_tap_mode && tick % 10 == 7) refresh_minimap(mgr, open);
     if (!open && g_nlists) { atomic_fetch_add(&g_lists_seq, 1); g_nlists = 0; atomic_fetch_add(&g_lists_seq, 1); }
     if (g_tap_mode) { g_dry = g_tap_mode == 2; if (open) do_scroll(mgr); else atomic_store(&g_scroll_pend, 0); }
     if (g_tap_mode && tick % 30 == 15) {   // test path without the front end: dm/ui-tap-now holding "x y" (picture fractions)

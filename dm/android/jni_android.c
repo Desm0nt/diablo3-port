@@ -638,6 +638,17 @@ JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiScroll(JN
     (void)x; (void)y; (void)dy; return JNI_FALSE;
 #endif
 }
+// [D3] The point (picture fractions) is on the HUD minimap and no console menu is open (hle_d3_ui.c dm_d3_ui_minimap_hit, rect published by the
+// game thread). A tap there sent through nativeD3UiTap opens the big map (the game's own UI_MapOpen).
+// Java: `static native boolean nativeD3UiMinimapHit(float x, float y);`
+JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiMinimapHit(JNIEnv *env, jclass cls, jfloat x, jfloat y) {
+    (void)env; (void)cls;
+#ifdef DM_GAME_D3
+    int dm_d3_ui_minimap_hit(float x, float y); return dm_d3_ui_minimap_hit(x, y) ? JNI_TRUE : JNI_FALSE;
+#else
+    (void)x; (void)y; return JNI_FALSE;
+#endif
+}
 // [D3] A console menu is up (front end, a console screen group such as pause or the "+" hero menu, a focused or modal control); published by
 // every npad poll. Java: `static native boolean nativeD3UiMenuOpen();`
 JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiMenuOpen(JNIEnv *env, jclass cls) {
