@@ -164,7 +164,7 @@ static const struct { uint32_t off; int n; uint32_t w[NW]; } k_sites[] = {
 };
 static const struct { uint32_t vt, slot, fn; } k_vts[] = {   // relocated vtable slots that must point where the class tables above say
     {O_VT_LIST, 0x60, O_LIST_HM}, {O_VT_CHECK, 0x60, O_CHECK_HM}, {O_VT_SELECTOR, 0x60, O_SELECTOR_HM}, {O_VT_INVBASE, 0x28, O_INV_UPDATE},
-    {O_VT_LIST, 0xb0, O_UPDATERECT},
+    {O_VT_LIST, 0xb0, O_UPDATERECT}, {0x10aa870, 0x60, 0x3ec200},   // localmap (big map) class
 };
 static const struct { uint32_t got, var; } k_gots[] = {{O_GOT_G, O_G}, {O_GOT_SCREENS, O_SCREENS}, {O_GOT_SNDP, O_SNDP}};
 
@@ -499,10 +499,10 @@ static int tap_nav(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
         ctrl *c = hits[i];
         for (int depth = 0; c && depth < MAX_DEPTH; depth++, c = find(c->parent)) {
             uint64_t p = c->parent; if (!find(child_id(p, "KeyBinding1"))) continue;
-            static const char *glow[5] = {"Glow1", "Glow2", "Glow3", "Glow4", "Glow5"};
+            static const char *glow[5] = {"Glow1", "Glow2", "Glow3", "Glow4", "Glow5"}, *text[5] = {"Text1", "Text2", "Text3", "Text4", "Text5"};
             int which = -1;
             if (c->id == child_id(p, "KeyBinding1")) which = 100; else if (c->id == child_id(p, "KeyBinding2")) which = 101;
-            else for (int k = 0; k < 5; k++) if (c->id == child_id(p, glow[k])) which = k;
+            else for (int k = 0; k < 5; k++) if (c->id == child_id(p, glow[k]) || c->id == child_id(p, text[k])) which = k;
             if (which < 0) continue;
             screens s; int has = screen_group(&s); int player = has && s.player >= 0 && s.player < 8 ? s.player : ui_player(mgr);
             if (which >= 100) {
@@ -510,7 +510,16 @@ static int tap_nav(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
                 if (!g_dry) ((void (*)(const uint64_t *, int))(g_base + (which == 100 ? O_PREVSCREEN : O_NEXTSCREEN)))(&c->id, player);
                 return 1;
             }
-            float best = 1e9f; for (int k = 0; k < 5; k++) {   // the slots overlap: the nearest centre along x among the visible ones
+            // the tab labels TextN of the ConsoleMenuNav template (the map: Text1 Zone, Text2 Act, Text3 World, ConsoleMap.ui; the hero menu five
+            // labels): the one under the finger, else the nearest shown label along x; without labels the Glow slots (they overlap)
+            float best = 1e9f; int bylabel = 0;
+            for (int k = 0; k < 5; k++) {
+                ctrl *tx = find(child_id(p, text[k])); char ch = 0; uint64_t tp;
+                if (!vis(tx) || !tx->has_rect || !(tp = rq(tx->c + 0x398)) || !rd(tp, &ch, 1) || !ch) continue;
+                float d = ux >= tx->r[0] && ux < tx->r[2] ? 0 : fabsf((tx->r[0] + tx->r[2]) * 0.5f - ux);
+                if (d < best) { best = d; which = k; bylabel = 1; }
+            }
+            if (!bylabel) for (int k = 0; k < 5; k++) {
                 ctrl *g = find(child_id(p, glow[k])); if (!vis(g) || !g->has_rect) continue;
                 float d = fabsf((g->r[0] + g->r[2]) * 0.5f - ux); if (d < best) { best = d; which = k; }
             }
@@ -519,7 +528,7 @@ static int tap_nav(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
             // shows only the reachable ones (hero menu: 6 screens, the 5th (party, 0x21d4b0) disabled, 5 headers; Glow5 = quests = screen 5)
             uint64_t ents = rq(s.grp); int screen = -1;
             for (int k = 0, seen = 0; ents && k < s.count && k < 32; k++) if (ri(ents + 0x18ull * k + 0x10) && seen++ == which) { screen = k; break; }
-            LOG("[d3ui] tap UI %.0f,%.0f -> tab Glow%d of %016llx %s: group %d screen %d -> %d (the %d. enabled of %d)", ux, uy, which + 1,
+            LOG("[d3ui] tap UI %.0f,%.0f -> tab %s%d of %016llx %s: group %d screen %d -> %d (the %d. enabled of %d)", ux, uy, bylabel ? "Text" : "Glow", which + 1,
                 (unsigned long long)p, name_of(p), s.gid, s.cur, screen, which + 1, s.count);
             if (screen < 0 || screen == s.cur) return 1;
             int r = g_dry ? -1 : ((int (*)(unsigned, unsigned, int, int))(g_base + O_OPENSCREEN))((unsigned)s.gid, (unsigned)screen, player, 0);
@@ -797,13 +806,6 @@ static void do_tap(uint64_t mgr, float fx, float fy) {
     }
     ctrl *title = find(0x3eb11c1a52143430ull);   // Root.NormalLayer.ConsoleStart_main ("press any button"): a tap anywhere = accept
     if (vis(title) && !in_game()) { LOG("[d3ui] tap UI %.0f,%.0f -> title screen", ux, uy); accept(mgr, "title screen"); return; }
-    screens sg;   // the big map (console screen group 8): a tap on nothing else closes it with its own UI_MapClose
-    if (screen_group(&sg) && sg.gid == 8) {
-        uint64_t id = rq(ma(V_WP_ROOT)); int pl = sg.player >= 0 && sg.player < 8 ? sg.player : ui_player(mgr);
-        LOG("[d3ui] tap UI %.0f,%.0f -> big map background: UI_MapClose", ux, uy);
-        if (!g_dry) ((void (*)(const uint64_t *, int))(g_base + O_MAPCLOSE))(&id, pl);
-        return;
-    }
     LOG("[d3ui] tap %.3f,%.3f = UI %.0f,%.0f: nothing to do (topmost %016llx %s vt %#llx type %s, %d controls under the finger)", fx, fy, ux, uy,
         top ? (unsigned long long)top->id : 0ull, top ? name_of(top->id) : "", top ? (unsigned long long)mo(top->vt) : 0ull, top ? top->type : "", nh);
 }
@@ -915,6 +917,59 @@ static void tap_minimap(uint64_t mgr, float x, float y) {   // game thread, no m
     uint64_t id = rq(ma(V_MINIMAP));
     LOG("[d3ui] tap %.3f,%.3f -> minimap: UI_MapOpen (big map)", x, y);
     if (g_tap_mode != 2) ((void (*)(const uint64_t *, int))(g_base + O_MAPOPEN))(&id, ui_player(mgr));
+}
+
+
+// ---- big map zoom / pan (map_dialog_mainPage.localmap, class vtable 0x10aa870, HandleMessage 0x3ec200 -> 0x3eb720 while +0x1cc bit 1 = big
+// map): D-pad up / down (held) step +0x214 by -0.05 / +0.05 (smaller = closer, floor 0.5), right = reset 1.0, left = recentre (+0x1f8 = 0);
+// the left stick moves the view: +0x1f8 / +0x1fc += [[+0x244, +0x250], [+0x248, +0x254]] * (5 * 4/3 * x, -5 * y) per event. A pinch scales
+// +0x214 by 1 / ratio (same floor; the game itself has no ceiling, 8 here), a one-finger drag moves +0x1f8 / +0x1fc through the same basis by
+// the finger travel in UI units (content follows the finger). These are the fields the map's own input code writes.
+enum { O_VT_LOCALMAP = 0x10aa870, O_LOCALMAP_HM = 0x3ec200, V_LOCALMAP = 0x1861848 };
+static _Atomic int g_map_open, g_zoom_log, g_pan_dx, g_pan_dy;   // queued: log(ratio) and travel in 1/100000
+static uint64_t localmap(uint64_t mgr) {
+    uint64_t c = map_get(mgr, rq(ma(V_LOCALMAP))), vt; uint16_t fl;
+    if (!c || !rd(c, &vt, 8) || vt != ma(O_VT_LOCALMAP) || !rd(c + 0x18, &fl, 2) || !(fl & 4) || !(ri(c + 0x1cc) & 2)) return 0;
+    return c;
+}
+int dm_d3_ui_map_open(void);
+int dm_d3_ui_map_open(void) { return g_ok > 0 && g_tap_mode > 0 && atomic_load_explicit(&g_map_open, memory_order_acquire); }
+int dm_d3_ui_map_zoom(float factor, float cx, float cy);
+int dm_d3_ui_map_zoom(float factor, float cx, float cy) {
+    (void)cx; (void)cy;   // the map scales about its own view centre (the game's zoom has no anchor)
+    if (!dm_d3_ui_map_open() || !(factor > 0.01f && factor < 100.0f)) return 0;
+    atomic_fetch_add(&g_zoom_log, (int)lrintf(logf(factor) * 100000.0f));
+    return 1;
+}
+int dm_d3_ui_map_pan(float dx, float dy);
+int dm_d3_ui_map_pan(float dx, float dy) {
+    if (!dm_d3_ui_map_open() || !isfinite(dx) || !isfinite(dy)) return 0;
+    atomic_fetch_add(&g_pan_dx, (int)lrintf(dx * 100000.0f)); atomic_fetch_add(&g_pan_dy, (int)lrintf(dy * 100000.0f));
+    return 1;
+}
+static void do_map(uint64_t mgr) {   // game thread, every poll
+    uint64_t c = localmap(mgr);
+    atomic_store_explicit(&g_map_open, c != 0, memory_order_release);
+    int zl = atomic_exchange(&g_zoom_log, 0), dx = atomic_exchange(&g_pan_dx, 0), dy = atomic_exchange(&g_pan_dy, 0);
+    if (!c || g_tap_mode == 2) return;
+    if (zl) {
+        float z; rd(c + 0x214, &z, 4);
+        float nz = z / expf(zl / 100000.0f);
+        if (!(nz >= 0.5f)) nz = 0.5f;
+        if (nz > 8.0f) nz = 8.0f;
+        memcpy((void *)(uintptr_t)(c + 0x214), &nz, 4);
+        static unsigned said; if (said++ < 20) LOG("[d3ui] map zoom: +0x214 %.3f -> %.3f", z, nz);
+    }
+    if (dx || dy) {
+        pxmap m; if (!px_map(&m)) return;
+        float ux = dx / 100000.0f * m.w * UI_W / (m.r - m.l), uy = dy / 100000.0f * m.h * UI_H / (m.b - m.t);
+        float sx = -ux, sy = -uy, b[4], p[2];   // view moves against the finger: the content follows it
+        if (!rd(c + 0x244, b, 8) || !rd(c + 0x250, b + 2, 8) || !rd(c + 0x1f8, p, 8)) return;
+        float np[2] = {p[0] + b[0] * sx + b[2] * sy, p[1] + b[1] * sx + b[3] * sy};
+        if (!isfinite(np[0]) || !isfinite(np[1])) return;
+        memcpy((void *)(uintptr_t)(c + 0x1f8), np, 8);
+        static unsigned said; if (said++ < 20) LOG("[d3ui] map pan: UI %.1f,%.1f -> +0x1f8 %.1f,%.1f -> %.1f,%.1f", ux, uy, p[0], p[1], np[0], np[1]);
+    }
 }
 
 // ---- full dump
@@ -1032,6 +1087,7 @@ void dm_d3_ui_pump(uint64_t *buttons) {
     static unsigned tick; ++tick;
     if (g_tap_mode && open && tick % 10 == 3) refresh_lists(mgr);
     if (g_tap_mode && tick % 10 == 7) refresh_minimap(mgr, open);
+    if (g_tap_mode) do_map(mgr);
     if (!open && g_nlists) { atomic_fetch_add(&g_lists_seq, 1); g_nlists = 0; atomic_fetch_add(&g_lists_seq, 1); }
     if (g_tap_mode) { g_dry = g_tap_mode == 2; if (open) do_scroll(mgr); else atomic_store(&g_scroll_pend, 0); }
     if (g_tap_mode && tick % 30 == 15) {   // test path without the front end: dm/ui-tap-now holding "x y" (picture fractions)

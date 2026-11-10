@@ -649,6 +649,35 @@ JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiMinimapHi
     (void)x; (void)y; return JNI_FALSE;
 #endif
 }
+// [D3] Big map (hle_d3_ui.c, map_dialog_mainPage.localmap): open = the map view is up; zoom = pinch ratio since the last call (>1 = fingers apart =
+// closer; centre in picture fractions, unused: the game zooms about its view centre); pan = finger travel in picture fractions (the content
+// follows the finger). Zoom / pan are queued for the game thread and write the fields the map's own D-pad / stick code writes.
+// Java: `static native boolean nativeD3UiMapOpen();` `static native boolean nativeD3UiMapZoom(float f, float cx, float cy);`
+//       `static native boolean nativeD3UiMapPan(float dx, float dy);`
+JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiMapOpen(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+#ifdef DM_GAME_D3
+    int dm_d3_ui_map_open(void); return dm_d3_ui_map_open() ? JNI_TRUE : JNI_FALSE;
+#else
+    return JNI_FALSE;
+#endif
+}
+JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiMapZoom(JNIEnv *env, jclass cls, jfloat f, jfloat cx, jfloat cy) {
+    (void)env; (void)cls;
+#ifdef DM_GAME_D3
+    int dm_d3_ui_map_zoom(float, float, float); return dm_d3_ui_map_zoom(f, cx, cy) ? JNI_TRUE : JNI_FALSE;
+#else
+    (void)f; (void)cx; (void)cy; return JNI_FALSE;
+#endif
+}
+JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiMapPan(JNIEnv *env, jclass cls, jfloat dx, jfloat dy) {
+    (void)env; (void)cls;
+#ifdef DM_GAME_D3
+    int dm_d3_ui_map_pan(float, float); return dm_d3_ui_map_pan(dx, dy) ? JNI_TRUE : JNI_FALSE;
+#else
+    (void)dx; (void)dy; return JNI_FALSE;
+#endif
+}
 // [D3] A console menu is up (front end, a console screen group such as pause or the "+" hero menu, a focused or modal control); published by
 // every npad poll. Java: `static native boolean nativeD3UiMenuOpen();`
 JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiMenuOpen(JNIEnv *env, jclass cls) {
