@@ -273,6 +273,47 @@ bool record(VkCommandBuffer cmd,unsigned f,VkImage source,VkFormat format,uint32
     return true;
 }
 }
+#if defined(DM_GAME_D3) || defined(DM_GAME_TL2)
+// [D3] / [TL2] hle_d3_icons.c (hle_tl2_icons.c): the HUD skill slots' icon rectangles (source pixels) to copy out of this frame, and the
+// copied pixels after the frame's fence. A host-visible buffer per flight; the copy is recorded into the present's own command buffer (the
+// source is already in TRANSFER_SRC_OPTIMAL for the blit), so it adds no wait; nothing is recorded unless a batch is due (at most 4 a second).
+extern "C" int (*dm_present_icon_want)(int32_t,int32_t,int32_t,int32_t,int32_t(*)[4],int);
+extern "C" void (*dm_present_icon_done)(int,const int32_t(*)[4],const uint8_t*,int);
+namespace icons {
+enum{MAXN=8,MAXPX=160};
+VkBuffer buf[2]{};VkDeviceMemory mem[2]{};void *map[2]{};bool coherent[2]{},pend[2]{};int n[2]{},bgra[2]{};int32_t rect[2][MAXN][4];
+bool ensure(unsigned f){
+    if(buf[f])return true;
+    VkBufferCreateInfo bc{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};bc.size=VkDeviceSize(MAXN)*MAXPX*MAXPX*4;bc.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT;if(vkCreateBuffer(device,&bc,nullptr,&buf[f]))return buf[f]=VK_NULL_HANDLE,false;
+    VkMemoryRequirements mr;vkGetBufferMemoryRequirements(device,buf[f],&mr);VkPhysicalDeviceMemoryProperties mp;vkGetPhysicalDeviceMemoryProperties(physical,&mp);
+    int pick=-1;for(int pass=0;pass<2 && pick<0;pass++)for(uint32_t i=0;i<mp.memoryTypeCount;i++){VkMemoryPropertyFlags fl=mp.memoryTypes[i].propertyFlags;
+        VkMemoryPropertyFlags want=pass?VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT:VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        if((mr.memoryTypeBits&(1u<<i)) && (fl&want)==want){pick=int(i);coherent[f]=(fl&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)!=0;break;}}
+    VkMemoryAllocateInfo ma{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ma.allocationSize=mr.size;ma.memoryTypeIndex=uint32_t(pick<0?0:pick);
+    if(pick<0||vkAllocateMemory(device,&ma,nullptr,&mem[f])||vkBindBufferMemory(device,buf[f],mem[f],0)||vkMapMemory(device,mem[f],0,VK_WHOLE_SIZE,0,&map[f])){
+        __android_log_print(ANDROID_LOG_WARN,"dm-vulkan","HUD icon readback buffer failed: no button icons");vkDestroyBuffer(device,buf[f],nullptr);buf[f]=VK_NULL_HANDLE;return false;}
+    return true;
+}
+void collect(unsigned f){
+    if(!pend[f])return;pend[f]=false;
+    if(!coherent[f]){VkMappedMemoryRange mr{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};mr.memory=mem[f];mr.size=VK_WHOLE_SIZE;vkInvalidateMappedMemoryRanges(device,1,&mr);}
+    if(dm_present_icon_done)dm_present_icon_done(n[f],rect[f],static_cast<const uint8_t*>(map[f]),bgra[f]);
+}
+void record(VkCommandBuffer cmd,unsigned f,bool fence_idle,VkImage source,VkFormat format,int32_t x,int32_t y,int32_t w,int32_t h){
+    if(!dm_present_icon_want || (format!=VK_FORMAT_R8G8B8A8_UNORM && format!=VK_FORMAT_B8G8R8A8_UNORM && format!=VK_FORMAT_R8G8B8A8_SRGB && format!=VK_FORMAT_B8G8R8A8_SRGB))return;
+    if(pend[f] && fence_idle)collect(f);   // a batch whose fence was retired another way (swapchain rebuild drains the queue)
+    if(pend[f])return;
+    int32_t r[MAXN][4];int k=dm_present_icon_want(x,y,w,h,r,MAXN);if(k<=0 || !ensure(f))return;
+    VkBufferImageCopy c[MAXN]{};VkDeviceSize off=0;
+    for(int i=0;i<k;i++){c[i].bufferOffset=off;c[i].imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};c[i].imageOffset={r[i][0],r[i][1],0};c[i].imageExtent={uint32_t(r[i][2]),uint32_t(r[i][3]),1};
+        off+=VkDeviceSize(r[i][2])*r[i][3]*4;memcpy(rect[f][i],r[i],sizeof r[i]);}
+    vkCmdCopyImageToBuffer(cmd,source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,buf[f],uint32_t(k),c);
+    VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_HOST_READ_BIT;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.buffer=buf[f];b.size=VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&b,0,nullptr);
+    n[f]=k;bgra[f]=format==VK_FORMAT_B8G8R8A8_UNORM||format==VK_FORMAT_B8G8R8A8_SRGB;pend[f]=true;
+}
+}
+#endif
 int present(void*,void*,VkImage source,VkFormat source_format,uint32_t width,uint32_t height,const int32_t crop[4],int32_t){
     std::lock_guard<std::mutex> render_lock(render_mutex);
     pin_update();
@@ -305,6 +346,9 @@ int present(void*,void*,VkImage source,VkFormat source_format,uint32_t width,uin
     // A bounded acquire lets rendering observe lifecycle changes; UI never waits on the driver.
     unsigned f=overlap?flight:0;VkCommandPool pool=f?overlap_pool:command_pool;VkCommandBuffer cmd=f?overlap_command:command;VkSemaphore acq=f?overlap_acquired:acquired;VkFence done=f?overlap_fence:fence;
     if(in_flight[f]){XTRACE_BEGIN("dm-present-fence");r=vkWaitForFences(device,1,&done,VK_TRUE,10000000000ull);XTRACE_END();if(r)return r;if((r=vkResetFences(device,1,&done)))return r;in_flight[f]=false;
+#if defined(DM_GAME_D3) || defined(DM_GAME_TL2)
+        icons::collect(f);
+#endif
         if(present_stamped[f]){uint64_t t[2]{};if(vkGetQueryPoolResults(device,present_queries,f*2,2,sizeof t,t,8,VK_QUERY_RESULT_64_BIT)==VK_SUCCESS && t[1]>=t[0]){present_gpu_ns+=double(t[1]-t[0])*present_tick_ns;
             if(++present_timed==300){__android_log_print(ANDROID_LOG_INFO,"dm-vulkan","NVN PERF present_gpu_us=%.0f extent=%ux%u (marker gfx-present-timing)",present_gpu_ns/present_timed/1e3,extent.width,extent.height);present_gpu_ns=0;present_timed=0;}}present_stamped[f]=false;}}
     uint32_t index=0;XTRACE_BEGIN("dm-acquire");r=vkAcquireNextImageKHR(device,swapchain,50000000ull,acq,VK_NULL_HANDLE,&index);XTRACE_END();
@@ -335,6 +379,9 @@ int present(void*,void*,VkImage source,VkFormat source_format,uint32_t width,uin
     if(sp.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)filter=VK_FILTER_LINEAR;
 #endif
     const bool sharpened=rcas::record(cmd,f,source,source_format,width,height);
+#if defined(DM_GAME_D3) || defined(DM_GAME_TL2)
+    icons::record(cmd,f,!in_flight[f],source,source_format,x,y,w,h);   // after rcas: the source is back in TRANSFER_SRC_OPTIMAL
+#endif
     vkCmdBlitImage(cmd,sharpened?rcas::image:source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,images[index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,filter);
     // 同队列后续写入必须等源图读取完成；即使下一次图像布局未改变也建立 WAR 执行依赖。
     // Order subsequent same-queue writes after the source read, including reuse without a layout change.
@@ -360,7 +407,11 @@ int present(void*,void*,VkImage source,VkFormat source_format,uint32_t width,uin
     // 呈现失败时先排空，拆除路径要求队列空闲。
     // Drain a failed present before teardown, which requires an idle queue.
     if(overlap){flight^=1;if(pr!=VK_SUCCESS && pr!=VK_SUBOPTIMAL_KHR && (r=vkQueueWaitIdle(queue)))return r;}
-    else{if((r=vkWaitForFences(device,1,&done,VK_TRUE,10000000000ull)))return r;if((r=vkResetFences(device,1,&done)))return r;in_flight[0]=false;if((r=vkQueueWaitIdle(queue)))return r;}
+    else{if((r=vkWaitForFences(device,1,&done,VK_TRUE,10000000000ull)))return r;if((r=vkResetFences(device,1,&done)))return r;in_flight[0]=false;if((r=vkQueueWaitIdle(queue)))return r;
+#if defined(DM_GAME_D3) || defined(DM_GAME_TL2)
+        icons::collect(0);
+#endif
+    }
     if(pr==VK_ERROR_SURFACE_LOST_KHR){uint64_t bad=active_generation;destroy_swap();wait_window_change(bad);continue;}
     if(pr==VK_ERROR_OUT_OF_DATE_KHR){swap_dirty=true;wait_resize();continue;}
     if(pr!=VK_SUCCESS&&pr!=VK_SUBOPTIMAL_KHR)return pr;

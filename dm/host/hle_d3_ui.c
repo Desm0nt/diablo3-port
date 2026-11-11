@@ -31,6 +31,8 @@
 //                    and dm/ui-dump-raw.tsv (first 0x400 bytes of each visible control). =2: every control. Names from dm/ui-names.tsv,
 //                    handler names from dm/ui-callbacks.tsv (tools/d3_ui_callbacks.py) when present.
 //   DM_D3_UI_CRUMBS=1 (default; 0 = off) breadcrumbs for crash reports: focus / active changes, at most 8 lines a second.
+//   Every poll also hands the UI manager and the menu-open signal to hle_d3_icons.c (dm_d3_icons_poll: the HUD skill slots for the touch
+//   buttons), which reads through dm_d3_ui_read / dm_d3_ui_control / dm_d3_ui_child_id / dm_d3_ui_window_map below.
 // Everything is read through rd(): guest heap directly, main's image directly, anything else through process_vm_readv (a bad pointer reads as
 // "absent", never faults). Addresses: update 2.7.7 main, build-id 2607a74f; every called entry point is checked word for word first.
 #ifdef DM_GAME_D3
@@ -972,6 +974,20 @@ static void do_map(uint64_t mgr) {   // game thread, every poll
     }
 }
 
+// ---- for hle_d3_icons.c (the HUD skill slots on the touch buttons): the same safe reads, control lookup, UIID hashing and UI -> window mapping
+int dm_d3_ui_read(uint64_t a, void *out, size_t n);
+int dm_d3_ui_read(uint64_t a, void *out, size_t n) { return g_ok > 0 && rd(a, out, n); }
+uint64_t dm_d3_ui_control(uint64_t mgr, uint64_t id);
+uint64_t dm_d3_ui_control(uint64_t mgr, uint64_t id) { return g_ok > 0 ? map_get(mgr, id) : 0; }
+uint64_t dm_d3_ui_child_id(uint64_t parent, const char *name);
+uint64_t dm_d3_ui_child_id(uint64_t parent, const char *name) { return child_id(parent, name); }
+// game thread only (0x34baf0): {l, t, r, b} = the window pixels of the 960x720 UI space, {w, h} = the window size
+int dm_d3_ui_window_map(float m[6]);
+int dm_d3_ui_window_map(float m[6]) {
+    pxmap p; if (g_ok <= 0 || !px_map(&p)) return 0;
+    m[0] = p.l; m[1] = p.t; m[2] = p.r; m[3] = p.b; m[4] = (float)p.w; m[5] = (float)p.h; return 1;
+}
+
 // ---- full dump
 static void dump(uint64_t mgr) {
     char p[1200], praw[1200]; snprintf(p, sizeof p, "%s/ui-dump.tsv", g_dir); snprintf(praw, sizeof praw, "%s/ui-dump-raw.tsv", g_dir);
@@ -1084,6 +1100,7 @@ void dm_d3_ui_pump(uint64_t *buttons) {
         uint64_t xy = atomic_load(&g_tap_xy); float x, y; uint32_t xb = (uint32_t)xy, yb = (uint32_t)(xy >> 32); memcpy(&x, &xb, 4); memcpy(&y, &yb, 4);
         if (open) do_tap(mgr, x, y); else tap_minimap(mgr, x, y);
     }
+    { void dm_d3_icons_poll(uint64_t mgr, int menu_open); dm_d3_icons_poll(mgr, open); }   // [D3] HUD skill slots for the touch buttons (hle_d3_icons.c)
     static unsigned tick; ++tick;
     if (g_tap_mode && open && tick % 10 == 3) refresh_lists(mgr);
     if (g_tap_mode && tick % 10 == 7) refresh_minimap(mgr, open);

@@ -65,6 +65,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // [D3] touch on the console UI (hle_d3_ui.c, docs/d3/TOUCH_DESIGN.md §7-8): a menu has the UI focus; a tap at picture fractions x, y
     // runs the tapped element's own action on the game thread. Both false when the host has it off.
     static native boolean nativeD3UiMenuOpen();
+    static native int nativeD3IconSerial();   // [D3] HUD skill slot icons (hle_d3_icons.c): change counter, -1 = off
+    static native int nativeD3Icons(int[] argb, int[] meta);   // 7 x 64 x 64 ARGB, 7 x {button code, state 0/1 icon/2 empty, cooldown, potion}; returns the serial
     static native boolean nativeD3UiTap(float x, float y);
     static native boolean nativeD3UiMinimapHit(float x, float y);   // [D3] the point is on the HUD minimap (a tap there opens the big map)
     static native boolean nativeD3UiScroll(float x, float y, float dy);
@@ -848,7 +850,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     //     Vulkan driver (DM_VK_DRIVER -> vk_driver.c), vibration (DM_RUMBLE);
     //   immediately: picture shape (16:9 bars / stretched: the SurfaceView size, applyAspectLayout), and "doom_controls" read by
     //     D3PadView.reloadSettings: FPS counter, stick dead-zone compensation, settings button look (normal / faded + opacity),
-    //     control layout ("d3_layout" touch / gamepad, on pick), skill icons on the buttons ("d3_icons", D3SkillIcons), layout opacity / size ("d3_opacity" / "d3_scale" %, live sliders),
+    //     control layout ("d3_layout" touch / gamepad, on pick), skill icons on the buttons ("d3_icons", hle_d3_icons.c via nativeD3Icons), layout opacity / size ("d3_opacity" / "d3_scale" %, live sliders),
     //     touch walking hero height / depth correction ("d3_hero_y" / "d3_depth" %, live), menu swipes ("d3_menu_swipe" stick / d-pad);
     //     "Edit control positions" saves the dialog and puts the pad in its edit mode (positions "d3_pos_<layout>_<group>").
     static final int[] D3_FPS_LIMITS = {30, 60};   // above 60 is not offered: D3 runs its frames at 60 like on the Switch (present interval 1)
@@ -879,7 +881,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         else { android.graphics.Point pt = new android.graphics.Point(); getWindowManager().getDefaultDisplay().getRealSize(pt); w = pt.x; h = pt.y; }   // [D3] Android 10 build
         return new int[] {Math.max(w, h), Math.min(w, h)};
     }
-    // The running game's render size (D3SkillIcons reads the game picture back at this size); null before the game starts.
+    // The running game's render size (as the native side picks it); null before the game starts.
     int[] d3RenderSize() {
         if (startedAspect < 0) return null;
         int[] sc = screenSize();

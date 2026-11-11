@@ -689,6 +689,33 @@ JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3UiMenuOpen(
 #endif
 }
 
+// [D3] Button icons (hle_d3_icons.c): the HUD skill slots' icons as the game drew them. nativeD3IconSerial() = change counter (-1 = off);
+// nativeD3Icons(int[7*64*64] argb, int[7*4] meta) fills both (slot 0 potion, 1..6 Slot1..6; meta per slot: button code 0 A / 1 B / 2 X /
+// 3 Y / 4 L / 5 R / 6 ZL / 7 ZR (-1 unknown), state 0 not yet / 1 icon / 2 empty or locked, cooldown 0 / 1, 1 = potion) and returns the serial.
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3IconSerial(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+#ifdef DM_GAME_D3
+    int dm_d3_icon_serial(void); return dm_d3_icon_serial();
+#else
+    return -1;
+#endif
+}
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeD3Icons(JNIEnv *env, jclass cls, jintArray px, jintArray meta) {
+    (void)cls;
+#ifdef DM_GAME_D3
+    if (!px || !meta) return -1;
+    jint np = (*env)->GetArrayLength(env, px), nm = (*env)->GetArrayLength(env, meta);
+    jint *p = (*env)->GetIntArrayElements(env, px, NULL), *m = (*env)->GetIntArrayElements(env, meta, NULL);
+    int dm_d3_icons(uint32_t *px, int npx, int *meta, int nmeta);
+    int s = p && m ? dm_d3_icons((uint32_t *)p, np, (int *)m, nm) : -1;
+    if (p) (*env)->ReleaseIntArrayElements(env, px, p, 0);
+    if (m) (*env)->ReleaseIntArrayElements(env, meta, m, 0);
+    return s;
+#else
+    (void)env; (void)px; (void)meta; return -1;
+#endif
+}
+
 // [front] The unified front end (frontend-common, docs/FRONTEND_UNIFIED.md); the same names and signatures as nx2android's front_android.c and DOOM
 // Eternal's branch. nativeHold: the pause menu is open: the game is held as the Switch holds it behind HOME (hle_hold.c: graphics, audio, guest clock);
 // the Java side stops sending input. nativeQuit: the graceful exit (hle_lifecycle.c dm_host_shutdown: audio and graphics stopped, then _exit(0)).

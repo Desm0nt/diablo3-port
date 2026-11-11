@@ -3,15 +3,18 @@ package com.xiaoboluo.d2r;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.BitmapShader;
 import android.graphics.Canvas;
+import android.graphics.Matrix;
 import android.graphics.Paint;
-import android.graphics.Path;
 import android.graphics.RectF;
+import android.graphics.Shader;
 import android.os.SystemClock;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -22,18 +25,24 @@ import java.util.Map;
 //   gamepad ("gamepad", default): the Joy-Con-like pad of commit abf0b6a, unchanged in behaviour: floating left stick + d-pad below,
 //     A/B/X/Y + right stick (D3: evade toward the tilt) below them, L/ZL R/ZR in the top corners, "-" ⚙ "+" on top; a short tap on a
 //     stick's knob is L3 / R3.
-//   touch ("touch"): phase 1 of docs/d3/TOUCH_DESIGN.md (front end only, no game hooks):
+//   touch ("touch"; its editor prefs live under "touch2" since the TL2-style fan, so places saved for the old arc do not scatter it):
 //     * floating left stick in the lower left (tap on its home knob = L3);
 //     * touch and hold the world (any free spot below the top strip) = walk toward that point: the left stick points from the hero's
 //       on-screen spot (HERO_FX, "d3_hero_y") to the finger, the vertical part divided by the camera's depth squeeze ("d3_depth");
 //       tilt grows with the distance (WORLD_*); the move stick wins over a world touch;
-//     * double tap in the world = evade toward the point: a right-stick flick of EVADE_MS (D3 console "ControllerLayoutFlickEvade");
-//     * six skill buttons for the right thumb (A primary, large, in the corner; B Y X R ZR on an arc around it) and the potion (L) left of
-//       the arc; ZL and a small d-pad top left, "-" (inventory / map) ⚙ "+" (menu) on top, R3 and the MENU toggle top right;
+//     * evade: a quick flick of a world finger (FLICK_DP within FLICK_MS, released or still down) = a right-stick flick of EVADE_MS toward
+//       the flick (D3 console "ControllerLayoutFlickEvade", as the gamepad layout's right stick); a slow drag / hold keeps walking; the
+//       double tap in the world (evade toward the tapped point) stays;
+//     * TL2-style fan for the right thumb (Torchlight II port's Tl2Touch): A (primary, large) FAN_A_* from the bottom right corner, an
+//       inner arc of B X Y and R (the HUD's potion button) at FAN_IN, an outer arc of ZL ZR at FAN_OUT: every button the HUD's skill slots
+//       and potion use with the default bindings (Slot1..6 = A Y X B ZL ZR, potion R); one editor group "fan";
+//     * top row as TL2: "-" (inventory / map) gear "+" (menu) in the middle, R3, the MENU toggle and L top right; the small d-pad top left;
 //     * MENU toggle (manual menu mode; automatic detection is phase 2): skills, A/X/Y, R3 and the stick hide; a swipe anywhere drives the
 //       left stick (or the d-pad, "d3_menu_swipe") toward the swipe, a tap = A, a long press = hold A; B, L/R, ZL/ZR, d-pad, -/+ stay.
-// Both layouts: skill icons on the buttons (gear "Skill icons on buttons", "d3_icons", default on: D3SkillIcons copies each HUD slot's
-// icon onto the button whose letter the HUD shows under it; the button's own label moves to a small badge in its lower right),
+// Both layouts: skill icons on the buttons (gear "Skill icons on buttons", "d3_icons", default on): hle_d3_icons.c reads the HUD's skill
+// slots from the game's UI tree (which button each slot is bound to, empty / locked, cooldown) and crops their icons out of the presented
+// frame (DmActivity.nativeD3IconSerial / nativeD3Icons, polled twice a second); a button with an icon draws it inside with its letter as a
+// small badge (TL2's look), darkened while the slot's cooldown cover is up; the letter of a button whose HUD slot is empty / locked is dim;
 // opacity ("d3_opacity" %), size ("d3_scale" %: radii and cluster offsets), and a layout editor (TL2's / DOOM's editor UX): toolbar
 // − + Grouped/Separate Hide/Show Reset Cancel Save; drag a control, a second finger resizes it, − / + with none chosen resize every
 // group. Grouped (default): a control drags / resizes its whole group (a d-pad, the A/B/X/Y diamond): "d3_pos_<layout>_<group>" =
@@ -70,15 +79,19 @@ public class D3PadView extends View implements FrontMenu.Pad {
     // DOUBLE_TAP_DIST_DP of it; the right stick is held at full tilt toward the point for EVADE_MS.
     static final long TAP_MS = 220, DOUBLE_TAP_MS = 300, EVADE_MS = 120;
     static final float TAP_SLOP_DP = 14, DOUBLE_TAP_DIST_DP = 90;
+    // Flick = evade toward the flick: a world finger that travels FLICK_DP within FLICK_MS of touching down (checked while it moves and
+    // when it lifts); slower fingers walk.
+    static final long FLICK_MS = 250;
+    static final float FLICK_DP = 40;
     // Menu mode gestures: a move past MENU_SWIPE_DP is a swipe (stick: full tilt at MENU_STICK_DP; held at least MENU_MIN_SWIPE_MS so a
     // quick flick is seen by the game), a touch held MENU_LONG_MS without a swipe holds A, a shorter one is an A press of PULSE_MS.
     static final float MENU_SWIPE_DP = 20, MENU_STICK_DP = 70;
     static final long MENU_LONG_MS = 450, MENU_MIN_SWIPE_MS = 90, PULSE_MS = 100;
 
     // ---- Touch layout geometry (dp, scaled by "d3_scale") ----
-    // A sits ARC_A_GX / ARC_A_GY from the bottom right corner; B Y X R ZR on an arc of ARC_R around it from ARC_FROM_DEG (left, slightly
-    // below) counter-clockwise in ARC_STEP_DEG steps (to just right of straight up).
-    static final float ARC_A_GX = -90, ARC_A_GY = -85, ARC_A_R = 42, ARC_R = 135, ARC_SKILL_R = 28, ARC_FROM_DEG = 190, ARC_STEP_DEG = 26.25f;
+    // TL2's fan (Tl2Touch): A at FAN_A_GX / FAN_A_GY from the bottom right corner; the inner arc FAN_IN around it (angles from the right,
+    // counter-clockwise: B 200, X 155, Y 110, R / potion 68), the outer arc FAN_OUT (ZL 190, ZR 150); D3's sizes (A 42, skills 28).
+    static final float FAN_A_GX = -80, FAN_A_GY = -86, FAN_A_R = 42, FAN_IN = 92, FAN_OUT = 156, FAN_SKILL_R = 28;
 
     static final int K_A = KeyEvent.KEYCODE_ENTER, K_B = KeyEvent.KEYCODE_ESCAPE, K_X = KeyEvent.KEYCODE_R, K_Y = KeyEvent.KEYCODE_F,
         K_L = KeyEvent.KEYCODE_Q, K_R = KeyEvent.KEYCODE_E, K_ZL = KeyEvent.KEYCODE_SHIFT_LEFT, K_ZR = KeyEvent.KEYCODE_CTRL_LEFT,
@@ -126,18 +139,22 @@ public class D3PadView extends View implements FrontMenu.Pad {
     static final int GEAR_NORMAL = DoomPadView.GEAR_NORMAL, GEAR_FADED = DoomPadView.GEAR_FADED;
     private int gearMode = GEAR_NORMAL, gearAlpha = DoomPadView.GEAR_ALPHA_DEFAULT;
     private boolean controllerMode, menuMode, editMode;
-    // Skill icons (D3SkillIcons): sampled only while the pad is visible in play mode, the option is on and the activity is resumed.
-    private final D3SkillIcons icons;
-    private boolean iconsOn = true, padVisible = true, hostResumed = true, hideSticks = true;
+    // Skill icons (hle_d3_icons.c): the serial is polled twice a second while the option is on, the pad is visible, the activity resumed,
+    // no controller drives the game and the editor is closed; the icons already read stay drawn meanwhile.
+    private boolean iconsOn = true, padVisible = true, hostResumed = true, hideSticks = true, attached, iconsLib = true, iconTicking;
+    private static final int ICON = 64, NSLOT = 7, NCODE = 8;   // codes 0 A, 1 B, 2 X, 3 Y, 4 L, 5 R, 6 ZL, 7 ZR (hle_d3_icons.c)
+    private final int[] iconPx = new int[NSLOT * ICON * ICON], iconMeta = new int[NSLOT * 4], iconState = new int[NCODE];
+    private final boolean[] iconCool = new boolean[NCODE];
+    private final BitmapShader[] iconSh = new BitmapShader[NCODE];
+    private int iconSerial = -2;
     private final Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-    private final Path clip = new Path(); private final RectF iconDst = new RectF();
+    private final RectF iconDst = new RectF(), iconSrc = new RectF(0, 0, ICON, ICON); private final Matrix iconM = new Matrix();
 
     public D3PadView(Context c) {
         super(c);
         dp = c.getResources().getDisplayMetrics().density;
         line.setStyle(Paint.Style.STROKE); line.setStrokeWidth(2 * dp);
         text.setTextAlign(Paint.Align.CENTER);
-        icons = c instanceof DmActivity ? new D3SkillIcons((DmActivity) c, this::invalidate) : null;
         reloadSettings();
     }
 
@@ -162,28 +179,31 @@ public class D3PadView extends View implements FrontMenu.Pad {
         addBtn("-", K_MINUS, "minus", 0.38f, 0.09f, 0, 0, 0, 0, 22, true);
         addBtn("⚙", SETTINGS, "gear", 0.50f, 0.09f, 0, 0, 0, 0, 20, true);
     }
-    private void buildTouch() {
+    private void buildTouch() {   // TL2's layout (Tl2Touch "tl2"): the fan for the right thumb, top row, D3's floating stick
         left = new Stick("lstick", 0.12f, 0.68f, 64, K_L3, 1.4f, 0.18f, 0.30f);   // floating zone: x < 0.30, y > 0.38 at home
         right = null;
-        addBtn("A", K_A, "a", 1, 1, ARC_A_GX, ARC_A_GY, 0, 0, ARC_A_R, false);   // primary skill / interact
-        String[] l = {"B", "Y", "X", "R", "ZR"}; int[] k = {K_B, K_Y, K_X, K_R, K_ZR}; boolean[] menu = {true, false, false, true, true};
+        addBtn("A", K_A, "fan", 1, 1, FAN_A_GX, FAN_A_GY, 0, 0, FAN_A_R, false);   // primary skill / interact
+        String[] l = {"B", "X", "Y", "R", "ZL", "ZR"}; int[] k = {K_B, K_X, K_Y, K_R, K_ZL, K_ZR};
+        float[] ang = {200, 155, 110, 68, 190, 150}, rad = {FAN_IN, FAN_IN, FAN_IN, FAN_IN, FAN_OUT, FAN_OUT};
+        boolean[] menu = {true, false, false, true, true, true};
         for (int i = 0; i < l.length; i++) {
-            double t = Math.toRadians(ARC_FROM_DEG - i * ARC_STEP_DEG);
-            addBtn(l[i], k[i], l[i].toLowerCase(Locale.ROOT), 1, 1, ARC_A_GX + ARC_R * (float) Math.cos(t), ARC_A_GY - ARC_R * (float) Math.sin(t), 0, 0, ARC_SKILL_R, menu[i]);
+            double t = Math.toRadians(ang[i]);
+            addBtn(l[i], k[i], "fan", 1, 1, FAN_A_GX, FAN_A_GY, rad[i] * (float) Math.cos(t), -rad[i] * (float) Math.sin(t), FAN_SKILL_R, menu[i]);
         }
-        addBtn("L", K_L, "l", 1, 1, -300, -52, 0, 0, 30, true);   // potion, left of the arc
-        addBtn("ZL", K_ZL, "zl", 0.065f, 0.09f, 0, 0, 0, 0, 26, true);
         addDpad("dpad", 0, 0, 165, 75, 30, 17);
-        addBtn("-", K_MINUS, "minus", 0.38f, 0.09f, 0, 0, 0, 0, 22, true);
-        addBtn("⚙", SETTINGS, "gear", 0.50f, 0.09f, 0, 0, 0, 0, 20, true);
-        addBtn("+", K_PLUS, "plus", 0.62f, 0.09f, 0, 0, 0, 0, 22, true);
-        addBtn(menuLabel, MENU_TOGGLE, "menu", 0.75f, 0.09f, 0, 0, 0, 0, 24, true);
-        addBtn("R3", K_R3, "r3", 0.87f, 0.09f, 0, 0, 0, 0, 20, false);
+        addBtn("-", K_MINUS, "minus", 0.5f, 0, -55, 30, 0, 0, 22, true);
+        addBtn("\u2699", SETTINGS, "gear", 0.5f, 0, 0, 30, 0, 0, 20, true);
+        addBtn("+", K_PLUS, "plus", 0.5f, 0, 55, 30, 0, 0, 22, true);
+        addBtn("R3", K_R3, "tr", 1, 0, -30, 30, 0, 0, 19, false);   // TL2: R3 at the top right, the rest of the row to its left
+        addBtn(menuLabel, MENU_TOGGLE, "tr", 1, 0, -30, 30, -52, 0, 22, true);
+        addBtn("L", K_L, "tr", 1, 0, -30, 30, -104, 0, 20, true);
     }
     private boolean touch() { return LAYOUT_TOUCH.equals(layout); }
     private List<Ctl> all() { List<Ctl> a = new ArrayList<>(btns); a.add(left); if (right != null) a.add(right); return a; }
-    private String posKey(String group) { return "d3_pos_" + layout + "_" + group; }
-    private String btnKey(Ctl k) { return "d3_btn_" + layout + "_" + k.name; }
+    // editor prefs per layout; the touch layout's are "touch2" since the TL2 fan (the old arc's places would scatter it)
+    private String prefLayout() { return touch() ? "touch2" : layout; }
+    private String posKey(String group) { return "d3_pos_" + prefLayout() + "_" + group; }
+    private String btnKey(Ctl k) { return "d3_btn_" + prefLayout() + "_" + k.name; }
 
     // Gear dialog options (DmActivity.showD3Settings), all "doom_controls" except the picture shape.
     @Override public void reloadSettings() {
@@ -202,7 +222,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         depth = clamp(p.getInt("d3_depth", DEPTH_DEFAULT), DEPTH_MIN, DEPTH_MAX) / 100f;
         menuSwipe = p.getInt("d3_menu_swipe", MENU_SWIPE_STICK) == MENU_SWIPE_DPAD ? MENU_SWIPE_DPAD : MENU_SWIPE_STICK;
         aspect = c.getSharedPreferences("doom_graphics", Context.MODE_PRIVATE).getInt("aspect", 0); stretched = aspect == 1;
-        iconsOn = p.getBoolean("d3_icons", true);
+        iconsOn = p.getBoolean("d3_icons", true); iconSerial = -2;
         hideSticks = p.getBoolean("d3_hide_sticks", true);
         skinPack = p.getString("skin", PadSkin.CLASSIC);   // [front] PadSkin pack or classic
         String want = LAYOUT_TOUCH.equals(p.getString("d3_layout", LAYOUT_DEFAULT)) ? LAYOUT_TOUCH : LAYOUT_GAMEPAD;
@@ -249,13 +269,37 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private static float clampS(float v) { return Math.max(EDIT_SCALE_MIN, Math.min(EDIT_SCALE_MAX, v)); }
     private static boolean canHide(Ctl k) { return k instanceof Btn && ((Btn) k).key != SETTINGS; }
 
-    // ---------------- skill icons ----------------
-    private void iconGate() { if (icons != null) icons.setGate(iconsOn && padVisible && hostResumed && !menuMode && !controllerMode && !editMode); }
-    // DmActivity.onResume / onPause: no read-back of a surface that is going away; a resume samples again soon.
+    // ---------------- skill icons (hle_d3_icons.c) ----------------
+    private static int codeOf(int key) {
+        switch (key) { case K_A: return 0; case K_B: return 1; case K_X: return 2; case K_Y: return 3; case K_L: return 4; case K_R: return 5; case K_ZL: return 6; case K_ZR: return 7; default: return -1; }
+    }
+    // a new serial: every slot's button code, state (1 icon / 2 empty or locked), cooldown, and its 64 x 64 pixels as a shader
+    private boolean pollIcons() {
+        if (!iconsOn || !iconsLib) return false;
+        int s; try { s = DmActivity.nativeD3IconSerial(); } catch (UnsatisfiedLinkError e) { iconsLib = false; return false; }
+        if (s < 0 || s == iconSerial) return false;
+        iconSerial = DmActivity.nativeD3Icons(iconPx, iconMeta);
+        Arrays.fill(iconState, 0); Arrays.fill(iconCool, false); Arrays.fill(iconSh, null);
+        for (int i = 0; i < NSLOT; i++) {
+            int code = iconMeta[i * 4], st = iconMeta[i * 4 + 1];
+            if (code < 0 || code >= NCODE) continue;
+            iconState[code] = st; iconCool[code] = iconMeta[i * 4 + 2] != 0;
+            if (st == 1) iconSh[code] = new BitmapShader(Bitmap.createBitmap(iconPx, i * ICON * ICON, ICON, ICON, ICON, Bitmap.Config.ARGB_8888), Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+        }
+        return true;
+    }
+    private final Runnable iconTick = new Runnable() { public void run() { if (!iconTicking) return; if (pollIcons()) invalidate(); postDelayed(this, 500); } };
+    private void iconGate() {
+        boolean on = attached && iconsOn && iconsLib && padVisible && hostResumed && !controllerMode && !editMode;
+        if (on == iconTicking) return;
+        iconTicking = on; removeCallbacks(iconTick);
+        if (on) post(iconTick);
+    }
+    // DmActivity.onResume / onPause: no polling while paused
     void setHostResumed(boolean on) { hostResumed = on; iconGate(); }
     @Override public void onVisibilityAggregated(boolean visible) { super.onVisibilityAggregated(visible); padVisible = visible; iconGate(); }
-    @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); if (icons != null) { icons.start(); iconGate(); } }
-    @Override protected void onDetachedFromWindow() { if (icons != null) icons.stop(); super.onDetachedFromWindow(); }
+    @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); attached = true; iconGate(); }
+    @Override protected void onDetachedFromWindow() { attached = false; iconGate(); super.onDetachedFromWindow(); }
     private static int clamp(int v, int lo, int hi) { return Math.max(lo, Math.min(hi, v)); }
     private static float clampF(float v) { return Math.max(0f, Math.min(1f, v)); }
 
@@ -348,6 +392,15 @@ public class D3PadView extends View implements FrontMenu.Pad {
         float d = g[2] * dp; evadeX = g[0] / d; evadeY = g[1] / d; evadeUntil = SystemClock.uptimeMillis() + EVADE_MS;
         postDelayed(this::axes, EVADE_MS + 4);
     }
+    // the flick: the finger's screen travel (dx, dy) turned into a ground direction the way ground() does (stretch, depth squeeze)
+    private void evadeToward(float dx, float dy) {
+        float w = getWidth(), h = getHeight(), pw = w, ph = h;
+        if (!stretched) { if (w * 9 > h * 16) pw = h * 16 / 9; else ph = w * 9 / 16; }
+        float xs = ph > 0 ? (pw / ph) / (16f / 9f) : 1f, gx = dx / xs, gy = dy / depth, d = (float) Math.sqrt(gx * gx + gy * gy);
+        if (d <= 0) return;
+        evadeX = gx / d; evadeY = gy / d; evadeUntil = SystemClock.uptimeMillis() + EVADE_MS;
+        postDelayed(this::axes, EVADE_MS + 4);
+    }
 
     private void axes() {
         if (controllerMode || editMode) return;   // a real controller / the edit mode: nothing from this pad
@@ -361,16 +414,27 @@ public class D3PadView extends View implements FrontMenu.Pad {
     }
 
     // ---------------- world touch (touch layout, play mode) ----------------
-    private int worldPtr = -1; private float worldX, worldY, worldX0, worldY0; private long worldT0, lastTapT; private float lastTapX, lastTapY; private boolean worldMoved, worldEvaded;
+    private int worldPtr = -1; private float worldX, worldY, worldX0, worldY0; private long worldT0, lastTapT; private float lastTapX, lastTapY; private boolean worldMoved, worldEvaded, worldFlicked;
     private void worldStart(int id, float x, float y) {
         long now = SystemClock.uptimeMillis();
         worldEvaded = now - lastTapT < DOUBLE_TAP_MS && Math.hypot(x - lastTapX, y - lastTapY) < DOUBLE_TAP_DIST_DP * dp;
         if (worldEvaded) { evade(x, y); lastTapT = 0; }   // the finger may stay down: it then walks on toward the point
-        worldPtr = id; worldX = worldX0 = x; worldY = worldY0 = y; worldT0 = now; worldMoved = false;
+        worldPtr = id; worldX = worldX0 = x; worldY = worldY0 = y; worldT0 = now; worldMoved = worldFlicked = false;
     }
-    private void worldMove(float x, float y) { worldX = x; worldY = y; if (Math.hypot(x - worldX0, y - worldY0) > TAP_SLOP_DP * dp) worldMoved = true; }
+    private void worldMove(float x, float y) {
+        worldX = x; worldY = y; if (Math.hypot(x - worldX0, y - worldY0) > TAP_SLOP_DP * dp) worldMoved = true;
+        flick();
+    }
+    // a quick flick (FLICK_DP within FLICK_MS of the touch-down) evades toward it, once per finger (while it moves or as it lifts)
+    private void flick() {
+        if (worldFlicked || worldEvaded || SystemClock.uptimeMillis() - worldT0 > FLICK_MS) return;
+        float dx = worldX - worldX0, dy = worldY - worldY0;
+        if (Math.hypot(dx, dy) < FLICK_DP * dp) return;
+        worldFlicked = true; evadeToward(dx, dy);
+    }
     private void worldEnd(boolean cancel) {
         long now = SystemClock.uptimeMillis();
+        if (!cancel) flick();
         if (!cancel && !worldMoved && !worldEvaded && now - worldT0 < TAP_MS) { lastTapT = now; lastTapX = worldX0; lastTapY = worldY0; }   // a tap: the first half of a double tap
         worldPtr = -1;
     }
@@ -413,7 +477,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         } else if (!cancel && !uiTap(menuX0, menuY0)) pulse(K_A);
     }
     void setMenuMode(boolean on) {
-        releaseAll(); menuMode = on; axes(); iconGate(); invalidate();
+        releaseAll(); menuMode = on; axes(); invalidate();
     }
 
     // Lets go of everything this pad holds (focus lost, layout / mode switch, a controller took over, edit mode).
@@ -773,29 +837,32 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private void drawBtnBody(Canvas c, Btn b, float x, float y, float r, float k, boolean on) {
         fill.setColor(b.key == MENU_TOGGLE && menuMode ? 0xffffb030 : 0xffffffff); fill.setAlpha(Math.round((on ? 0x80 : 0x30) * k));
         line.setColor(editMode ? 0xffffd040 : 0xffffffff); line.setAlpha(editMode ? 0xe0 : Math.round(0x90 * k));
-        Bitmap ic = iconsOn && icons != null && b.key >= 0 ? icons.icon(b.key) : null;
-        if (ic != null) { drawIconBtn(c, b, ic, x, y, r, k, on); return; }
+        int code = iconsOn && b.key >= 0 ? codeOf(b.key) : -1;
+        if (code >= 0 && iconSh[code] != null) { drawIconBtn(c, b, code, x, y, r, k, on); return; }
+        boolean empty = code >= 0 && iconState[code] == 2;   // the HUD slot on this button is empty / locked: dim letter
         if (drawSkinned(c, b, x, y, r, k, on)) return;   // [front] the pad's skin
         c.drawCircle(x, y, r, fill); c.drawCircle(x, y, r, line);
         float ts = touch() ? Math.max(12 * u(), 0.55f * r) : 15 * u();   // gamepad: the labels of DoomPadView's D3 pad
         text.setTextSize(ts); float w = text.measureText(b.label);
         if (w > 1.7f * r) { ts *= 1.7f * r / w; text.setTextSize(ts); }   // long labels (MENU / МЕНЮ) fit the circle
-        text.setColor(0xffffffff); text.setAlpha(Math.round(0xd0 * k));
+        text.setColor(0xffffffff); text.setAlpha(Math.round((empty ? 0x70 : 0xd0) * k));
         c.drawText(b.label, x, y + ts * 0.35f, text);
     }
-    // A button with the HUD's icon of its skill: the icon fills the circle (at the layout opacity), pressed = lighter, the button's
-    // label as a small badge in the lower right.
-    private void drawIconBtn(Canvas c, Btn b, Bitmap ic, float x, float y, float r, float k, boolean on) {
-        c.save();
-        clip.reset(); clip.addCircle(x, y, r, Path.Direction.CW); c.clipPath(clip);
-        iconPaint.setAlpha(Math.round(0xe0 * k)); iconDst.set(x - r, y - r, x + r, y + r); c.drawBitmap(ic, null, iconDst, iconPaint);
-        if (on) { fill.setColor(0xffffffff); fill.setAlpha(Math.round(0x70 * k)); c.drawCircle(x, y, r, fill); }
-        c.restore();
-        c.drawCircle(x, y, r, line);
-        float ts = Math.max(10 * dp, 0.34f * r); text.setTextSize(ts);
-        float bx = x + r * 0.70f, by = y + r * 0.70f, br = Math.max(ts * 0.72f, text.measureText(b.label) * 0.62f);
-        fill.setColor(0xff000000); fill.setAlpha(Math.round(0xb0 * k)); c.drawCircle(bx, by, br, fill);
-        text.setColor(0xffffffff); text.setAlpha(Math.round(0xe0 * k)); c.drawText(b.label, bx, by + ts * 0.35f, text);
+    // A button with the HUD's icon of its skill (TL2's look): the icon as a shader-filled circle inside the ring (readable at low overlay
+    // opacity), darkened while the slot's cooldown cover is up, lighter while pressed, the button's letter as a small badge lower right.
+    private void drawIconBtn(Canvas c, Btn b, int code, float x, float y, float r, float k, boolean on) {
+        c.drawCircle(x, y, r, fill); c.drawCircle(x, y, r, line);
+        float ir = r * 0.86f, kk = Math.max(k, 0.85f);
+        iconDst.set(x - ir, y - ir, x + ir, y + ir);
+        iconM.setRectToRect(iconSrc, iconDst, Matrix.ScaleToFit.FILL); iconSh[code].setLocalMatrix(iconM);
+        iconPaint.setShader(iconSh[code]); iconPaint.setAlpha(on ? 0xff : Math.round(0xff * kk));
+        c.drawCircle(x, y, ir, iconPaint);
+        if (iconCool[code]) { fill.setColor(0xff000000); fill.setAlpha(Math.round(0x90 * kk)); c.drawCircle(x, y, ir, fill); }
+        if (on) { fill.setColor(0xffffffff); fill.setAlpha(0x50); c.drawCircle(x, y, ir, fill); }
+        float bs = Math.max(9 * dp, 0.32f * r); text.setTextSize(bs); text.setColor(0xffffffff); text.setAlpha(Math.round(0xe0 * kk));
+        float bx = x + r * 0.55f, by = y + r * 0.62f;
+        fill.setColor(0xa0000000); c.drawCircle(bx, by - bs * 0.35f, bs * 0.85f, fill);
+        c.drawText(b.label, bx, by, text);
     }
     // [front] a button in the skin: by its label's name; the d-pad's four buttons are drawn as the skin's one d-pad, by the up button, at the group's centre
     private boolean drawSkinned(Canvas c, Btn b, float x, float y, float r, float k, boolean on) {
