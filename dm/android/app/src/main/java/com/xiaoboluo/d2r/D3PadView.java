@@ -25,7 +25,7 @@ import java.util.Map;
 //   gamepad ("gamepad", default): the Joy-Con-like pad of commit abf0b6a, unchanged in behaviour: floating left stick + d-pad below,
 //     A/B/X/Y + right stick (D3: evade toward the tilt) below them, L/ZL R/ZR in the top corners, "-" ⚙ "+" on top; a short tap on a
 //     stick's knob is L3 / R3.
-//   touch ("touch"; its editor prefs live under "touch2" since the TL2-style fan, so places saved for the old arc do not scatter it):
+//   touch ("touch"; its editor prefs live under "touch3" since the arcs around the minimap, "touch2" was the TL2-style fan, so places saved for the old arc do not scatter it):
 //     * floating left stick in the lower left (tap on its home knob = L3);
 //     * touch and hold the world (any free spot below the top strip) = walk toward that point: the left stick points from the hero's
 //       on-screen spot (HERO_FX, "d3_hero_y") to the finger, the vertical part divided by the camera's depth squeeze ("d3_depth");
@@ -33,9 +33,9 @@ import java.util.Map;
 //     * evade: a quick flick of a world finger (FLICK_DP within FLICK_MS, released or still down) = a right-stick flick of EVADE_MS toward
 //       the flick (D3 console "ControllerLayoutFlickEvade", as the gamepad layout's right stick); a slow drag / hold keeps walking; the
 //       double tap in the world (evade toward the tapped point) stays;
-//     * TL2-style fan for the right thumb (Torchlight II port's Tl2Touch): A (primary, large) FAN_A_* from the bottom right corner, an
-//       inner arc of B X Y and R (the HUD's potion button) at FAN_IN, an outer arc of ZL ZR at FAN_OUT: every button the HUD's skill slots
-//       and potion use with the default bindings (Slot1..6 = A Y X B ZL ZR, potion R); one editor group "fan";
+//     * skill buttons of one size on two arcs around the game's minimap (FAN_C_*): inner A B X Y (A with a gold ring), outer R (the HUD's
+//       potion button) ZL ZR: every button the HUD's skill slots and potion use with the default bindings (Slot1..6 = A Y X B ZL ZR,
+//       potion R); one editor group "fan";
 //     * top row as TL2: "-" (inventory / map) gear "+" (menu) in the middle, R3, the MENU toggle and L top right; the small d-pad top left;
 //     * MENU toggle (manual menu mode; automatic detection is phase 2): skills, A/X/Y, R3 and the stick hide; a swipe anywhere drives the
 //       left stick (or the d-pad, "d3_menu_swipe") toward the swipe, a tap = A, a long press = hold A; B, L/R, ZL/ZR, d-pad, -/+ stay.
@@ -89,11 +89,13 @@ public class D3PadView extends View implements FrontMenu.Pad {
     static final long MENU_LONG_MS = 450, MENU_MIN_SWIPE_MS = 90, PULSE_MS = 100;
 
     // ---- Touch layout geometry (dp, scaled by "d3_scale") ----
-    // TL2's fan (Tl2Touch): A at FAN_A_GX / FAN_A_GY from the bottom right corner; the inner arc FAN_IN around it (angles from the right,
-    // counter-clockwise: B 200, X 155, Y 110, R / potion 68), the outer arc FAN_OUT (ZL 190, ZR 150); D3's sizes (A 42, skills 28).
-    // A sits up and left of the corner: the game's minimap fills the bottom right ~30..122 dp from the right, ~30..107 dp from the bottom
-    // (owner 11-11: A covered it and the minimap tap was hard to reach).
-    static final float FAN_A_GX = -150, FAN_A_GY = -150, FAN_A_R = 42, FAN_IN = 92, FAN_OUT = 156, FAN_SKILL_R = 28;
+    // Owner 11-11: every skill button the same size, on two arcs around the game's minimap (bottom right ~30..122 dp from the right,
+    // ~30..107 dp from the bottom; its centre FAN_C_GX / FAN_C_GY from the corner); A (confirm / primary) keeps the brightest ring.
+    // Angles from the right, counter-clockwise: inner arc FAN_IN A 195, B 157, X 119, Y 81; outer arc FAN_OUT R (potion) 188, ZL 160, ZR 132.
+    // The minimap does not follow "d3_scale": the centre and the arcs' clearance are real dp (FAN_MAP_R = the minimap's half size), only
+    // the buttons scale; buildTouch divides by the scale it was built for, and a scale change rebuilds the layout.
+    static final float FAN_C_GX = -72, FAN_C_GY = -68, FAN_MAP_R = 58, FAN_GAP = 6, FAN_SKILL_R = 28;
+    private float builtScale = -1;
 
     static final int K_A = KeyEvent.KEYCODE_ENTER, K_B = KeyEvent.KEYCODE_ESCAPE, K_X = KeyEvent.KEYCODE_R, K_Y = KeyEvent.KEYCODE_F,
         K_L = KeyEvent.KEYCODE_Q, K_R = KeyEvent.KEYCODE_E, K_ZL = KeyEvent.KEYCODE_SHIFT_LEFT, K_ZR = KeyEvent.KEYCODE_CTRL_LEFT,
@@ -184,13 +186,15 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private void buildTouch() {   // TL2's layout (Tl2Touch "tl2"): the fan for the right thumb, top row, D3's floating stick
         left = new Stick("lstick", 0.12f, 0.68f, 64, K_L3, 1.4f, 0.18f, 0.30f);   // floating zone: x < 0.30, y > 0.38 at home
         right = null;
-        addBtn("A", K_A, "fan", 1, 1, FAN_A_GX, FAN_A_GY, 0, 0, FAN_A_R, false);   // primary skill / interact
-        String[] l = {"B", "X", "Y", "R", "ZL", "ZR"}; int[] k = {K_B, K_X, K_Y, K_R, K_ZL, K_ZR};
-        float[] ang = {200, 155, 110, 68, 190, 150}, rad = {FAN_IN, FAN_IN, FAN_IN, FAN_IN, FAN_OUT, FAN_OUT};
-        boolean[] menu = {true, false, false, true, true, true};
-        for (int i = 0; i < l.length; i++) {
+        String[] l = {"A", "B", "X", "Y", "R", "ZL", "ZR"}; int[] k = {K_A, K_B, K_X, K_Y, K_R, K_ZL, K_ZR};
+        float sc = scale > 0 ? scale : 1, br = FAN_SKILL_R * sc, in = FAN_MAP_R + br + FAN_GAP, out = in + 2 * br + 8 * sc;   // real dp
+        builtScale = scale;
+        float cgx = FAN_C_GX / sc, cgy = FAN_C_GY / sc, rin = in / sc, rout = out / sc;   // stored in layout units (x dp x scale at draw)
+        float[] ang = {195, 157, 119, 81, 188, 160, 132}, rad = {rin, rin, rin, rin, rout, rout, rout};
+        boolean[] menu = {false, true, false, false, true, true, true};
+        for (int i = 0; i < l.length; i++) {   // one editor group "fan": the arcs move / resize together
             double t = Math.toRadians(ang[i]);
-            addBtn(l[i], k[i], "fan", 1, 1, FAN_A_GX, FAN_A_GY, rad[i] * (float) Math.cos(t), -rad[i] * (float) Math.sin(t), FAN_SKILL_R, menu[i]);
+            addBtn(l[i], k[i], "fan", 1, 1, cgx, cgy, rad[i] * (float) Math.cos(t), -rad[i] * (float) Math.sin(t), FAN_SKILL_R, menu[i]);
         }
         addDpad("dpad", 0, 0, 165, 75, 30, 17);
         addBtn("-", K_MINUS, "minus", 0.5f, 0, -55, 30, 0, 0, 22, true);
@@ -203,7 +207,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private boolean touch() { return LAYOUT_TOUCH.equals(layout); }
     private List<Ctl> all() { List<Ctl> a = new ArrayList<>(btns); a.add(left); if (right != null) a.add(right); return a; }
     // editor prefs per layout; the touch layout's are "touch2" since the TL2 fan (the old arc's places would scatter it)
-    private String prefLayout() { return touch() ? "touch2" : layout; }
+    private String prefLayout() { return touch() ? "touch3" : layout; }   // touch3: the arcs around the minimap (11-11)
     private String posKey(String group) { return "d3_pos_" + prefLayout() + "_" + group; }
     private String btnKey(Ctl k) { return "d3_btn_" + prefLayout() + "_" + k.name; }
 
@@ -228,7 +232,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         hideSticks = p.getBoolean("d3_hide_sticks", true);
         skinPack = p.getString("skin", PadSkin.CLASSIC);   // [front] PadSkin pack or classic
         String want = LAYOUT_TOUCH.equals(p.getString("d3_layout", LAYOUT_DEFAULT)) ? LAYOUT_TOUCH : LAYOUT_GAMEPAD;
-        if (!want.equals(layout)) {
+        if (!want.equals(layout) || (LAYOUT_TOUCH.equals(want) && scale != builtScale)) {   // the minimap arcs follow the button size
             releaseAll(); menuMode = false; layout = want; btns.clear();
             if (touch()) buildTouch(); else buildGamepad();
         }
@@ -841,15 +845,21 @@ public class D3PadView extends View implements FrontMenu.Pad {
         fill.setColor(b.key == MENU_TOGGLE && menuMode ? 0xffffb030 : 0xffffffff); fill.setAlpha(Math.round((on ? 0x80 : 0x30) * k));
         line.setColor(editMode ? 0xffffd040 : 0xffffffff); line.setAlpha(editMode ? 0xe0 : Math.round(0x90 * k));
         int code = iconsOn && b.key >= 0 ? codeOf(b.key) : -1;
-        if (code >= 0 && iconSh[code] != null) { drawIconBtn(c, b, code, x, y, r, k, on); return; }
+        if (code >= 0 && iconSh[code] != null) { drawIconBtn(c, b, code, x, y, r, k, on); accent(c, b, x, y, r, k); return; }
         boolean empty = code >= 0 && iconState[code] == 2;   // the HUD slot on this button is empty / locked: dim letter
         if (drawSkinned(c, b, x, y, r, k, on)) return;   // [front] the pad's skin
-        c.drawCircle(x, y, r, fill); c.drawCircle(x, y, r, line);
+        c.drawCircle(x, y, r, fill); c.drawCircle(x, y, r, line); accent(c, b, x, y, r, k);
         float ts = touch() ? Math.max(12 * u(), 0.55f * r) : 15 * u();   // gamepad: the labels of DoomPadView's D3 pad
         text.setTextSize(ts); float w = text.measureText(b.label);
         if (w > 1.7f * r) { ts *= 1.7f * r / w; text.setTextSize(ts); }   // long labels (MENU / МЕНЮ) fit the circle
         text.setColor(0xffffffff); text.setAlpha(Math.round((empty ? 0x70 : 0xd0) * k));
         c.drawText(b.label, x, y + ts * 0.35f, text);
+    }
+    // Touch layout: A (confirm / primary) is as big as the others, a brighter gold ring tells it apart.
+    private void accent(Canvas c, Btn b, float x, float y, float r, float k) {
+        if (!touch() || b.key != K_A || editMode) return;
+        float w = line.getStrokeWidth(); line.setStrokeWidth(3.5f * dp); line.setColor(0xffffc840); line.setAlpha(Math.round(0xf0 * Math.max(k, 0.6f)));
+        c.drawCircle(x, y, r, line); line.setStrokeWidth(w);
     }
     // A button with the HUD's icon of its skill (TL2's look): the icon as a shader-filled circle inside the ring (readable at low overlay
     // opacity), darkened while the slot's cooldown cover is up, lighter while pressed, the button's letter as a small badge lower right.

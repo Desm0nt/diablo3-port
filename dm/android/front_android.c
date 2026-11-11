@@ -54,6 +54,11 @@ uint64_t front_game_res(int docked) {
     unsigned w, h; const char *e = getenv("DM_GAME_RES");
     if (e && sscanf(e, "%ux%u", &w, &h) == 2) return docked ? (uint64_t)h << 32 | w : (uint64_t)(h * 4 / 5) << 32 | (w * 4 / 5 + 3) / 4 * 4;
     int dm = atomic_load(&g_screen_w), sh = atomic_load(&g_screen_h);
+#ifdef DM_GAME_D3
+    // [D3] landscape only: a start with the screen off / locked / the notification shade down reports the portrait surface first (the
+    // window stayed 1600x900 and widescreen stretched it, owner 11-11; TL2's 5b7b83c), use the long side
+    if (sh > dm) { int t = dm; dm = sh; sh = t; }
+#endif
     unsigned bh = docked ? 900 : 720;
     if (dm > 0 && sh > 0 && dm * 9 > sh * 16) {
         unsigned bw = (unsigned)(llround((double)bh * dm / sh / 8) * 8); if (bw > 4096) bw = 4096;
