@@ -91,7 +91,9 @@ public class D3PadView extends View implements FrontMenu.Pad {
     // ---- Touch layout geometry (dp, scaled by "d3_scale") ----
     // TL2's fan (Tl2Touch): A at FAN_A_GX / FAN_A_GY from the bottom right corner; the inner arc FAN_IN around it (angles from the right,
     // counter-clockwise: B 200, X 155, Y 110, R / potion 68), the outer arc FAN_OUT (ZL 190, ZR 150); D3's sizes (A 42, skills 28).
-    static final float FAN_A_GX = -80, FAN_A_GY = -86, FAN_A_R = 42, FAN_IN = 92, FAN_OUT = 156, FAN_SKILL_R = 28;
+    // A sits up and left of the corner: the game's minimap fills the bottom right ~30..122 dp from the right, ~30..107 dp from the bottom
+    // (owner 11-11: A covered it and the minimap tap was hard to reach).
+    static final float FAN_A_GX = -150, FAN_A_GY = -150, FAN_A_R = 42, FAN_IN = 92, FAN_OUT = 156, FAN_SKILL_R = 28;
 
     static final int K_A = KeyEvent.KEYCODE_ENTER, K_B = KeyEvent.KEYCODE_ESCAPE, K_X = KeyEvent.KEYCODE_R, K_Y = KeyEvent.KEYCODE_F,
         K_L = KeyEvent.KEYCODE_Q, K_R = KeyEvent.KEYCODE_E, K_ZL = KeyEvent.KEYCODE_SHIFT_LEFT, K_ZR = KeyEvent.KEYCODE_CTRL_LEFT,
@@ -283,6 +285,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         for (int i = 0; i < NSLOT; i++) {
             int code = iconMeta[i * 4], st = iconMeta[i * 4 + 1];
             if (code < 0 || code >= NCODE) continue;
+            if (st != 1 && iconState[code] == 1) continue;   // a hidden (empty / locked) slot's default binding may name the same button: the filled slot wins
             iconState[code] = st; iconCool[code] = iconMeta[i * 4 + 2] != 0;
             if (st == 1) iconSh[code] = new BitmapShader(Bitmap.createBitmap(iconPx, i * ICON * ICON, ICON, ICON, ICON, Bitmap.Config.ARGB_8888), Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
         }

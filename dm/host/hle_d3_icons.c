@@ -11,7 +11,9 @@
 //       shown one sets Slot.Skill (type 0x21: its power SNO at +0x4fc, 0x39aba0), shows Slot.SkillCooldownCover while 0x39a620(Skill) > 0
 //       (cooldown left), and writes Slot.KeyBinding's text = 0x4075c0(0x407650(action index, player), player, 1) = 0x4070c0:
 //       "{icon:button1_label}" .. "{icon:r2_label}" for the button the action is bound to (game Options -> Controller remaps follow).
-//   Button codes (0x4070c0 switch, also the published code): 0 button1 = A, 1 button2 = B, 2 button3 = X, 3 button4 = Y, 4 l1 = L, 5 r1 = R,
+//   Glyph codes (0x4070c0 switch): 0 button1, 1 button2, 2 button3, 3 button4 = the face buttons by position as on an Xbox pad, which the
+//   Switch HUD draws as button1 = B, button2 = A, button3 = Y, button4 = X (phone 11-11: HUD "R A Y ZR" = r1 / button2 / button3 / r2);
+//   pad_button() turns them into the published code 0 A, 1 B, 2 X, 3 Y. The rest are the same in both: 4 l1 = L, 5 r1 = R,
 //   6 l2 = ZL, 7 r2 = ZR, 8..11 d-pad, 12 back (-), 13 start (+), 14 L3, 15 R3. Unreadable text: the default binding tables main+0xeb3b60
 //   (action -> binding) and +0xebbfb4 (binding -> code) as 0x407650 / 0x4075c0 use them without a custom layout; the potion falls back to R.
 // Rects: Slot.Skill / PotionIcon +0x88 in 960x720 UI units (the HUD sits left of the 4:3 area: negative x), mapped to window fractions
@@ -94,6 +96,7 @@ static int isa(uint64_t c, unsigned type) {   // vtable+0x88 IsA: one of its "cm
     for (int i = 0; i < 16 && w[i] != 0xd65f03c0 && (w[i] & 0xfc000000) != 0x14000000; i++) if ((w[i] & 0xffc003ff) == 0x7100003f && (w[i] >> 10 & 0xfff) == type) return 1;
     return 0;
 }
+static int pad_button(int glyph) { static const int m[4] = {1, 0, 3, 2}; return glyph >= 0 && glyph < 4 ? m[glyph] : glyph; }
 static int icon_code(const char *n, size_t l) {
     static const struct { const char *n; int b; } k[] = {{"button1", 0}, {"button2", 1}, {"button3", 2}, {"button4", 3}, {"l1", 4}, {"r1", 5}, {"l2", 6},
         {"r2", 7}, {"up", 8}, {"down", 9}, {"left", 10}, {"right", 11}, {"back", 12}, {"minus", 12}, {"start", 13}, {"plus", 13}, {"l3", 14}, {"r3", 15}};
@@ -184,6 +187,7 @@ void dm_d3_icons_poll(uint64_t mgr, int menu_open) {
         }
         code = text_button(keyc, txt, sizeof txt); int from_text = code >= 0;
         if (code < 0) code = i == 0 ? POTION_DEFAULT : act >= 0 && act < 8 && k_bind_act[act] >= 0 ? k_bind_btn[k_bind_act[act]] : -1;
+        code = pad_button(code);   // face-button glyphs by position -> the Switch button the HUD shows
         int64_t hash = icon && isa(icon, 0x21) ? (int64_t)ri(icon + C_POWER) : 0;
         float u[4] = {0}; int vis = 0;
         if (!empty) {
