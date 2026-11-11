@@ -56,6 +56,7 @@ PIP_LINE = 'cryptography zstandard lz4 "capstone<6" "unicorn<3"'
 PKG_RE = re.compile(r'\.(nsp|nsz|xci|xcz|xc0|ns0)$', re.I)
 META_TYPES = {0x80: 'base game', 0x81: 'update', 0x82: 'DLC', 0x83: 'delta update'}
 ROMFS_BYTES = 17 << 30          # the merged RomFS is ~16 GiB (37 CPK archives)
+VERIFY_JOB_BYTES = 512 << 20    # peak memory of one dm/verify/equiv.py process (main ~0.21 GB, sdk ~0.14 GB, measured 11.11.2026)
 SMALL_BYTES = 1 << 30           # ExeFS, patched modules, extracted .shd, shader jobs, translator build, bundles (~0.5 GB)
 WIN = os.name == 'nt'
 GB = 2**30
@@ -220,6 +221,32 @@ def free_bytes(path):
     p = Path(path)
     while not p.exists() and p != p.parent: p = p.parent
     return shutil.disk_usage(p).free
+
+
+def ram_bytes():
+    """Physical memory available now (Windows / Linux / macOS); None when it cannot be read."""
+    try:
+        if WIN:
+            import ctypes
+            class MS(ctypes.Structure):
+                _fields_ = [('len', ctypes.c_ulong), ('load', ctypes.c_ulong)] +                            [(n, ctypes.c_ulonglong) for n in ('total', 'avail', 'pf', 'apf', 'virt', 'avirt', 'ext')]
+            m = MS(); m.len = ctypes.sizeof(m)
+            return m.avail if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)) else None
+        if hasattr(os, 'sysconf') and 'SC_AVPHYS_PAGES' in os.sysconf_names:
+            return os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+        out = subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True).stdout   # macOS: total only
+        return int(out) // 2 if out.strip() else None
+    except Exception:
+        return None
+
+
+def verify_jobs():
+    """equiv.py processes: one per CPU thread (2..16), and no more than the free memory holds (VERIFY_JOB_BYTES each):
+    16 processes on a 16 GB PC ran it out of memory (torchlight2-port issue #1)."""
+    jobs = max(2, min(16, os.cpu_count() or 8))
+    ram = ram_bytes()
+    if ram: jobs = max(1, min(jobs, (ram - (2 << 30)) // VERIFY_JOB_BYTES))   # 2 GB left for the system
+    return str(jobs)
 
 
 def folder_bytes(path):
@@ -492,7 +519,7 @@ def step_verify(L):
     """dm/verify/equiv.py: every rewritten site against the original instruction under random states (and a mutation self-check)."""
     if L.verify_ok(): print('  already done'); return
     env = dict(os.environ, PYTHONUTF8='1')
-    jobs = str(max(2, min(16, os.cpu_count() or 8)))
+    jobs = verify_jobs()
     for m in ('main', 'sdk'):
         print(f'  checking {m} (dm/verify/equiv.py, {jobs} processes)', flush=True)
         run([sys.executable, ROOT / 'dm' / 'verify' / 'equiv.py', L.out, m, L.exefs / m, '--jobs', jobs], env=env,

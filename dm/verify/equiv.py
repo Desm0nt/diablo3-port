@@ -16,7 +16,7 @@
 # counted: addresses the rewritten image read below the sp of the moment and the original instruction did not, i.e. the block
 # left something it still needed below sp. Android has no red zone (a signal frame would overwrite it), so they fail there;
 # Apple has a 128-byte red zone, so they are only reported.
-import sys, os, struct, random, argparse, multiprocessing as mp
+import sys, os, gc, struct, random, argparse, multiprocessing as mp
 from unicorn import *
 from unicorn.arm64_const import *
 from capstone import *
@@ -196,6 +196,10 @@ VR = [getattr(sys.modules['unicorn.arm64_const'], f'UC_ARM64_REG_Q{i}') for i in
 def mk(image, arena0, pre=0):
     # pre: bytes in front of image offset 0 (the PRE patch area); mapped at IB - pre so IB and all page math stay unchanged
     u = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    # 翻译缓存默认 1 GB／实例；试验只跑几条指令，32 MB 足够，否则每个进程 1-2 GB、16 进程吃光 16 GB 内存（issue #1）。
+    # The translation cache is 1 GB per instance by default; a trial runs a few instructions, so 32 MB is plenty. Otherwise each
+    # worker holds 1-2 GB and 16 workers fill a 16 GB PC (torchlight2-port issue #1).
+    u.ctl_set_tcg_buffer_size(32 << 20)
     sz = (len(image) + 0xFFFF) & ~0xFFFF
     u.mem_map(IB - pre, sz, UC_PROT_ALL); u.mem_write(IB - pre, bytes(image))
     u.mem_map(ARENA, ARENA_SZ); u.mem_write(ARENA, arena0)
@@ -332,6 +336,7 @@ def work(job):
                     UO.mem_write(IB + c, struct.pack('<I', wo)); UP.mem_write(IB + cp, struct.pack('<I', wp))
                     UO.ctl_remove_cache(IB + c, IB + c + 4); UP.ctl_remove_cache(IB + cp, IB + cp + 4)
         out.append((a, n, eff, diffs, below))
+    del UO, UP; gc.collect()                 # 绑定对象有引用环：立即释放本块的两台模拟器 | The binding objects form cycles: free this chunk's emulators now
     return out
 
 def runall(lst, mutated):
