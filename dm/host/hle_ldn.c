@@ -113,6 +113,7 @@ static void tr_backtrace(const char *why) {
     line[off] = 0; LOG("[trace] %s: game backtrace %s", why, line);
 }
 #ifdef DM_GAME_TL2
+static uint64_t g_pia_net;   // TL2 Pia's LDN network object (h_ldn_Ip_impl)
 // [TL2] Pia's session object (nn::pia::session::Session, pointer at main+0x92c74e0 - GOT main+0x23a35e8): +0xd4 / +0xd8 its states,
 // +0xdc the Result it keeps, +0x158 the reason; LdnBackgroundProcessJob::WaitCreateNetworkEvent (main 0x1bd2990) fails on them (main
 // 0x1c7ca30: 5 / 7 / 8 -> 0xc406 / 0xc420 / 0xc421). Logged whenever they change while tracing.
@@ -123,9 +124,24 @@ static void tr_pia_session(void) {
     uint64_t so = 0; uint32_t v[4];
     if (!tr_read((uint64_t)(uintptr_t)(mm->base + 0x92c74e0), &so, 8) || !so) return;
     if (!tr_read(so + 0xd4, v, 12) || !tr_read(so + 0x158, &v[3], 4)) return;
-    if (have && !memcmp(v, last, sizeof v)) return;
-    have = 1; memcpy(last, v, sizeof v);
-    LOG("[trace] pia session %#llx: +0xd4 %u +0xd8 %u +0xdc result %#x +0x158 %u", (unsigned long long)so, v[0], v[1], v[2], v[3]);
+    if (!have || memcmp(v, last, sizeof v)) {
+        have = 1; memcpy(last, v, sizeof v);
+        LOG("[trace] pia session %#llx: +0xd4 %u +0xd8 %u +0xdc result %#x +0x158 %u", (unsigned long long)so, v[0], v[1], v[2], v[3]);
+    }
+    // The LDN network object (the class with vtable main+0x2384fb8): +0x2a0 own station address, +0x2c0 host station address (StationAddress:
+    // ip at +8, port at +0x18; main 0x1bdfd10 = both valid and equal = "the network I host is up", what WaitCreateNetworkEvent waits for),
+    // +0x308 / +0x310 the new / previous LdnNetworkDescription, +0x418, +0x478, +0x110 states, +0x1735 a flag
+        if (g_pia_net) {
+        uint8_t o[0x40]; uint64_t d[2] = {0, 0}; uint32_t w[3] = {0, 0, 0}; uint8_t f = 0; static uint8_t lo[0x40]; static uint32_t lw[3]; static int lh;
+        if (tr_read(g_pia_net + 0x2a0, o, sizeof o) && tr_read(g_pia_net + 0x308, d, sizeof d) && tr_read(g_pia_net + 0x418, &w[0], 4) &&
+            tr_read(g_pia_net + 0x478, &w[1], 4) && tr_read(g_pia_net + 0x110, &w[2], 4) && tr_read(g_pia_net + 0x1735, &f, 1) &&
+            (!lh || memcmp(o, lo, sizeof o) || memcmp(w, lw, sizeof w))) {
+            lh = 1; memcpy(lo, o, sizeof o); memcpy(lw, w, sizeof w);
+            uint32_t ip0, ip1; uint16_t p0, p1; memcpy(&ip0, o + 8, 4); memcpy(&p0, o + 0x18, 2); memcpy(&ip1, o + 0x28, 4); memcpy(&p1, o + 0x38, 2);
+            LOG("[trace] pia net %#llx: own +0x2a0 %08x:%u host +0x2c0 %08x:%u | desc %#llx prev %#llx | +0x418 %u +0x478 %u +0x110 %u +0x1735 %u",
+                (unsigned long long)g_pia_net, ip0, p0, ip1, p1, (unsigned long long)d[0], (unsigned long long)d[1], w[0], w[1], w[2], f);
+        }
+    }
 }
 #endif
 void dm_net_trace_line(const char *what, long r, int err, const void *ra) {
@@ -188,7 +204,9 @@ LDNF("_ZN2nn3ldn8FinalizeEv", h_ldn_Fini, void, void) {
 LDNF("_ZN2nn3ldn8GetStateEv", h_ldn_State, int, void) { ldn_ctx *c = ctx(); return (int)LTRV("GetState", c ? ldn_state(c) : 0); }
 LDNF("_ZN2nn3ldn19GetDisconnectReasonEv", h_ldn_Reason, int, void) { ldn_ctx *c = ctx(); return (int)LTRV("GetDisconnectReason", c ? ldn_disconnect_reason(c) : 0); }
 LDNF("_ZN2nn3ldn22AttachStateChangeEventEPNS_2os15SystemEventTypeE", h_ldn_Attach, void, void *ev) {
-    hle_bind_system_event(ev, 0); atomic_store(&g_event, ev); LTRV("AttachStateChangeEvent", 0);
+    // AutoClear, as the SDK attaches the ldn service's state change handle: Pia only ever TryWaits on it (main 0x1bcb7e0, never clears),
+    // so a manual-clear binding stayed signalled after the first change and Pia saw "state changed" on every frame
+    hle_bind_system_event(ev, 1); atomic_store(&g_event, ev); LTRV("AttachStateChangeEvent", 0);
 }
 #define C_OR_FAIL ldn_ctx *c = ctx(); if (!c) return LTRV(__func__, RES_FAIL)
 LDNF("_ZN2nn3ldn15OpenAccessPointEv", h_ldn_OpenAp, Result, void) { C_OR_FAIL; Result r = LTRV("ldn_open_ap", ldn_open_ap(c)); if (!r) lan_opened(); return r; }
@@ -222,7 +240,24 @@ LDNF("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoEPNS0_16NodeLatestUpdateEi", 
     C_OR_FAIL; return LTRV("ldn_get_network", ldn_get_network(c, o, u, n));
 }
 LDNF("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", h_ldn_NetInfo, Result, ldn_network *o) { C_OR_FAIL; return LTRV("ldn_get_network", ldn_get_network(c, o, NULL, 0)); }
-LDNF("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", h_ldn_Ip, Result, uint32_t *a, uint32_t *m) {
+// GetIpv4Address goes through a two-instruction entry that keeps the caller's x20 (callee-saved, untouched on entry): for tracing, TL2's
+// Pia calls it from main 0x1bcd590 with x20 = its LDN network object, whose station addresses are then logged (tr_pia_session)
+__attribute__((visibility("hidden"))) uint64_t g_ldn_tr_x20;
+__attribute__((visibility("hidden"))) Result h_ldn_Ip_impl(uint32_t *a, uint32_t *m);
+__attribute__((naked, used)) static void h_ldn_Ip_entry(void) {
+    __asm__ volatile("adrp x16, g_ldn_tr_x20\n\t"
+                     "add x16, x16, :lo12:g_ldn_tr_x20\n\t"
+                     "str x20, [x16]\n\t"
+                     "b h_ldn_Ip_impl\n");
+}
+DM_SECT(swforce) static const hle_force_ent hle_force_h_ldn_Ip = {"_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", (void *)h_ldn_Ip_entry,
+    "[D3] [TL2] local wireless over the LAN (hle_ldn.c; DM_LDN=0: unavailable)"};
+Result h_ldn_Ip_impl(uint32_t *a, uint32_t *m) {
+#ifdef DM_GAME_TL2
+    if (dm_net_trace()) { const void *ra = __builtin_return_address(0); module_t *mm = module_of(ra);
+        if (mm && !strcmp(mm->name, "main") && (const uint8_t *)ra - mm->base == 0x1bcd5b8 && g_pia_net != g_ldn_tr_x20) {
+            g_pia_net = g_ldn_tr_x20; LOG("[trace] pia LDN network object %#llx (x20 at main+0x1bcd5b8)", (unsigned long long)g_pia_net); } }
+#endif
     ldn_ctx *c = ctx(); if (!c) { if (a) *a = 0; if (m) *m = 0; return LTRV(__func__, RES_FAIL); }
     return LTRV("ldn_get_ipv4", ldn_get_ipv4(c, a, m));
 }
