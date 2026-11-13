@@ -228,14 +228,21 @@ void doom_alias_init(void) {
 // MapPhysicalMemory / UnmapPhysicalMemory hold across their mprotect and bitmap update, so no page can be dropped in between.
 // 1 = copied; 0 = outside the alias region (the caller falls back); -1 = inside it but a 4 KiB page of the range is not committed
 // (on Horizon that read faults: the caller treats it as unreadable, no kernel call).
+// dm_guest_alias_hold(1) / (0): the calling thread takes g_map_lock once for a run of reads (nesting counted); the reads inside skip
+// the per-read lock. The holder must not call guest code or SVCs in between (Map/UnmapPhysicalMemory of other threads wait for it).
+static __thread int t_alias_hold;
+void dm_guest_alias_hold(int on) {
+    if (on) { if (!t_alias_hold++) pthread_mutex_lock(&g_map_lock); }
+    else if (t_alias_hold > 0 && !--t_alias_hold) pthread_mutex_unlock(&g_map_lock);
+}
 int dm_guest_alias_read(uint64_t a, void *out, size_t n) {
     uint64_t b = (uint64_t)(uintptr_t)g_alias;
     if (!g_alias_bits || !n || a < b || n > g_alias_cap || a - b > g_alias_cap - n) return 0;
-    uint64_t p0 = (a - b) >> 12, p1 = (a - b + n - 1) >> 12; int ok = 1;
-    pthread_mutex_lock(&g_map_lock);
+    uint64_t p0 = (a - b) >> 12, p1 = (a - b + n - 1) >> 12; int ok = 1, held = t_alias_hold > 0;
+    if (!held) pthread_mutex_lock(&g_map_lock);
     for (uint64_t p = p0; p <= p1 && ok; p++) ok = (int)((atomic_load_explicit(&g_alias_bits[p >> 6], memory_order_relaxed) >> (p & 63)) & 1);
     if (ok) memcpy(out, (const void *)(uintptr_t)a, n);
-    pthread_mutex_unlock(&g_map_lock);
+    if (!held) pthread_mutex_unlock(&g_map_lock);
     return ok ? 1 : -1;
 }
 // Which guest region an address is in (diagnostics of the host readers): 0 outside the guest address space, 1 heap (SetHeapSize
