@@ -20,6 +20,7 @@
 //                       only in NetworkInfo and GetIpv4Address (a NAT setup; the game's binds to it go to "any")
 //   DM_LDN_PEERS=a.b.c.d,...  extra unicast scan targets (networks that drop broadcasts, a VPN such as Tailscale between two phones)
 //   DM_LDN_PORT=11452   discovery / membership port (ldn_mitm's)       DM_LDN_SCAN_MS=600   how long a scan waits for answers
+//   DM_NET_TRACE=1      (or DM_LDN_TRACE=1) one "[trace] ..." line per ldn / socket call: arguments, result, errno, the game's caller
 // Log lines: "[ldn] ..." (hle_ldn_core.c) and "[net] lan: ..." (hle_net.c).
 // How D3 uses it (phone test 13.11): the network option "Local" (ConsoleNetworkOptions row 1, "Console:PartyLocalCommunicationNX64") is
 // the party type 1; a new game starts as an offline party (type 0, HUD "offline", main 0x805d0), and choosing "Local" in the in-game
@@ -50,7 +51,11 @@ static int ldn_mode(void) {
     return m;
 }
 static void ldn_log(const char *l) { LOG("%s", l); }
-static void ldn_notify(void *o) { (void)o; void *ev = atomic_load(&g_event); if (ev) hle_signal_system_event(ev); }
+int dm_net_trace(void);
+static void ldn_notify(void *o) {
+    (void)o; void *ev = atomic_load(&g_event); if (ev) hle_signal_system_event(ev);
+    if (dm_net_trace()) LOG("[trace] ldn state change event %s", ev ? "signalled" : "not attached (nothing to signal)");
+}
 static int parse_ip(const char *s, uint32_t *ip, uint32_t *mask) {
     char b[40]; snprintf(b, sizeof b, "%s", s); char *sl = strchr(b, '/'); int bits = 24;
     if (sl) { *sl = 0; bits = atoi(sl + 1); if (bits < 1 || bits > 32) bits = 24; }
@@ -78,6 +83,29 @@ uint32_t dm_ldn_lan_bind(uint32_t ip) { uint32_t v = atomic_load(&g_virtual_ip);
 static void lan_opened(void) {
     if (!atomic_exchange(&g_lan_used, 1)) LOG("[ldn] local play opened: the game's sockets may reach the local network from now on (Horizon socket semantics)");
 }
+
+
+// ---- DM_NET_TRACE=1 (or DM_LDN_TRACE=1): one line per ldn call - entry point, result, the caller in the game - and, in hle_net.c, per socket
+// call. Repeats of the same call / result / caller are folded ("x N more") so polling does not flood the log. Off: nothing is computed.
+int dm_net_trace(void) {
+    static int t = -1;
+    if (t < 0) { const char *a = getenv("DM_NET_TRACE"), *b = getenv("DM_LDN_TRACE"); t = (a && *a == '1') || (b && *b == '1'); }
+    return t;
+}
+void dm_net_trace_line(const char *what, long r, int err, const void *ra) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static char last[200]; static unsigned rep; static unsigned lines;
+    char cur[200]; module_t *m = module_of(ra);
+    snprintf(cur, sizeof cur, "%s -> %ld (%#lx)%s%s <- %s+%#lx", what, r, (unsigned long)r, err ? " errno " : "", err ? strerror(err) : "",
+             m ? m->name : "host", m ? (unsigned long)((const uint8_t *)ra - m->base) : 0ul);
+    pthread_mutex_lock(&mu);
+    if (!strcmp(cur, last)) { rep++; pthread_mutex_unlock(&mu); return; }
+    if (rep) LOG("[trace] ... x %u more", rep);
+    rep = 0; snprintf(last, sizeof last, "%s", cur);
+    if (lines++ < 20000) LOG("[trace] %s", cur);
+    pthread_mutex_unlock(&mu);
+}
+static uint32_t ltr(const char *fn, uint32_t r, const void *ra) { if (dm_net_trace()) dm_net_trace_line(fn, (long)(int32_t)r, 0, ra); return r; }
+#define LTRV(fn, expr) ltr(fn, (uint32_t)(expr), __builtin_return_address(0))
 
 // ---- nn::ldn
 #define LDNF(m, cname, ret, ...) HLE_FORCE(m, "[D3] [TL2] local wireless over the LAN (hle_ldn.c; DM_LDN=0: unavailable)", ret, cname, __VA_ARGS__)
@@ -110,56 +138,57 @@ LDNF("_ZN2nn3ldn10InitializeEv", h_ldn_Init, Result, void) {
     // right after Initialize (main 0xc031b0 -> 0xc08040: Socket(2, 2, 0), Fcntl(F_SETFL, flags | 0x800)), and the offline FreeBSD
     // translation read 0x800 as "blocking" (phone test 13.11: the socket at boot came out blocking)
     if (!r) lan_opened();
-    return r;
+    return LTRV("Initialize", r);
 }
 LDNF("_ZN2nn3ldn8FinalizeEv", h_ldn_Fini, void, void) {
+    LTRV("Finalize", 0);
     pthread_mutex_lock(&g_mu); ldn_ctx *c = g_ctx; g_ctx = NULL; pthread_mutex_unlock(&g_mu);
     if (c) ldn_destroy(c);
 }
-LDNF("_ZN2nn3ldn8GetStateEv", h_ldn_State, int, void) { ldn_ctx *c = ctx(); return c ? ldn_state(c) : 0; }
-LDNF("_ZN2nn3ldn19GetDisconnectReasonEv", h_ldn_Reason, int, void) { ldn_ctx *c = ctx(); return c ? ldn_disconnect_reason(c) : 0; }
+LDNF("_ZN2nn3ldn8GetStateEv", h_ldn_State, int, void) { ldn_ctx *c = ctx(); return (int)LTRV("GetState", c ? ldn_state(c) : 0); }
+LDNF("_ZN2nn3ldn19GetDisconnectReasonEv", h_ldn_Reason, int, void) { ldn_ctx *c = ctx(); return (int)LTRV("GetDisconnectReason", c ? ldn_disconnect_reason(c) : 0); }
 LDNF("_ZN2nn3ldn22AttachStateChangeEventEPNS_2os15SystemEventTypeE", h_ldn_Attach, void, void *ev) {
-    hle_bind_system_event(ev, 0); atomic_store(&g_event, ev);
+    hle_bind_system_event(ev, 0); atomic_store(&g_event, ev); LTRV("AttachStateChangeEvent", 0);
 }
-#define C_OR_FAIL ldn_ctx *c = ctx(); if (!c) return RES_FAIL
-LDNF("_ZN2nn3ldn15OpenAccessPointEv", h_ldn_OpenAp, Result, void) { C_OR_FAIL; Result r = ldn_open_ap(c); if (!r) lan_opened(); return r; }
-LDNF("_ZN2nn3ldn16CloseAccessPointEv", h_ldn_CloseAp, Result, void) { C_OR_FAIL; return ldn_close_ap(c); }
-LDNF("_ZN2nn3ldn11OpenStationEv", h_ldn_OpenSta, Result, void) { C_OR_FAIL; Result r = ldn_open_station(c); if (!r) lan_opened(); return r; }
-LDNF("_ZN2nn3ldn12CloseStationEv", h_ldn_CloseSta, Result, void) { C_OR_FAIL; return ldn_close_station(c); }
-LDNF("_ZN2nn3ldn10DisconnectEv", h_ldn_Disc, Result, void) { C_OR_FAIL; return ldn_disconnect(c); }
-LDNF("_ZN2nn3ldn14DestroyNetworkEv", h_ldn_Destroy, Result, void) { C_OR_FAIL; return ldn_destroy_network(c); }
+#define C_OR_FAIL ldn_ctx *c = ctx(); if (!c) return LTRV(__func__, RES_FAIL)
+LDNF("_ZN2nn3ldn15OpenAccessPointEv", h_ldn_OpenAp, Result, void) { C_OR_FAIL; Result r = LTRV("ldn_open_ap", ldn_open_ap(c)); if (!r) lan_opened(); return r; }
+LDNF("_ZN2nn3ldn16CloseAccessPointEv", h_ldn_CloseAp, Result, void) { C_OR_FAIL; return LTRV("ldn_close_ap", ldn_close_ap(c)); }
+LDNF("_ZN2nn3ldn11OpenStationEv", h_ldn_OpenSta, Result, void) { C_OR_FAIL; Result r = LTRV("ldn_open_station", ldn_open_station(c)); if (!r) lan_opened(); return r; }
+LDNF("_ZN2nn3ldn12CloseStationEv", h_ldn_CloseSta, Result, void) { C_OR_FAIL; return LTRV("ldn_close_station", ldn_close_station(c)); }
+LDNF("_ZN2nn3ldn10DisconnectEv", h_ldn_Disc, Result, void) { C_OR_FAIL; return LTRV("ldn_disconnect", ldn_disconnect(c)); }
+LDNF("_ZN2nn3ldn14DestroyNetworkEv", h_ldn_Destroy, Result, void) { C_OR_FAIL; return LTRV("ldn_destroy_network", ldn_destroy_network(c)); }
 LDNF("_ZN2nn3ldn4ScanEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", h_ldn_Scan, Result, ldn_network *out, int *n, int max, const ldn_scan_filter *f, int ch) {
-    (void)ch; ldn_ctx *c = ctx(); if (!c) { if (n) *n = 0; return RES_FAIL; }
-    return ldn_scan(c, out, n, max, f);
+    (void)ch; ldn_ctx *c = ctx(); if (!c) { if (n) *n = 0; return LTRV(__func__, RES_FAIL); }
+    return LTRV("ldn_scan", ldn_scan(c, out, n, max, f));
 }
 LDNF("_ZN2nn3ldn11ScanPrivateEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", h_ldn_ScanPriv, Result, ldn_network *out, int *n, int max, const ldn_scan_filter *f, int ch) {
-    (void)ch; ldn_ctx *c = ctx(); if (!c) { if (n) *n = 0; return RES_FAIL; }
-    return ldn_scan(c, out, n, max, f);
+    (void)ch; ldn_ctx *c = ctx(); if (!c) { if (n) *n = 0; return LTRV(__func__, RES_FAIL); }
+    return LTRV("ldn_scan", ldn_scan(c, out, n, max, f));
 }
 LDNF("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE", h_ldn_Create, Result,
-     const ldn_net_config *nc, const ldn_sec_config *sc, const ldn_user_config *uc) { C_OR_FAIL; return ldn_create_network(c, nc, sc, uc, NULL); }
+     const ldn_net_config *nc, const ldn_sec_config *sc, const ldn_user_config *uc) { C_OR_FAIL; return LTRV("ldn_create_network", ldn_create_network(c, nc, sc, uc, NULL)); }
 LDNF("_ZN2nn3ldn20CreateNetworkPrivateERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_17SecurityParameterERKNS0_10UserConfigEiPKNS0_12AddressEntryE",
      h_ldn_CreatePriv, Result, const ldn_net_config *nc, const ldn_sec_config *sc, const ldn_sec_param *sp, const ldn_user_config *uc, int naddr, const ldn_addr_entry *addr) {
     (void)naddr; (void)addr;   // the address table is for the console Wi-Fi's own addressing; LAN addresses stay what they are
-    C_OR_FAIL; return ldn_create_network(c, nc, sc, uc, sp);
+    C_OR_FAIL; return LTRV("ldn_create_network", ldn_create_network(c, nc, sc, uc, sp));
 }
 LDNF("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_14SecurityConfigERKNS0_10UserConfigEiNS0_13ConnectOptionE", h_ldn_Connect, Result,
-     const ldn_network *net, const ldn_sec_config *sc, const ldn_user_config *uc, int version, int opt) { (void)sc; (void)opt; C_OR_FAIL; return ldn_connect(c, net, uc, version); }
+     const ldn_network *net, const ldn_sec_config *sc, const ldn_user_config *uc, int version, int opt) { (void)sc; (void)opt; C_OR_FAIL; return LTRV("ldn_connect", ldn_connect(c, net, uc, version)); }
 LDNF("_ZN2nn3ldn14ConnectPrivateERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_17SecurityParameterERKNS0_10UserConfigEiNS0_13ConnectOptionE",
      h_ldn_ConnectPriv, Result, const ldn_net_config *nc, const ldn_sec_config *sc, const ldn_sec_param *sp, const ldn_user_config *uc, int version, int opt) {
-    (void)sc; (void)opt; C_OR_FAIL; return ldn_connect_private(c, nc, sp, uc, version);
+    (void)sc; (void)opt; C_OR_FAIL; return LTRV("ldn_connect_private", ldn_connect_private(c, nc, sp, uc, version));
 }
 LDNF("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoEPNS0_16NodeLatestUpdateEi", h_ldn_NetInfoU, Result, ldn_network *o, ldn_node_update *u, int n) {
-    C_OR_FAIL; return ldn_get_network(c, o, u, n);
+    C_OR_FAIL; return LTRV("ldn_get_network", ldn_get_network(c, o, u, n));
 }
-LDNF("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", h_ldn_NetInfo, Result, ldn_network *o) { C_OR_FAIL; return ldn_get_network(c, o, NULL, 0); }
+LDNF("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", h_ldn_NetInfo, Result, ldn_network *o) { C_OR_FAIL; return LTRV("ldn_get_network", ldn_get_network(c, o, NULL, 0)); }
 LDNF("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", h_ldn_Ip, Result, uint32_t *a, uint32_t *m) {
-    ldn_ctx *c = ctx(); if (!c) { if (a) *a = 0; if (m) *m = 0; return RES_FAIL; }
-    return ldn_get_ipv4(c, a, m);
+    ldn_ctx *c = ctx(); if (!c) { if (a) *a = 0; if (m) *m = 0; return LTRV(__func__, RES_FAIL); }
+    return LTRV("ldn_get_ipv4", ldn_get_ipv4(c, a, m));
 }
-LDNF("_ZN2nn3ldn16SetAdvertiseDataEPKvm", h_ldn_Adv, Result, const void *d, uint64_t n) { C_OR_FAIL; return ldn_set_advertise(c, d, (size_t)n); }
-LDNF("_ZN2nn3ldn20GetSecurityParameterEPNS0_17SecurityParameterE", h_ldn_SecPrm, Result, ldn_sec_param *o) { C_OR_FAIL; return ldn_get_security_param(c, o); }
-LDNF("_ZN2nn3ldn16GetNetworkConfigEPNS0_13NetworkConfigE", h_ldn_NetCfg, Result, ldn_net_config *o) { C_OR_FAIL; return ldn_get_network_config(c, o); }
-LDNF("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", h_ldn_Policy, Result, int p) { C_OR_FAIL; return ldn_set_accept_policy(c, p); }
-LDNF("_ZN2nn3ldn6RejectENS0_11Ipv4AddressE", h_ldn_Reject, Result, uint32_t ip) { C_OR_FAIL; return ldn_reject(c, ip); }
+LDNF("_ZN2nn3ldn16SetAdvertiseDataEPKvm", h_ldn_Adv, Result, const void *d, uint64_t n) { C_OR_FAIL; return LTRV("ldn_set_advertise", ldn_set_advertise(c, d, (size_t)n)); }
+LDNF("_ZN2nn3ldn20GetSecurityParameterEPNS0_17SecurityParameterE", h_ldn_SecPrm, Result, ldn_sec_param *o) { C_OR_FAIL; return LTRV("ldn_get_security_param", ldn_get_security_param(c, o)); }
+LDNF("_ZN2nn3ldn16GetNetworkConfigEPNS0_13NetworkConfigE", h_ldn_NetCfg, Result, ldn_net_config *o) { C_OR_FAIL; return LTRV("ldn_get_network_config", ldn_get_network_config(c, o)); }
+LDNF("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", h_ldn_Policy, Result, int p) { C_OR_FAIL; return LTRV("ldn_set_accept_policy", ldn_set_accept_policy(c, p)); }
+LDNF("_ZN2nn3ldn6RejectENS0_11Ipv4AddressE", h_ldn_Reject, Result, uint32_t ip) { C_OR_FAIL; return LTRV("ldn_reject", ldn_reject(c, ip)); }
 #endif

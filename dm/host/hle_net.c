@@ -77,7 +77,16 @@ SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { (void)s; (void)n; re
 SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 #endif
 #ifdef DM_GAME_DOOM
-HLE_FORCE("_ZN2nn6socket5CloseEi", "bsd close -> host close", int, h_sk_Close, int s) { int r = close(s); if (r < 0) t_skerr = errno; return r; }
+#ifdef DM_GAME_D3
+int dm_net_trace(void); void dm_net_trace_line(const char *what, long r, int err, const void *ra);
+#endif
+HLE_FORCE("_ZN2nn6socket5CloseEi", "bsd close -> host close", int, h_sk_Close, int s) {
+    int r = close(s); if (r < 0) t_skerr = errno;
+#ifdef DM_GAME_D3
+    if (dm_net_trace()) { char w[32]; snprintf(w, sizeof w, "close(%d)", s); dm_net_trace_line(w, r, r < 0 ? t_skerr : 0, __builtin_return_address(0)); }
+#endif
+    return r;
+}
 #else
 SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { (void)s; return sk_fail(); }
 #endif
@@ -193,8 +202,16 @@ int dm_ldn_lan_on(void);                    // hle_ldn.c: local play opened in t
 int dm_ldn_lan_route(uint32_t ip);          // host order: a destination on the local-play network
 uint32_t dm_ldn_lan_bind(uint32_t ip);      // a bind to the configured "virtual" address (DM_LDN_IP behind NAT) -> any
 #define LAN_ON() dm_ldn_lan_on()
+// DM_NET_TRACE=1 (hle_ldn.c dm_net_trace): one line per socket call - arguments, result, the errno the game gets, the caller in the game
+// (for the typed overloads below: the caller of the overload)
+int dm_net_trace(void);
+void dm_net_trace_line(const char *what, long r, int err, const void *ra);
+static __thread const void *t_tr_ra;
+#define NTR(r, ...) do { if (dm_net_trace()) { char w_[200]; snprintf(w_, sizeof w_, __VA_ARGS__); long r__ = (long)(r); \
+    dm_net_trace_line(w_, r__, r__ < 0 ? t_skerr : 0, t_tr_ra ? t_tr_ra : __builtin_return_address(0)); } } while (0)
 #else
 #define LAN_ON() 0
+#define NTR(...) do {} while (0)
 #endif
 static int bsd_errno(int e) {
     if (LAN_ON()) return e;   // Linux numbering (see above)
@@ -237,12 +254,13 @@ static int msg_flags(int f) { int r = f & 3; if (f & 0x80) r |= MSG_DONTWAIT; if
 SKD("_ZN2nn6socket6SocketEiii", h_d_sk_Socket, int a, int b, int c) {
     int t = b & 0x0fffffff;                                   // FreeBSD type flags: SOCK_NONBLOCK 0x20000000, SOCK_CLOEXEC 0x10000000
     if (b & 0x20000000) t |= SOCK_NONBLOCK; if (b & 0x10000000) t |= SOCK_CLOEXEC;
-    int fd = sk_ret(socket(a, t, c)); LOG("[net] socket(%d, %#x, %d) -> %d", a, b, c, fd); return fd;
+    int fd = sk_ret(socket(a, t, c)); LOG("[net] socket(%d, %#x, %d) -> %d", a, b, c, fd); NTR(fd, "socket(%d, %#x, %d)", a, b, c); return fd;
 }
 SKD("_ZN2nn6socket4BindEiPK8sockaddrj", h_d_sk_Bind, int s, const uint8_t *a, unsigned l) {
     struct sockaddr_storage ss; socklen_t n = sa_in(a, l, &ss);
     if (LAN_ON() && ss.ss_family == AF_INET) { struct sockaddr_in *si = (struct sockaddr_in *)&ss; si->sin_addr.s_addr = htonl(dm_ldn_lan_bind(ntohl(si->sin_addr.s_addr))); }
     int r = sk_ret(bind(s, (struct sockaddr *)&ss, n));
+    NTR(r, "bind(%d, family %d port %u addr %08x)", s, ss.ss_family, ss.ss_family == AF_INET ? ntohs(((struct sockaddr_in *)&ss)->sin_port) : 0, ss.ss_family == AF_INET ? ntohl(((struct sockaddr_in *)&ss)->sin_addr.s_addr) : 0);
     if (LAN_ON() && ss.ss_family == AF_INET) { static int k; if (k++ < 24) { const struct sockaddr_in *si = (const struct sockaddr_in *)&ss; uint32_t v = ntohl(si->sin_addr.s_addr);
         LOG("[net] lan: bind %d to %u.%u.%u.%u:%u -> %d%s", s, v >> 24, v >> 16 & 255, v >> 8 & 255, v & 255, ntohs(si->sin_port), r, r < 0 ? " (failed)" : ""); } }
     return r;
@@ -259,27 +277,37 @@ static int sa_offline(const struct sockaddr_storage *ss) {
 }
 SKD("_ZN2nn6socket7ConnectEiPK8sockaddrj", h_d_sk_Connect, int s, const uint8_t *a, unsigned l) {
     struct sockaddr_storage ss; socklen_t n = sa_in(a, l, &ss);
-    if (sa_offline(&ss)) { t_skerr = LAN_ON() ? ENETUNREACH : 51; return -1; }   // ENETUNREACH
-    return sk_ret(connect(s, (struct sockaddr *)&ss, n));
+    if (sa_offline(&ss)) { t_skerr = LAN_ON() ? ENETUNREACH : 51; NTR(-1, "connect(%d) refused", s); return -1; }   // ENETUNREACH
+    int r = sk_ret(connect(s, (struct sockaddr *)&ss, n));
+    NTR(r, "connect(%d, %08x:%u)", s, ss.ss_family == AF_INET ? ntohl(((struct sockaddr_in *)&ss)->sin_addr.s_addr) : 0, ss.ss_family == AF_INET ? ntohs(((struct sockaddr_in *)&ss)->sin_port) : 0);
+    return r;
 }
 SKD("_ZN2nn6socket6AcceptEiP8sockaddrPj", h_d_sk_Accept, int s, uint8_t *a, unsigned *l) {
-    struct sockaddr_storage ss; socklen_t n = sizeof ss; int r = sk_ret(accept(s, (struct sockaddr *)&ss, &n)); if (r >= 0) sa_out(&ss, n, a, l); return r;
+    struct sockaddr_storage ss; socklen_t n = sizeof ss; int r = sk_ret(accept(s, (struct sockaddr *)&ss, &n)); if (r >= 0) sa_out(&ss, n, a, l);
+    NTR(r, "accept(%d)", s); return r;
 }
-HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "bsd recv -> host", long, h_d_sk_Recv, int s, void *b, unsigned long n, int f) { long r = recv(s, b, n, msg_flags(f)); if (r < 0) { sk_ret(r); return -1; } return r; }
+HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "bsd recv -> host", long, h_d_sk_Recv, int s, void *b, unsigned long n, int f) { long r = recv(s, b, n, msg_flags(f)); if (r < 0) { sk_ret(r); NTR(-1, "recv(%d, %lu, flags %#x)", s, n, f); return -1; } NTR(r, "recv(%d, %lu, flags %#x)", s, n, f); return r; }
 HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "bsd recvfrom -> host", long, h_d_sk_RecvFrom, int s, void *b, unsigned long n, int f, uint8_t *a, unsigned *l) {
     struct sockaddr_storage ss; socklen_t sl = sizeof ss; long r = recvfrom(s, b, n, msg_flags(f), (struct sockaddr *)&ss, &sl);
-    if (r < 0) { sk_ret(r); return -1; } sa_out(&ss, sl, a, l); return r;
+    if (r < 0) { sk_ret(r); NTR(-1, "recvfrom(%d, %lu, flags %#x)", s, n, f); return -1; } sa_out(&ss, sl, a, l);
+    NTR(r, "recvfrom(%d, %lu, flags %#x) from %08x:%u", s, n, f, ss.ss_family == AF_INET ? ntohl(((struct sockaddr_in *)&ss)->sin_addr.s_addr) : 0, ss.ss_family == AF_INET ? ntohs(((struct sockaddr_in *)&ss)->sin_port) : 0);
+    return r;
 }
-HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "bsd send -> host", long, h_d_sk_Send, int s, const void *b, unsigned long n, int f) { long r = send(s, b, n, msg_flags(f) | MSG_NOSIGNAL); if (r < 0) { sk_ret(r); return -1; } return r; }
+HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "bsd send -> host", long, h_d_sk_Send, int s, const void *b, unsigned long n, int f) { long r = send(s, b, n, msg_flags(f) | MSG_NOSIGNAL); if (r < 0) { sk_ret(r); NTR(-1, "send(%d, %lu, flags %#x)", s, n, f); return -1; } NTR(r, "send(%d, %lu, flags %#x)", s, n, f); return r; }
 HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "bsd sendto -> host", long, h_d_sk_SendTo, int s, const void *b, unsigned long n, int f, const uint8_t *a, unsigned l) {
     struct sockaddr_storage ss; socklen_t sl = sa_in(a, l, &ss);
-    if (a && sa_offline(&ss)) { t_skerr = LAN_ON() ? ENETUNREACH : 51; return -1; }   // offline: ENETUNREACH
+    if (a && sa_offline(&ss)) { t_skerr = LAN_ON() ? ENETUNREACH : 51; NTR(-1, "sendto(%d) refused", s); return -1; }   // offline: ENETUNREACH
     long r = sendto(s, b, n, msg_flags(f) | MSG_NOSIGNAL, a ? (struct sockaddr *)&ss : NULL, sl);
-    if (r < 0) { sk_ret(r); return -1; } return r;
+    if (r < 0) sk_ret(r);
+    NTR(r < 0 ? -1 : r, "sendto(%d, %lu, flags %#x, %08x:%u)", s, n, f, ss.ss_family == AF_INET ? ntohl(((struct sockaddr_in *)&ss)->sin_addr.s_addr) : 0, ss.ss_family == AF_INET ? ntohs(((struct sockaddr_in *)&ss)->sin_port) : 0);
+    if (r < 0) return -1;
+    return r;
 }
-SKD("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", h_d_sk_Select, int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *t) { return sk_ret(select(n, r, w, e, t)); }
-SKD("_ZN2nn6socket4PollEP6pollfdmi", h_d_sk_Poll, struct pollfd *f, unsigned long n, int t) { return sk_ret(poll(f, (nfds_t)n, t)); }
-SKD("_ZN2nn6socket5FcntlEiiz", h_d_sk_Fcntl, int s, int c, long a) {
+SKD("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", h_d_sk_Select, int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *t) { int x = sk_ret(select(n, r, w, e, t)); NTR(x, "select(%d, timeout %s)", n, t ? "set" : "none"); return x; }
+SKD("_ZN2nn6socket4PollEP6pollfdmi", h_d_sk_Poll, struct pollfd *f, unsigned long n, int t) { int x = sk_ret(poll(f, (nfds_t)n, t)); NTR(x, "poll(%lu fds, fd0 %d events %#x revents %#x, %d ms)", n, n ? f[0].fd : -1, n ? f[0].events : 0, n ? f[0].revents : 0, t); return x; }
+static int d_sk_fcntl(int s, int c, long a);
+SKD("_ZN2nn6socket5FcntlEiiz", h_d_sk_Fcntl, int s, int c, long a) { int r = d_sk_fcntl(s, c, a); NTR(r, "fcntl(%d, cmd %d, arg %#lx)", s, c, a); return r; }
+static int d_sk_fcntl(int s, int c, long a) {
     if (LAN_ON() && (c == F_GETFL || c == F_SETFL)) {   // Horizon's O_NONBLOCK 0x800 (the Linux value): only that bit is kept, as the bsd service does
         int cur = fcntl(s, F_GETFL); if (cur < 0) return sk_ret(cur);
         if (c == F_GETFL) return (cur & O_NONBLOCK) ? 0x800 : 0;
@@ -290,15 +318,21 @@ SKD("_ZN2nn6socket5FcntlEiiz", h_d_sk_Fcntl, int s, int c, long a) {
     t_skerr = 22; return -1;
 }
 SKD("_ZN2nn6socket10SetSockOptEiiiPKvj", h_d_sk_SetOpt, int s, int l, int o, const void *v, unsigned n) {
-    int lo = so_opt(l, o); if (lo < 0) { LOG("[net] setsockopt level %#x option %#x ignored", l, o); return 0; } return sk_ret(setsockopt(s, sol_level(l), lo, v, n));
+    int lo = so_opt(l, o); if (lo < 0) { LOG("[net] setsockopt level %#x option %#x ignored", l, o); NTR(0, "setsockopt(%d, level %#x, opt %#x) ignored", s, l, o); return 0; }
+    int r = sk_ret(setsockopt(s, sol_level(l), lo, v, n));
+    NTR(r, "setsockopt(%d, level %#x, opt %#x -> %d, len %u, val %d)", s, l, o, lo, n, v && n >= 4 ? *(const int *)v : -1);
+    return r;
 }
 SKD("_ZN2nn6socket10GetSockOptEiiiPvPj", h_d_sk_GetOpt, int s, int l, int o, void *v, unsigned *n) {
-    int lo = so_opt(l, o); if (lo < 0) { t_skerr = 42; return -1; } socklen_t sl = n ? *n : 0; int r = sk_ret(getsockopt(s, sol_level(l), lo, v, &sl)); if (n) *n = sl; return r;
+    int lo = so_opt(l, o); if (lo < 0) { t_skerr = 42; NTR(-1, "getsockopt(%d, level %#x, opt %#x) unknown", s, l, o); return -1; } socklen_t sl = n ? *n : 0; int r = sk_ret(getsockopt(s, sol_level(l), lo, v, &sl)); if (n) *n = sl;
+    NTR(r, "getsockopt(%d, level %#x, opt %#x)", s, l, o); return r;
 }
 SKD("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", h_d_sk_GetName, int s, uint8_t *a, unsigned *l) {
-    struct sockaddr_storage ss; socklen_t n = sizeof ss; int r = sk_ret(getsockname(s, (struct sockaddr *)&ss, &n)); if (r >= 0) sa_out(&ss, n, a, l); return r;
+    struct sockaddr_storage ss; socklen_t n = sizeof ss; int r = sk_ret(getsockname(s, (struct sockaddr *)&ss, &n)); if (r >= 0) sa_out(&ss, n, a, l);
+    NTR(r, "getsockname(%d) = %08x:%u", s, r >= 0 && ss.ss_family == AF_INET ? ntohl(((struct sockaddr_in *)&ss)->sin_addr.s_addr) : 0, r >= 0 && ss.ss_family == AF_INET ? ntohs(((struct sockaddr_in *)&ss)->sin_port) : 0);
+    return r;
 }
-SKD("_ZN2nn6socket8ShutdownEii", h_d_sk_Shutdown, int s, int h) { return sk_ret(shutdown(s, h)); }
+SKD("_ZN2nn6socket8ShutdownEii", h_d_sk_Shutdown, int s, int h) { int r = sk_ret(shutdown(s, h)); NTR(r, "shutdown(%d, %d)", s, h); return r; }
 #ifdef DM_GAME_D3
 // [D3] [TL2] Local play: numeric IPv4 only (no DNS ever), in the guest's addrinfo layout (FreeBSD order: ai_canonname before ai_addr, as D3
 // main 0xb15d40 reads ai_addr at +0x20), with a marker so FreeAddrInfo frees only what came from here
@@ -332,7 +366,7 @@ HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "nothing was allocated (loca
 #endif
 }
 HLE_FORCE("_ZN2nn6socket13GetHostByNameEPKc", "name resolution offline: NULL", void *, h_d_sk_GetHostByName, const char *n) { (void)n; t_skerr = SK_ENETDOWN; return NULL; }
-HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "last socket error (thread-local)", int, h_d_sk_GetLastErrno, void) { return t_skerr; }
+HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "last socket error (thread-local)", int, h_d_sk_GetLastErrno, void) { NTR(t_skerr, "GetLastErrno"); return t_skerr; }
 HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEP7in_addrS2_S2_S2_S2_", "offline: no IP configuration", Result, h_d_nifm_IpCfg, void *a, void *b, void *c, void *d, void *e) {
     (void)a; (void)b; (void)c; (void)d; (void)e; return RES_FAIL;
 }
@@ -347,26 +381,26 @@ HLE_FORCE("_ZN2nn3ssl7Context15ImportServerPkiEPmPKcjNS0_17CertificateFormatE", 
 // local play is on, then the same host sockets as the int / sockaddr overloads (the enums carry the same numbers). SendTo(MsgFlag) and
 // Shutdown(ShutdownMethod) were TL2-only stubs in hle_tl2.c.
 #define LANF(m, cname, ret, ...) HLE_FORCE(m, "[D3] [TL2] bsd socket: offline failure; a host socket while local play is on (hle_ldn.c)", ret, cname, __VA_ARGS__)
-LANF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_l_Socket, int, int a, int b, int c) { return LAN_ON() ? h_d_sk_Socket(a, b, c) : sk_fail(); }
-LANF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_l_Bind, int, int s, const uint8_t *a, unsigned n) { return LAN_ON() ? h_d_sk_Bind(s, a, n) : sk_fail(); }
-LANF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_l_Connect, int, int s, const uint8_t *a, unsigned n) { return LAN_ON() ? h_d_sk_Connect(s, a, n) : sk_fail(); }
-LANF("_ZN2nn6socket6ListenEii", h_l_Listen, int, int s, int n) { return LAN_ON() ? sk_ret(listen(s, n)) : sk_fail(); }
-LANF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_l_Accept, int, int s, uint8_t *a, unsigned *n) { return LAN_ON() ? h_d_sk_Accept(s, a, n) : sk_fail(); }
+LANF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_l_Socket, int, int a, int b, int c) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_Socket(a, b, c); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_l_Bind, int, int s, const uint8_t *a, unsigned n) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_Bind(s, a, n); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_l_Connect, int, int s, const uint8_t *a, unsigned n) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_Connect(s, a, n); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket6ListenEii", h_l_Listen, int, int s, int n) { if (!LAN_ON()) return sk_fail(); int r = sk_ret(listen(s, n)); NTR(r, "listen(%d, %d)", s, n); return r; }
+LANF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_l_Accept, int, int s, uint8_t *a, unsigned *n) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_Accept(s, a, n); t_tr_ra = NULL; return r_; }
 LANF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_l_GetPeerName, int, int s, uint8_t *a, unsigned *l) {
     if (!LAN_ON()) return sk_fail();
     struct sockaddr_storage ss; socklen_t n = sizeof ss; int r = sk_ret(getpeername(s, (struct sockaddr *)&ss, &n)); if (r >= 0) sa_out(&ss, n, a, l); return r;
 }
-LANF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_l_GetSockName, int, int s, uint8_t *a, unsigned *l) { return LAN_ON() ? h_d_sk_GetName(s, a, l) : sk_fail(); }
-LANF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_l_GetSockOpt, int, int s, int l, int o, void *v, unsigned *n) { return LAN_ON() ? h_d_sk_GetOpt(s, l, o, v, n) : sk_fail(); }
-LANF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_l_SetSockOpt, int, int s, int l, int o, const void *v, unsigned n) { return LAN_ON() ? h_d_sk_SetOpt(s, l, o, v, n) : sk_fail(); }
-LANF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_l_Fcntl, int, int s, int c, long a) { return LAN_ON() ? h_d_sk_Fcntl(s, c, a) : sk_fail(); }
-LANF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_l_Poll, int, struct pollfd *f, unsigned long n, int t) { return LAN_ON() ? h_d_sk_Poll(f, n, t) : sk_fail(); }
-LANF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_l_Select, int, int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *t) { return LAN_ON() ? h_d_sk_Select(n, r, w, e, t) : sk_fail(); }
-LANF("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", h_l_Recv, long, int s, void *b, unsigned long n, int f) { return LAN_ON() ? h_d_sk_Recv(s, b, n, f) : sk_fail(); }
-LANF("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", h_l_RecvFrom, long, int s, void *b, unsigned long n, int f, uint8_t *a, unsigned *al) { return LAN_ON() ? h_d_sk_RecvFrom(s, b, n, f, a, al) : sk_fail(); }
-LANF("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", h_l_Send, long, int s, const void *b, unsigned long n, int f) { return LAN_ON() ? h_d_sk_Send(s, b, n, f) : sk_fail(); }
-LANF("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", h_l_SendTo, long, int s, const void *b, unsigned long n, int f, const uint8_t *a, unsigned al) { return LAN_ON() ? h_d_sk_SendTo(s, b, n, f, a, al) : sk_fail(); }
-LANF("_ZN2nn6socket8ShutdownEiNS0_14ShutdownMethodE", h_l_Shutdown, int, int s, int h) { return LAN_ON() ? h_d_sk_Shutdown(s, h) : sk_fail(); }
+LANF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_l_GetSockName, int, int s, uint8_t *a, unsigned *l) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_GetName(s, a, l); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_l_GetSockOpt, int, int s, int l, int o, void *v, unsigned *n) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_GetOpt(s, l, o, v, n); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_l_SetSockOpt, int, int s, int l, int o, const void *v, unsigned n) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_SetOpt(s, l, o, v, n); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_l_Fcntl, int, int s, int c, long a) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_Fcntl(s, c, a); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_l_Poll, int, struct pollfd *f, unsigned long n, int t) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_Poll(f, n, t); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_l_Select, int, int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *t) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_Select(n, r, w, e, t); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", h_l_Recv, long, int s, void *b, unsigned long n, int f) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_Recv(s, b, n, f); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", h_l_RecvFrom, long, int s, void *b, unsigned long n, int f, uint8_t *a, unsigned *al) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_RecvFrom(s, b, n, f, a, al); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", h_l_Send, long, int s, const void *b, unsigned long n, int f) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_Send(s, b, n, f); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", h_l_SendTo, long, int s, const void *b, unsigned long n, int f, const uint8_t *a, unsigned al) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_SendTo(s, b, n, f, a, al); t_tr_ra = NULL; return r_; }
+LANF("_ZN2nn6socket8ShutdownEiNS0_14ShutdownMethodE", h_l_Shutdown, int, int s, int h) { if (!LAN_ON()) return sk_fail(); t_tr_ra = __builtin_return_address(0); long r_ = h_d_sk_Shutdown(s, h); t_tr_ra = NULL; return r_; }
 LANF("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", h_l_GetAddrInfo, int, const char *h, const char *s, const int32_t *hint, void **res) {
     if (LAN_ON()) return lan_getaddrinfo(h, s, hint, res);
     if (res) *res = NULL; return 4;   // EAI_FAIL
