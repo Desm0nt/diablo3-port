@@ -867,14 +867,15 @@ public class D3PadView extends View implements FrontMenu.Pad {
     // Touch layout: A (confirm / primary) is as big as the others, a brighter gold ring tells it apart.
     private void accent(Canvas c, Btn b, float x, float y, float r, float k) {
         if (!touch() || b.key != K_A || editMode) return;
-        float w = line.getStrokeWidth(); line.setStrokeWidth(3.5f * dp); line.setColor(0xffffc840); line.setAlpha(Math.round(0xf0 * Math.max(k, 0.6f)));
+        float w = line.getStrokeWidth(); line.setStrokeWidth(3.5f * dp); line.setColor(0xffffc840); line.setAlpha(Math.round(0xf0 * k));
         c.drawCircle(x, y, r, line); line.setStrokeWidth(w);
     }
-    // A button with the HUD's icon of its skill (TL2's look): the icon as a shader-filled circle inside the ring (readable at low overlay
-    // opacity), darkened while the slot's cooldown cover is up, lighter while pressed, the button's letter as a small badge lower right.
+    // A button with the HUD's icon of its skill (TL2's look): the icon as a shader-filled circle inside the ring at the pad's opacity (players
+    // set it low to read the game's menus under the buttons, Reddit 11-13), darkened while the slot's cooldown cover is up, full while
+    // pressed, the button's letter as a small badge lower right.
     private void drawIconBtn(Canvas c, Btn b, int code, float x, float y, float r, float k, boolean on) {
         c.drawCircle(x, y, r, fill); c.drawCircle(x, y, r, line);
-        float ir = r * 0.86f, kk = Math.max(k, 0.85f);
+        float ir = r * 0.86f, kk = k;
         iconDst.set(x - ir, y - ir, x + ir, y + ir);
         iconM.setRectToRect(iconSrc, iconDst, Matrix.ScaleToFit.FILL); iconSh[code].setLocalMatrix(iconM);
         iconPaint.setShader(iconSh[code]); iconPaint.setAlpha(on ? 0xff : Math.round(0xff * kk));
@@ -883,7 +884,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         if (on) { fill.setColor(0xffffffff); fill.setAlpha(0x50); c.drawCircle(x, y, ir, fill); }
         float bs = Math.max(9 * dp, 0.32f * r); text.setTextSize(bs); text.setColor(0xffffffff); text.setAlpha(Math.round(0xe0 * kk));
         float bx = x + r * 0.55f, by = y + r * 0.62f;
-        fill.setColor(0xa0000000); c.drawCircle(bx, by - bs * 0.35f, bs * 0.85f, fill);
+        fill.setColor(0xff000000); fill.setAlpha(Math.round(0xa0 * kk)); c.drawCircle(bx, by - bs * 0.35f, bs * 0.85f, fill);
         c.drawText(b.label, bx, by, text);
     }
     // [front] a button in the skin: by its label's name; the d-pad's four buttons are drawn as the skin's one d-pad, by the up button, at the group's centre,
