@@ -83,3 +83,32 @@ Forced crash: `kill -SEGV <pid>` while playing → next start: toast + `Download
 | `DM_GFX_BC_DECODE` / `DM_GFX_BC6_E5` / `DM_GFX_BC_PARTIAL` / `DM_GFX_BC_BATCH_MB` | gpu / 1 / 1 / 32 | BC without device support |
 | `DM_DIRTY_BLOCKS` | 1 | 0: plain page scan |
 | `DM_VK_DRIVER_FORCE` / `DM_VK_DRIVER_DIRECT` | 0 / 0 | load a package for another family anyway / direct ICD experiment |
+
+## Tile-based GPUs: Mali, PowerVR (13.11.2026, issue #4)
+
+A Helio G99 phone (Mali-G57 MC2) runs the game at 27-31 fps with the GPU as the limit. A tile-based GPU reads every attachment a
+render pass begins with LOAD back into its tile memory and writes every STORE one out again; D3 draws 36-45 passes a frame. The
+tile-GPU paths of the DOOM 2016 port and two additions for D3's clear passes are on by default on Mali and PowerVR and off on
+every other family (Adreno records the same commands as before). Built; checked only with the host test
+(`tests/vendor_policy_test.cpp`); **not run on a Mali device**.
+
+| Switch | Default | What |
+|---|---|---|
+| `DM_GFX_NOLOAD` | 1 on Mali / PowerVR, else 0 (marker `gfx-noload` still wins) | a pass whose first draw provably covers every pixel (`first_draw_covers`; candidates are the single full-screen draws of the post-process chain, about half of a frame's passes) begins with colour loadOp DONT_CARE. From DOOM: also refused with rasterizer discard, a viewport the draw would skip, zero instances, and a first draw that samples its own colour attachment |
+| `DM_GFX_TILE_BARRIER` | 1 on Mali / PowerVR | pass dependencies and the read barriers of draws that sample only in the fragment shader wait in the fragment stages only, so the vertex / tiling work of the next pass overlaps the fragment work of the previous one; reads from earlier stages keep the full barrier |
+| `DM_GFX_STORE_NONE` | 1 on Mali / PowerVR (needs `VK_EXT` / `VK_KHR_load_store_op_none`, enabled off Adreno; 2 = DONT_CARE without it, test only) | an attachment aspect no draw or clear of the pass instance writes (depth of the depth-tested, depth-reading passes) ends with STORE_OP_NONE. Predicted by reading ahead in the guest command stream (`store_scan`), enforced per draw / clear: a write into such an aspect ends the instance first |
+| `DM_GFX_STORE_DEAD` | 1 on Mali / PowerVR | STORE_OP_DONT_CARE for an aspect the command stream provably clears in full before anything can read it. A contradicted proof is logged (`NVN store dead VIOLATION`) and turns the switch off for the rest of the run |
+| `DM_GFX_LAZY_TWIN_FLUSH` | 1 on Mali / PowerVR (acts with `DM_GFX_LAZY_CLEAR`) | D3: a pass that holds only full clears (~8 a frame: shadow maps, bloom targets, the scene target) is recorded through its load-op twin (loadOp CLEAR) instead of LOAD + `vkCmdClearAttachments` |
+| `DM_GFX_LAZY_KEEP` | 1 on Mali / PowerVR (acts with `DM_GFX_LAZY_CLEAR`) | D3: a read barrier for an image that is not an attachment of the pending clear pass is recorded before it, so the draw after the clear begins the pass with the clears as load ops (one pass instead of a clear pass and a LOAD pass) |
+| `DM_GFX_TILE_POISON` | 0 | test: the noload twin clears to magenta and a dead store is overwritten after its pass, so a wrong proof shows on any GPU |
+
+Log: `NVN tile policy: ...` and `NVN store ops: ...` at start; per window `NVN PERF noload_passes_per_frame=`, `NVN PERF tile
+frag_barriers= ... store none_passes= ... dead_violations=` and `twin_flushes= kept=` at the end of `NVN PERF d3perf`.
+
+Check on an Adreno phone: `DM_GFX_SIM_GPU=mali` turns the same policies on (Turnip runs with `TU_DEBUG=sysmem`, where load / store
+ops cost nothing, so this checks the picture and the counters, not the gain); add `DM_GFX_TILE_POISON=1` and look for magenta.
+
+Not brought over: `DM_GFX_TILE_AREA` (render area = bounding box; D3's passes cover their targets), `DM_GFX_LEAN_USAGE` (D3 binds no
+storage images; colour targets are already created without MUTABLE_FORMAT), `DM_GFX_CHUNK_MID_SPLIT` (D3 submits once a frame),
+zero-copy on Mali (a CPU-side saving; DOOM's players on Mali got no frame rate from it and one crash regression), the ASTC overlay
+(needs a converter for the CPK texture format).

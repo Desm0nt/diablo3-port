@@ -213,6 +213,7 @@ void wait_resize(){std::unique_lock<std::mutex> lock(window_mutex);window_cv.wai
 // compiled). DM_GFX_SHARPEN=<stops> turns it on (0 = strongest, 0.2 typical, 1 mild); used with DM_DOOM_RES (the game renders
 // 3D at a fraction and upscales it itself). Only for 8-bit UNORM RGBA/BGRA frames; anything else is presented unsharpened.
 extern "C" { int dm_vk_format_list=0; int dm_vk_custom_border=0; }   // [XC2] custom_border: VK_EXT_custom_border_color enabled (customBorderColorWithoutFormat)   // VK_KHR_image_format_list enabled on the device (read by the Vulkan engine)
+extern "C" { int dm_vk_store_none=0; }   // [nonadreno][tile] VK_EXT / VK_KHR_load_store_op_none enabled on the device (read by the engine: DM_GFX_STORE_NONE)
 extern "C" { int dm_vk_descriptor_indexing=0; }   // [ETERNAL] VK_EXT_descriptor_indexing enabled: partially bound + sampled-image update-after-bind (bindless pools)
 namespace rcas {
 const uint32_t code[]={
@@ -494,6 +495,15 @@ extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t byte
     if(format_list){dext.push_back(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);dm_vk_format_list=1;}
     // [DOOM] zero-copy guest memory imports AHardwareBuffer pages as buffer memory (xbg_game.cpp zc)
     if(ahb && foreign){dext.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);dext.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);}
+    // [nonadreno][tile] VK_EXT/KHR_load_store_op_none: STORE_OP_NONE for attachment aspects a render pass does not write (DM_GFX_STORE_NONE,
+    // from the DOOM 2016 port). Off on Adreno unless DM_GFX_STORE_NONE / DM_GFX_SIM_GPU ask, so the Adreno device is created exactly as before.
+    {VkPhysicalDeviceProperties pp{};vkGetPhysicalDeviceProperties(physical,&pp);dm_vk_store_none=0;
+     auto env_on=[](const char *n){const char *e=getenv(n);return e && *e && strcmp(e,"0")!=0;};
+     const bool other=pp.vendorID!=0x5143 || env_on("DM_GFX_SIM_GPU");
+     bool lsn_ext=false,lsn_khr=false;for(const auto &x:available){if(!strcmp(x.extensionName,VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME))lsn_ext=true;if(!strcmp(x.extensionName,"VK_KHR_load_store_op_none"))lsn_khr=true;}
+     const char *sn=getenv("DM_GFX_STORE_NONE");
+     if((lsn_ext || lsn_khr) && (sn && *sn?atoi(sn)!=0:other)){dext.push_back(lsn_khr?"VK_KHR_load_store_op_none":VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME);dm_vk_store_none=1;}
+     __android_log_print(ANDROID_LOG_INFO,"dm-vulkan","NVN store ops: load_store_op_none ext=%d khr=%d enabled=%d",int(lsn_ext),int(lsn_khr),dm_vk_store_none);}
     // Diagnostic (marker gfx-pipe-stats): the driver's per-pipeline statistics (VK_KHR_pipeline_executable_properties).
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pef{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
     if(FILE *ps=[&]{std::string dir=path;size_t cut=dir.find_last_of('/');return fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-pipe-stats").c_str(),"rb");}()){fclose(ps);dext.push_back(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);pef.pipelineExecutableInfo=VK_TRUE;pef.pNext=draw.pNext;draw.pNext=&pef;}
