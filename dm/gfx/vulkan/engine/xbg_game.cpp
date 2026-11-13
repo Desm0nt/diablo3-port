@@ -2559,7 +2559,10 @@ void init(){
     const char *why=nullptr;
     if(mode==0)why="DM_GFX_ASTC_CACHE=0";
     else if(!cfg.enabled_core.textureCompressionASTC_LDR)why="the device has no ASTC LDR";
-    else if(native_bc && mode<0)why="the device samples BC (DM_GFX_ASTC_CACHE=1 uses the cache anyway)";
+    // issue #15 (Mali-G76): native_bc is the marker / DM_GFX_NATIVE_BC (Android sets it to 1 everywhere: "native where the device can"),
+    // not the device. Without BC sampling (textureCompressionBC=0: Mali, PowerVR, Xclipse, DM_GFX_SIM_GPU nobc) bc_store decodes every
+    // BC texture, so auto takes the cache there; before, auto refused it on every phone and the converted pack went unused.
+    else if(native_bc && cfg.enabled_core.textureCompressionBC && mode<0)why="the device samples BC (DM_GFX_ASTC_CACHE=1 uses the cache anyway)";
     const char *pe=getenv("DM_ASTC_CACHE_PATH");path=pe && *pe?pe:data_root()+"/astc/d3-astc.pack";
     if(!why){
         fd=open(path.c_str(),O_RDONLY|O_CLOEXEC);XbgAcHeader h{};struct stat st{};
@@ -2575,8 +2578,8 @@ void init(){
                     block_ok[k]=(a.optimalTilingFeatures&need_f)==need_f && (b.optimalTilingFeatures&need_f)==need_f;}
                 for(auto &e:idx)shapes.insert(xbg_ac_shape(e.bytes,e.format,e.levels,e.width,e.height));
                 state=1;
-                xbg_logf("NVN astc cache: using %s: %u textures, %.2f GB of ASTC (blocks 4x4=%d 5x5=%d 6x6=%d on this device; DM_GFX_ASTC_CACHE=%s)",
-                    path.c_str(),h.entries,h.data_bytes/1073741824.0,int(block_ok[0]),int(block_ok[1]),int(block_ok[2]),m?m:"auto");}}
+                xbg_logf("NVN astc cache: using %s: %u textures, %.2f GB of ASTC (blocks 4x4=%d 5x5=%d 6x6=%d on this device; device BC=%d native_bc=%d; DM_GFX_ASTC_CACHE=%s)",
+                    path.c_str(),h.entries,h.data_bytes/1073741824.0,int(block_ok[0]),int(block_ok[1]),int(block_ok[2]),int(cfg.enabled_core.textureCompressionBC),int(native_bc),m?m:"auto");}}
     }
     if(state!=1){if(fd>=0)close(fd);fd=-1;idx.clear();xbg_logf("NVN astc cache: not used (%s; %s); BC textures are decoded",why?why:"?",path.c_str());}
 }

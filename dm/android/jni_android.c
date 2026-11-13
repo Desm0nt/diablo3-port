@@ -234,6 +234,76 @@ static void mkdirs(const char *p) {
     for (char *s = b + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(b, 0700); *s = '/'; }
     mkdir(b, 0700);
 }
+
+static char g_shaders[1300];   // the shader bundle directory handed to the engine (<runtime>/shaders unless d3_pick_shader_dir found another)
+
+#ifdef DM_GAME_D3
+// [D3] issue #15 (HONOR 30 Pro, Mali-G76): Download/Diablo3Mobile/dm/shaders held no bundle, the boot went on anyway (the old
+// "bring-up: continuing" branch from DOOM Eternal), every program was missing and every draw skipped: a black screen at 60 fps with
+// the game running behind it. D3's translation is complete (1323 bundles), so an empty shader folder is a broken install.
+//   DM_SHADER_CHECK: auto / 1 (default) = count the bundles; none -> look in the usual misplaced copies (a folder copied into
+//     itself, shaders next to dm instead of inside it, ...) and use the first that has bundles; still none -> stop with the
+//     missing-shaders screen (-4) instead of a black game. 0 = the old behaviour: log and boot anyway.
+// Log: one "boot: shaders: ..." line (count, _vk_build.json, opendir errno), the folder's first names when it has no bundle.
+#define D3_SHADER_BUNDLES 1323   // tools/d3_shaders_vk.sh on the 2.7.7 merged view (docs/d3/SHADERS.md)
+// Bundles (*.xgs) in dir: >= 0, or -1 when it cannot be opened (*err = errno). names: the first few other entries, for the log.
+static int d3_count_shaders(const char *dir, int *err, char *names, size_t n) {
+    if (names && n) names[0] = 0;
+    DIR *d = opendir(dir); if (!d) { if (err) *err = errno; return -1; }
+    int count = 0, other = 0; struct dirent *e;
+    while ((e = readdir(d))) {
+        size_t len = strlen(e->d_name);
+        if (len > 4 && !strcmp(e->d_name + len - 4, ".xgs")) { count++; continue; }
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (names && other < 8) { size_t u = strlen(names); snprintf(names + u, n - u, "%s%s", u ? ", " : "", e->d_name); }
+        other++;
+    }
+    closedir(d);
+    if (names && other > 8) { size_t u = strlen(names); snprintf(names + u, n - u, " (+%d more)", other - 8); }
+    return count;
+}
+static int d3_pick_shader_dir(void) {
+    const char *m = getenv("DM_SHADER_CHECK"); const int check = !(m && *m == '0');
+    char names[512], json[1400]; int err = 0;
+    const int n = d3_count_shaders(g_shaders, &err, names, sizeof names);
+    snprintf(json, sizeof json, "%s/_vk_build.json", g_shaders); const int has_json = !access(json, R_OK);
+    if (n < 0) LOG("boot: shaders: %s cannot be opened (errno %d), _vk_build.json %s", g_shaders, err, has_json ? "readable" : "missing");
+    else LOG("boot: shaders: %d bundles in %s (%d expected), _vk_build.json %s%s%s", n, g_shaders, D3_SHADER_BUNDLES, has_json ? "present" : "missing",
+             n ? "" : "; other entries: ", n ? "" : (names[0] ? names : "none"));
+    if (n > 0) {
+        if (n < D3_SHADER_BUNDLES) LOG("【红】boot: shaders: only %d of %d bundles: setup's shader step or the copy to the phone did not finish; draws of the missing ones are skipped", n, D3_SHADER_BUNDLES);
+        return 0;
+    }
+    // Listing refused but the folder's files open by name (a storage quirk): the bundles may be there, let the engine try.
+    if (n < 0 && has_json) { LOG("boot: shaders: the folder is not listable but its files open: starting with it"); return 0; }
+    if (!check) { LOG("【红】boot: shaders: none in %s, starting anyway (DM_SHADER_CHECK=0): every draw will be skipped", g_shaders); return 0; }
+    // The usual misplaced copies of setup's Diablo3Mobile/dm/shaders.
+    char parent[1100]; snprintf(parent, sizeof parent, "%s", g_src); { char *s = strrchr(parent, '/'); if (s && s != parent) *s = 0; }
+    char cand[8][1300]; int nc = 0;
+    snprintf(cand[nc++], sizeof cand[0], "%s/shaders/shaders", g_runtime);            // shaders copied into an existing shaders folder
+    snprintf(cand[nc++], sizeof cand[0], "%s/shaders", g_src);                        // Diablo3Mobile/shaders (next to dm)
+    snprintf(cand[nc++], sizeof cand[0], "%s/dm/shaders", g_src);                     // the resource folder's own dm (runtime elsewhere)
+    snprintf(cand[nc++], sizeof cand[0], "%s/Diablo3Mobile/dm/shaders", g_src);       // Diablo3Mobile copied into itself
+    snprintf(cand[nc++], sizeof cand[0], "%s/dm/dm/shaders", g_src);                  // dm copied into dm
+    snprintf(cand[nc++], sizeof cand[0], "%s/dm/shaders", parent);                    // dm copied to Download/ itself
+    snprintf(cand[nc++], sizeof cand[0], "%s/dm/shaders", g_ext);                     // app-specific folder (debug imports)
+    snprintf(cand[nc++], sizeof cand[0], "%s/dm/shaders", g_files);                   // internal folder (run-as imports)
+    for (int i = 0; i < nc; i++) {
+        if (!strcmp(cand[i], g_shaders)) continue;
+        const int k = d3_count_shaders(cand[i], NULL, NULL, 0);
+        if (k > 0) {
+            LOG("boot: shaders: none in %s; using the %d bundles found in %s (DM_SHADER_CHECK=auto)", g_shaders, k, cand[i]);
+            snprintf(g_shaders, sizeof g_shaders, "%s", cand[i]);
+            if (k < D3_SHADER_BUNDLES) LOG("【红】boot: shaders: only %d of %d bundles there; draws of the missing ones are skipped", k, D3_SHADER_BUNDLES);
+            return 0;
+        }
+    }
+    { char dm_names[512]; int e2 = 0; const int k = d3_count_shaders(g_runtime, &e2, dm_names, sizeof dm_names); (void)k;
+      LOG("boot: shaders: %s holds: %s", g_runtime, dm_names[0] ? dm_names : "nothing"); }
+    LOG("【红】boot: shaders: no bundle in %s or a misplaced copy: the game would draw nothing (black screen); stopping with the missing-shaders screen (DM_SHADER_CHECK=0 starts anyway)", g_shaders);
+    return -4;
+}
+#endif
 // 内部目录 romfs/data/ 下逐个链接到资源目录的文件（游戏按 rom:/data/… 读；链接让资源留在玩家放的位置，不复制 5 GB）
 // Under the internal dir romfs/data/, link each file of the resource dir (the game reads rom:/data/...; links keep the resources where the player put them instead of copying 5 GB)
 // 剔零档案的「.holes」区段表也要链过去：hle_fs.c 在档案旁边（即 romfs/data/ 下）找它；缺了就按物理偏移读剔过零的档案，第一个零段之后读到的全错位（解压失败、随后崩溃）
@@ -260,8 +330,8 @@ static void *host_thread(void *arg) {
     char out[1200]; snprintf(out, sizeof out, "%s/out", g_runtime);
     // 图形初始化在宿主线程进行；着色器由玩家在包外提供，失败时停止启动。
     // Initialize graphics on the host thread; shaders stay external, and failure stops startup.
-    char shaders[1200], error[512] = {0};
-    snprintf(shaders, sizeof shaders, "%s/shaders", g_runtime);
+    char shaders[1300], error[512] = {0};
+    snprintf(shaders, sizeof shaders, "%s", g_shaders);   // <runtime>/shaders, or the copy d3_pick_shader_dir found
     uint64_t t0 = now_ns(); LOG("boot: Vulkan initialization (shaders %s)", shaders);
     int graphics_rc = dm_android_vk_initialize(shaders, error, sizeof error);
     if (graphics_rc) { LOG("boot: Vulkan initialization failed %d: %s", graphics_rc, error); front_android_boot_failed(-6); return NULL; }
@@ -490,18 +560,24 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     snprintf(required, sizeof required, "%s/data/.build.config", romfs);
     if (access(required, R_OK)) { LOG("boot: missing build configuration"); return -5; }
 #endif
-    snprintf(required, sizeof required, "%s/shaders", g_runtime);
+    snprintf(g_shaders, sizeof g_shaders, "%s/shaders", g_runtime);
+#ifdef DM_GAME_D3
+    { int rc = d3_pick_shader_dir(); if (rc) return rc; }
+#else
+    snprintf(required, sizeof required, "%s", g_shaders);
     DIR *shaders = opendir(required); int have_shader = 0;
     if (shaders) { struct dirent *entry; while ((entry = readdir(shaders))) {
         size_t len = strlen(entry->d_name);
         if (len > 4 && !strcmp(entry->d_name + len - 4, ".xgs")) { have_shader = 1; break; }
     } closedir(shaders); }
-#if defined(DM_GAME_ETERNAL) || defined(DM_GAME_XC2) || defined(DM_GAME_D3)   // [ETERNAL] [D3] shader translation not done yet: boot anyway for CPU / HLE bring-up
+#if defined(DM_GAME_ETERNAL) || defined(DM_GAME_XC2)   // [ETERNAL] shader translation not done yet: boot anyway for CPU / HLE bring-up
     if (!have_shader) LOG("boot: no shader bundles in %s (Eternal bring-up: continuing)", required);
+    else
 #else
     if (!have_shader) { LOG("boot: no shader bundles in %s", required); return -4; }
 #endif
     LOG("boot: shader bundles found in %s", required);
+#endif
 #ifndef DM_GAME_DOOM   // [DOOM] no D2R touch overlay / overlay contract
     snprintf(required, sizeof required, "%s/overlay", g_runtime);
     // 启动前核必需覆盖层；旧资源不能自动补指纹，也不能带着错误资源进入游戏。
