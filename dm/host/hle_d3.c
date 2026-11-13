@@ -132,10 +132,18 @@ HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless (cut)", Result, h
 // vertical FOV => wider = Hor+). The UI (960x720 virtual space) is laid out in the centred 4:3 region of the real window size
 // (0x34baf0) with PC-style edge anchoring, so it needs nothing. The only 16:9 constant is the "Letterbox" check (0x29b480: option
 // flag and |16/9 - aspect| > 0.01 -> the 3D forced to 16/9); it is made to answer "no" so the option can never squeeze the wide view.
-//   DM_D3_WIDE=1        docked width = 900 x screen aspect (front_game_res(1): the screen size is known, nativeSurface runs before nativeStart)
-//   DM_D3_WIDE=<width>  explicit docked width (1601..3200)
+//   DM_D3_WIDE=1        docked width = 900 x screen aspect (front_game_res(1): the screen size is known, nativeSurface runs before nativeStart);
+//                       a screen narrower than 16:9 (4:3 tablets, 10:9 / 6:5 foldables, issue #8): 900 x its aspect, at least 1200 = 4:3
+//   DM_D3_WIDE=4:3      1200x900 whatever the screen (gear "4:3"; the front end centres it with bars)
+//   DM_D3_WIDE=<width>  explicit docked width (1200..3200)
 //   unset / 0           original 1600x900 / 1280x720
 // Widths are rounded to 16; handheld = docked x 4/5 (720 high), aspect = docked width / 900. All sites are checked word for word.
+// Narrower than 16:9 is the PC version's 4:3 / 16:10 behaviour: the vertical FOV stays, so the 3D loses a little at the sides (Hor-, the
+// hero stays in the middle); the UI's centred 4:3 region is the whole window at 4:3 (0x34baf0 does nothing when |aspect - 4/3| <= 0.01) and
+// within it at 16:10, the edge anchors stay on the screen. Below 4:3 that region (window height x 4/3, centred) would be wider than the
+// window and the HUD would leave the screen, so the window stops at 1200x900 and the front end shows it with bars at the top and bottom
+// (DmActivity applyAspectLayout fits the SurfaceView to the game's render size). The loading-screen art (16:9) is not cropped there:
+// it already covers the window (ls_install only for windows wider than 1600).
 #include <math.h>
 #include <sys/mman.h>
 #include <sys/uio.h>
@@ -143,6 +151,7 @@ HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless (cut)", Result, h
 #include <unistd.h>
 #include <stdlib.h>
 #include "front.h"
+__attribute__((weak)) uint64_t front_screen_size(void);   // front_android.c: (u64)short side << 32 | long side, 0 = unknown
 enum { DW_INIT = 0xe7850, DW_LBOX = 0x29b480 };
 static const uint32_t k_dw_init[10] = {0xb0008336, 0xf944bad6, 0xd280c808 /* mov x8,#1600 */, 0xd280a009 /* mov x9,#1280 */,
     0xf2c07088 /* movk x8,#900,lsl#32 */, 0xf2c05a09 /* movk x9,#720,lsl#32 */, 0x5291c72a /* mov w10,#0x8e39 */,
@@ -245,10 +254,19 @@ void dm_d3_wide_install(void) {
     const char *e = getenv("DM_D3_WIDE");
     if (!e || !*e || (*e == '0' && !e[1])) { LOG("[wide] DM_D3_WIDE off: window 1600x900 (handheld 1280x720)"); return; }
     long want = atol(e); unsigned w;
-    if (want > 1600) w = (unsigned)want;
-    else { uint64_t r = front_game_res(1); w = (uint32_t)(r >> 32) == 900 ? (uint32_t)r : 1600; }
-    w = (w + 8) / 16 * 16; if (w > 3200) w = 3200;
-    if (w <= 1600) { LOG("[wide] DM_D3_WIDE=%s: screen not wider than 16:9 (or unknown): window stays 1600x900", e); return; }
+    if (!strcmp(e, "4:3")) w = 1200;
+    else if (want >= 1200) w = (unsigned)want;
+    else {
+        uint64_t r = front_game_res(1); w = (uint32_t)(r >> 32) == 900 ? (uint32_t)r : 1600;
+        uint64_t s = front_screen_size ? front_screen_size() : 0; uint32_t sw = (uint32_t)s, sh = (uint32_t)(s >> 32);
+        if (w <= 1600 && sw && sh && (uint64_t)sw * 9 < (uint64_t)sh * 16) {   // narrower than 16:9: same height, the screen's aspect, not below 4:3
+            w = (unsigned)(llround(900.0 * sw / sh / 16) * 16); if (w < 1200) w = 1200;
+            LOG("[wide] screen %ux%u (aspect %.4f) narrower than 16:9: window %ux900%s", sw, sh, (double)sw / sh, w,
+                (uint64_t)sw * 3 < (uint64_t)sh * 4 ? " (4:3, the narrowest the UI fits; bars at the top and bottom)" : "");
+        }
+    }
+    w = (w + 8) / 16 * 16; if (w > 3200) w = 3200; if (w < 1200) w = 1200;
+    if (w == 1600) { LOG("[wide] DM_D3_WIDE=%s: screen 16:9 (or unknown): window stays 1600x900", e); return; }
     unsigned wh = (w * 4 / 5 + 8) / 16 * 16;
     module_t *m = NULL;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
@@ -260,8 +278,8 @@ void dm_d3_wide_install(void) {
                               0x5280000au | (ab & 0xffff) << 5 /* mov w10,#lo */, 0x72a0000au | (ab >> 16) << 5 /* movk w10,#hi,lsl#16 */};
     const uint32_t lbox[2] = {0x2a1f03e0 /* mov w0,wzr */, 0xd65f03c0 /* ret */};
     if (dw_poke(m, DW_INIT + 8, init, 6) || dw_poke(m, DW_LBOX, lbox, 2)) { LOG("【红】[wide] mprotect RW failed: window stays 1600x900"); return; }
-    LOG("[wide] main+%#x window 1600x900 -> %ux900, handheld 1280x720 -> %ux720, aspect %.4f (Hor+ 3D, UI edge-anchored); letterbox check main+%#x off",
-        DW_INIT + 8, w, wh, a, DW_LBOX);
-    ls_install(m);
+    LOG("[wide] main+%#x window 1600x900 -> %ux900, handheld 1280x720 -> %ux720, aspect %.4f (%s 3D, UI edge-anchored); letterbox check main+%#x off",
+        DW_INIT + 8, w, wh, a, w > 1600 ? "Hor+" : "Hor-, vertical FOV kept", DW_LBOX);
+    if (w > 1600) ls_install(m);
 }
 #endif

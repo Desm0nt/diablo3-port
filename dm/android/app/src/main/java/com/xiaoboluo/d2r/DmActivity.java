@@ -422,9 +422,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 // renders 1600x900, handheld the game's own 720p preset. dm/env still wins (it is applied after this).
                 startedHandheld = p.getBoolean("handheld", false);
                 Os.setenv("DM_OPMODE", startedHandheld ? "0" : "1", true);
-                // Picture shape 2 = widescreen (hle_d3.c DM_D3_WIDE: the game renders at the screen's aspect, Hor+; next launch)
+                // Picture shape 2 = widescreen (hle_d3.c DM_D3_WIDE: the game renders at the screen's aspect, Hor+ on wider screens, Hor- down
+                // to 4:3 on narrower ones), 3 = 4:3 (DM_D3_WIDE=4:3, 1200x900 with bars); next launch
                 startedAspect = p.getInt("aspect", 0);
-                if (startedAspect == 2) Os.setenv("DM_D3_WIDE", "1", true); else Os.unsetenv("DM_D3_WIDE");
+                if (startedAspect == 2) Os.setenv("DM_D3_WIDE", "1", true); else if (startedAspect == 3) Os.setenv("DM_D3_WIDE", "4:3", true); else Os.unsetenv("DM_D3_WIDE");
                 // Widescreen only: loading screens' 16:9 art presented alone, stretched to the screen (hle_d3.c ls_present_crop)
                 Os.setenv("DM_D3_WIDE_STRETCH_LOADING", p.getBoolean("d3_stretch_loading", true) ? "1" : "0", true);
             } else {
@@ -862,16 +863,18 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final int[] D3_DZ_LABELS = {R.string.d3_dz_none, R.string.d3_dz_small, R.string.d3_dz_medium, R.string.d3_dz_large};   // DEADZONES
     static final int[] D3_GEAR_LABELS = {R.string.d3_gear_normal, R.string.d3_gear_faded};   // DoomPadView.GEAR_*
     private int d3FpsLimit() { return doomPrefs().getInt("fps_limit", 60) == 30 ? 30 : 60; }
-    // [D3] The game's render size, as the native side picks it: docked 1600x900, handheld 1280x720; widescreen (DM_D3_WIDE=1,
+    // [D3] The game's render size, as the native side picks it: docked 1600x900, handheld 1280x720; widescreen (aspect 2, DM_D3_WIDE=1,
     // hle_d3.c dm_d3_wide_install) W x 900 with W = front_game_res(1) (front_android.c: 900 x screen aspect, rounded to 8, max 4096)
-    // rounded to 16 (max 3200; not wider than 1600 = no widescreen), handheld (W x 4/5 rounded to 16) x 720. 2400x1080 -> 2000x900 / 1600x720.
-    static int[] d3RenderSize(boolean wide, boolean handheld, int sw, int sh) {
+    // rounded to 16 (max 3200), or for a screen narrower than 16:9 900 x its aspect rounded to 16, at least 1200 (4:3); 4:3 (aspect 3,
+    // DM_D3_WIDE=4:3) 1200x900; handheld (W x 4/5 rounded to 16) x 720. 2400x1080 -> 2000x900 / 1600x720, 2048x1536 -> 1200x900 / 960x720.
+    static int[] d3RenderSize(int aspect, boolean handheld, int sw, int sh) {
         int w = 1600;
-        if (wide && sw > 0 && sh > 0 && (long) sw * 9 > (long) sh * 16) {
+        if (aspect == 3) w = 1200;
+        else if (aspect == 2 && sw > 0 && sh > 0 && (long) sw * 9 > (long) sh * 16) {
             long bw = Math.round(900.0 * sw / sh / 8) * 8; if (bw > 4096) bw = 4096;
             w = (int) Math.min(3200, (bw + 8) / 16 * 16);
-        }
-        if (w <= 1600) return handheld ? new int[] {1280, 720} : new int[] {1600, 900};
+        } else if (aspect == 2 && sw > 0 && sh > 0 && (long) sw * 9 < (long) sh * 16) w = (int) Math.max(1200, Math.round(900.0 * sw / sh / 16) * 16);
+        if (w == 1600) return handheld ? new int[] {1280, 720} : new int[] {1600, 900};
         return handheld ? new int[] {(w * 4 / 5 + 8) / 16 * 16, 720} : new int[] {w, 900};
     }
     @SuppressWarnings("deprecation")
@@ -885,11 +888,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     int[] d3RenderSize() {
         if (startedAspect < 0) return null;
         int[] sc = screenSize();
-        return d3RenderSize(startedAspect == 2, startedHandheld, sc[0], sc[1]);
+        return d3RenderSize(startedAspect, startedHandheld, sc[0], sc[1]);
     }
     SurfaceView gameSurface() { return view; }
-    private void d3ModeLabels(RadioGroup modeG, android.content.Context ui, boolean wide) {
-        int[] sc = screenSize(), dk = d3RenderSize(wide, false, sc[0], sc[1]), hh = d3RenderSize(wide, true, sc[0], sc[1]);
+    private void d3ModeLabels(RadioGroup modeG, android.content.Context ui, int aspect) {
+        int[] sc = screenSize(), dk = d3RenderSize(aspect, false, sc[0], sc[1]), hh = d3RenderSize(aspect, true, sc[0], sc[1]);
         ((RadioButton) modeG.getChildAt(0)).setText(ui.getString(R.string.d3_mode_docked, dk[0] + "×" + dk[1]));
         ((RadioButton) modeG.getChildAt(1)).setText(ui.getString(R.string.d3_mode_handheld, hh[0] + "×" + hh[1]));
     }
@@ -930,13 +933,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             note(box, ui.getString(R.string.d3_game_lang_note));
             heading(box, when(ui, R.string.d3_mode, false));
             RadioGroup modeG = radios(box, new String[] {"", ""}, 1000, p.getBoolean("handheld", false) ? 1 : 0, false);
-            d3ModeLabels(modeG, ui, p.getInt("aspect", 0) == 2);   // the size the next launch renders at (widescreen: the screen's aspect)
+            d3ModeLabels(modeG, ui, p.getInt("aspect", 0));   // the size the next launch renders at (widescreen: the screen's aspect)
             note(box, ui.getString(R.string.d3_mode_note));
             heading(box, when(ui, R.string.d3_aspect, true));
-            RadioGroup aspG = radios(box, new String[] {ui.getString(R.string.d3_aspect_bars), ui.getString(R.string.d3_aspect_stretch), ui.getString(R.string.d3_aspect_wide)}, 8000, p.getInt("aspect", 0), false);
+            RadioGroup aspG = radios(box, new String[] {ui.getString(R.string.d3_aspect_bars), ui.getString(R.string.d3_aspect_stretch), ui.getString(R.string.d3_aspect_wide), ui.getString(R.string.d3_aspect_43)}, 8000, p.getInt("aspect", 0), false);
             note(box, ui.getString(R.string.d3_aspect_wide_note));
             CheckBox stretchL = new CheckBox(this); stretchL.setText(when(ui, R.string.d3_stretch_loading, false)); stretchL.setChecked(p.getBoolean("d3_stretch_loading", true)); box.addView(stretchL);
-            aspG.setOnCheckedChangeListener((g, id) -> d3ModeLabels(modeG, ui, id == 8002));
+            aspG.setOnCheckedChangeListener((g, id) -> d3ModeLabels(modeG, ui, id - 8000));
             heading(box, when(ui, R.string.d3_sharpen, false));
             RadioGroup sh = radios(box, texts(ui, D3_SHARPEN_LABELS), 2000, p.getInt("sharpen", 0), true);
             heading(box, when(ui, R.string.d3_fps_limit, false));
@@ -1015,7 +1018,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             Runnable save = () -> {
                 int drvPick = picked(drvG, 7000, drvNames.length + 1);
                 p.edit().putString("ui_lang", D3_UI_LANGS[picked(uiG, 9100, D3_UI_LANGS.length)]).putString("lang", D3_LANG_CODES[picked(langG, 5000, D3_LANG_CODES.length)])
-                    .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 3))
+                    .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 4))
                     .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
                     .putString("driver", drvPick > 0 ? drvNames[drvPick - 1] : "").putBoolean("rumble", rumble.isChecked())
                     .putBoolean("d3_stretch_loading", stretchL.isChecked()).apply();
@@ -1056,10 +1059,15 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         runOnUiThread(() -> {
             int fw = gameFrame.getWidth(), fh = gameFrame.getHeight();
             int mode = XC2 && startedAspect == 2 ? 2 : doomPrefs().getInt("aspect", XC2 ? ASPECT_DEFAULT : 0);
-            if (D3) mode = startedAspect == 2 ? 2 : mode == 2 ? 0 : mode;   // [D3] widescreen = whole screen only when the game was started with it
+            if (D3) mode = startedAspect >= 2 ? startedAspect : mode >= 2 ? 0 : mode;   // [D3] widescreen / 4:3 only when the game was started with it
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -1, android.view.Gravity.CENTER);
             if (mode == 0 && fw > 0 && fh > 0 && fw * 9 > fh * 16) lp.width = fh * 16 / 9;
             else if (mode == 0 && fw > 0 && fh > 0 && fw * 9 < fh * 16) lp.height = fw * 9 / 16;
+            else if (D3 && mode >= 2 && fw > 0 && fh > 0) {   // [D3] the game's own shape (4:3 picked, a screen below 4:3, width capped at 3200):
+                int[] rs = d3RenderSize();                     // bars where it differs by more than 1 % (the width's rounding to 16 is below that)
+                if (rs != null && (long) fw * rs[1] * 100 > (long) fh * rs[0] * 101) lp.width = (int) ((long) fh * rs[0] / rs[1]);
+                else if (rs != null && (long) fh * rs[0] * 100 > (long) fw * rs[1] * 101) lp.height = (int) ((long) fw * rs[1] / rs[0]);
+            }
             FrameLayout.LayoutParams cur = (FrameLayout.LayoutParams) view.getLayoutParams();
             if (cur == null || cur.width != lp.width || cur.height != lp.height || cur.gravity != lp.gravity) view.setLayoutParams(lp);
         });

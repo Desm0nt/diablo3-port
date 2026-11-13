@@ -135,7 +135,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private final Map<String, float[]> pos = new HashMap<>();   // group -> saved anchor (fractions of the view) and scale: {fx, fy, scale}
     private boolean split;   // the editor's Separate mode (every control on its own), "d3_split"
     private float deadzone, op = 1f, scale = 1f, heroFy = HERO_Y_DEFAULT / 100f, depth = DEPTH_DEFAULT / 100f;
-    private int aspect;   // gear "Picture shape": 0 the 16:9 picture with bars, 1 stretched, 2 widescreen (game at the screen's aspect)
+    private int aspect;   // gear "Picture shape": 0 the 16:9 picture with bars, 1 stretched, 2 widescreen (game at the screen's aspect), 3 4:3
     private boolean stretched;   // gear "Picture shape" 1: the 16:9 picture stretched to the view; 0 bars / 2 widescreen (game at the screen's aspect) keep square pixels and the full height
     private int menuSwipe = MENU_SWIPE_STICK;
     private String menuLabel = "MENU", editHint = "", resetLabel = "Reset", doneLabel = "Done";
@@ -378,10 +378,9 @@ public class D3PadView extends View implements FrontMenu.Pad {
     // World point -> ground direction from the hero (screen-down = +y, as the sticks), in the 16:9 picture's own proportions.
     // Returns {x, y, distance in dp}.
     private float[] ground(float x, float y) {
-        float w = getWidth(), h = getHeight(), pw = w, ph = h;
-        if (!stretched) { if (w * 9 > h * 16) pw = h * 16 / 9; else ph = w * 9 / 16; }
-        float xs = ph > 0 ? (pw / ph) / (16f / 9f) : 1f;   // stretched: screen x is wider than the game's
-        float hx = w * 0.5f + (HERO_FX - 0.5f) * pw, hy = (h - ph) * 0.5f + heroFy * ph;
+        float[] b = box(); float pw = b[2], ph = b[3];
+        float xs = stretched && ph > 0 ? (pw / ph) / (16f / 9f) : 1f;   // stretched: screen x is wider than the game's
+        float hx = b[0] + HERO_FX * pw, hy = b[1] + heroFy * ph;
         float dx = (x - hx) / xs, dy = (y - hy) / depth;
         return new float[] {dx, dy, (float) Math.sqrt(dx * dx + dy * dy) / dp};
     }
@@ -401,9 +400,8 @@ public class D3PadView extends View implements FrontMenu.Pad {
     }
     // the flick: the finger's screen travel (dx, dy) turned into a ground direction the way ground() does (stretch, depth squeeze)
     private void evadeToward(float dx, float dy) {
-        float w = getWidth(), h = getHeight(), pw = w, ph = h;
-        if (!stretched) { if (w * 9 > h * 16) pw = h * 16 / 9; else ph = w * 9 / 16; }
-        float xs = ph > 0 ? (pw / ph) / (16f / 9f) : 1f, gx = dx / xs, gy = dy / depth, d = (float) Math.sqrt(gx * gx + gy * gy);
+        float[] b = box(); float pw = b[2], ph = b[3];
+        float xs = stretched && ph > 0 ? (pw / ph) / (16f / 9f) : 1f, gx = dx / xs, gy = dy / depth, d = (float) Math.sqrt(gx * gx + gy * gy);
         if (d <= 0) return;
         evadeX = gx / d; evadeY = gy / d; evadeUntil = SystemClock.uptimeMillis() + EVADE_MS;
         postDelayed(this::axes, EVADE_MS + 4);
@@ -706,11 +704,20 @@ public class D3PadView extends View implements FrontMenu.Pad {
         if (f[0] < 0 || f[0] > 1 || f[1] < 0 || f[1] > 1) return false;
         try { return DmActivity.nativeD3UiMinimapHit(f[0], f[1]); } catch (UnsatisfiedLinkError e) { return false; }
     }
-    // View point -> {fx, fy, picture height}: bars = the centred 16:9 box; stretched and widescreen fill the view.
-    private float[] picture(float x, float y) {
+    // The game picture in this view's pixels {left, top, width, height}: the game SurfaceView's own bounds (DmActivity.applyAspectLayout sizes
+    // it: the centred 16:9 box with bars, the whole view stretched / widescreen, the game's own shape for 4:3 and screens below 4:3, issue #8);
+    // before it is laid out, the 16:9 box with bars or the whole view.
+    private float[] box() {
+        Context c = getContext(); View sv = c instanceof DmActivity ? ((DmActivity) c).gameSurface() : null;
+        if (sv != null && sv.getWidth() > 0 && sv.getHeight() > 0) return new float[] {sv.getLeft() - getLeft(), sv.getTop() - getTop(), sv.getWidth(), sv.getHeight()};
         float w = getWidth(), h = getHeight(), pw = w, ph = h;
         if (aspect == 0) { if (w * 9 > h * 16) pw = h * 16 / 9; else ph = w * 9 / 16; }
-        return new float[] {(x - (w - pw) * 0.5f) / pw, (y - (h - ph) * 0.5f) / ph, ph};
+        return new float[] {(w - pw) * 0.5f, (h - ph) * 0.5f, pw, ph};
+    }
+    // View point -> {fx, fy, picture height}
+    private float[] picture(float x, float y) {
+        float[] b = box();
+        return new float[] {(x - b[0]) / b[2], (y - b[1]) / b[3], b[3]};
     }
     private boolean uiTap(float x, float y) {
         float[] f = picture(x, y);
@@ -734,8 +741,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private boolean uiPanning; private float uiLastX; private int pinchPtr = -1; private float pinchD, pinchMx, pinchMy;
     private static boolean mapOpen() { try { return DmActivity.nativeD3UiMapOpen(); } catch (UnsatisfiedLinkError e) { return false; } }
     private boolean mapPan(float dxPx, float dyPx) {
-        float w = getWidth(), h = getHeight(), pw = w, ph = h;
-        if (aspect == 0) { if (w * 9 > h * 16) pw = h * 16 / 9; else ph = w * 9 / 16; }
+        float[] b = box(); float pw = b[2], ph = b[3];
         if (pw <= 0 || ph <= 0) return false;
         try { return DmActivity.nativeD3UiMapPan(dxPx / pw, dyPx / ph); } catch (UnsatisfiedLinkError e) { return false; }
     }

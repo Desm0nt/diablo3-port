@@ -19,8 +19,9 @@
     <string name="d3_aspect">Picture shape</string>
     <string name="d3_aspect_bars">16:9 with black side bars</string>
     <string name="d3_aspect_stretch">Stretched to the whole screen</string>
-    <string name="d3_aspect_wide">Widescreen: wider view at the sides (next launch)</string>
-    <string name="d3_aspect_wide_note">Widescreen renders the game in the shape of the screen (e.g. 2000×900 docked, 1600×720 handheld): more of the world at the sides, the HUD at the screen edges. It needs a restart of the game; until then the picture keeps 16:9 with bars.</string>
+    <string name="d3_aspect_wide">In the shape of the screen, no stretching (next launch)</string>
+    <string name="d3_aspect_43">4:3 with black bars (next launch)</string>
+    <string name="d3_aspect_wide_note">\"In the shape of the screen\" renders the game in the screen\'s own proportions (e.g. 2000×900 docked, 1600×720 handheld on a 20:9 phone): on a wider screen you see more of the world at the sides, on a narrower one (16:10, 4:3, foldables) a little less, the HUD at the screen edges. Screens narrower than 4:3 get 4:3 with thin bars at the top and bottom. It needs a restart of the game; until then the picture keeps 16:9 with bars.</string>
     <string name="d3_stretch_loading">Widescreen: stretch loading screens to the whole screen</string>
     <string name="d3_sharpen">Sharpening (FSR RCAS)</string>
     <string name="d3_off">Off</string>
