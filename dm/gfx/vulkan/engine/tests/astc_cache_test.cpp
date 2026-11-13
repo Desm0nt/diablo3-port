@@ -68,8 +68,32 @@ static void pack(int argc, char **argv) {
     fclose(f);
 }
 
+// Round 4: the partial cache's journal (only complete lines, only cached textures, only inside the part file).
+static void journal() {
+    const char *j = "D3AC-phone 1 123\n#total 5\n"
+        "0000000a 00000001 4096 44 64 64 1 4 4300 64 4096 0 1\n"      // 4x4: 16x16 blocks = 4096 bytes
+        "0000000b 00000002 2048 42 64 64 1 0 3800 0 0 2 5\n"          // stays BC
+        "0000000c 00000003 2048 42 64 64 1 6 4500 4160 1936 0 1\n"    // 6x6: 11x11 blocks = 1936 bytes
+        "0000000d 00000004 2048 42 64 64 1 6 4500 99999 1936 0 1\n"   // past the part file
+        "0000000e 00000005 2048 42 64 64 1 6 45";                     // torn tail
+    std::vector<XbgAcEntry> e; uint64_t total = 0;
+    CHECK(xbg_ac_journal_parse(j, strlen(j), 64 + 4096 + 1936, e, &total) == 0 && total == 5, "journal parse");
+    CHECK(e.size() == 2 && e[0].crc == 0xa && e[1].crc == 0xc && e[1].bw == 6 && e[1].data_off == 4160, "journal entries: %zu", e.size());
+    CHECK(xbg_ac_journal_parse("garbage\n", 8, 0, e, &total) == -1, "not a journal");
+}
+
 int main(int argc, char **argv) {
     synthetic();
+    journal();
+    if (argc == 4 && !strcmp(argv[1], "--journal")) {   // a real part file + journal: what the engine would serve
+        std::vector<uint8_t> t = slurp(argv[3]); FILE *f = fopen(argv[2], "rb"); uint64_t n = 0;
+        if (f) { fseek(f, 0, SEEK_END); n = uint64_t(ftello(f)); fclose(f); }
+        std::vector<XbgAcEntry> e; uint64_t total = 0;
+        CHECK(xbg_ac_journal_parse((const char *)t.data(), t.size(), n, e, &total) == 0, "real journal");
+        printf("partial: %zu of %llu textures committed, part file %llu bytes\n", e.size(), (unsigned long long)total, (unsigned long long)n);
+        printf(failures ? "astc_cache_test: %d FAILURES\n" : "astc_cache_test: all passed\n", failures);
+        return failures != 0;
+    }
     if(argc > 1) pack(argc, argv);
     printf(failures ? "astc_cache_test: %d FAILURES\n" : "astc_cache_test: all passed\n", failures);
     return failures != 0;

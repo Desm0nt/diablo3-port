@@ -83,3 +83,35 @@ static inline unsigned xbg_ac_sanitize(uint8_t *blocks, uint64_t bytes) {
     }
     return n;
 }
+
+// ---------------------------------------------------------------- the partial cache (round 4)
+// The on-phone builder (dm/android/astc_convert.cpp) appends blocks to astc/d3-astc.pack.part and journals each texture in
+// astc/.journal-phone only after its bytes were synced: line 1 "D3AC-phone 1 <sources>", "#total <n>" lines, then per texture
+// "crc adler bytes fmt w h levels block psnr_x100 offset bytes preset steps" (hex crc / adler / fmt). The engine serves the committed
+// textures of an unfinished run: only complete lines (a torn tail is not committed), only cached ones (block != 0), only ranges inside
+// the part file as it is at the snapshot. Returns the entries (unsorted) and *total (0 when the journal has none yet), -1 when the
+// text is not such a journal.
+#include <stdio.h>
+#include <vector>
+static inline int xbg_ac_journal_parse(const char *text, size_t n, uint64_t part_bytes, std::vector<XbgAcEntry> &out, uint64_t *total) {
+    out.clear(); *total = 0;
+    if (n < 13 || memcmp(text, "D3AC-phone 1 ", 13)) return -1;
+    const char *p = (const char *)memchr(text, '\n', n), *end = text + n;
+    if (!p) return -1;
+    XbgAcHeader h{}; h.data_off = 64; h.data_bytes = part_bytes > 64 ? part_bytes - 64 : 0;
+    for (++p; p < end;) {
+        const char *nl = (const char *)memchr(p, '\n', size_t(end - p));
+        if (!nl) break;                                   // torn tail
+        char ln[256]; const size_t len = size_t(nl - p) < sizeof ln - 1 ? size_t(nl - p) : sizeof ln - 1; memcpy(ln, p, len); ln[len] = 0; p = nl + 1;
+        unsigned long long t;
+        if (ln[0] == '#') { if (sscanf(ln, "#total %llu", &t) == 1) *total = t; continue; }
+        unsigned crc, adler, bytes, fmt, w, hh, lv, b, db, dlen, pr, st; unsigned long long off;
+        if (sscanf(ln, "%x %x %u %x %u %u %u %u %u %llu %u %u %u", &crc, &adler, &bytes, &fmt, &w, &hh, &lv, &b, &db, &off, &dlen, &pr, &st) != 13) continue;
+        if (!b) continue;                                 // stays BC
+        XbgAcEntry e{}; e.crc = crc; e.adler = adler; e.bytes = bytes; e.format = uint16_t(fmt); e.levels = uint16_t(lv); e.width = uint16_t(w); e.height = uint16_t(hh);
+        e.bw = e.bh = uint8_t(b); e.flags = uint16_t(pr); e.data_off = off; e.data_bytes = dlen; e.psnr_x100 = db;
+        if (xbg_ac_entry_ok(e, h)) out.push_back(e);
+    }
+    return 0;
+}
+static inline bool xbg_ac_entry_before(const XbgAcEntry &a, const XbgAcEntry &b) { return xbg_ac_less(a, b.crc, b.adler, b.bytes, b.format, b.levels, b.width, b.height); }

@@ -46,7 +46,8 @@ final class D3Textures {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private LinearLayout overlay; private TextView text, note; private ProgressBar bar;
     private Runnable afterStart;   // the start screen waits for the conversion: run it to start the game (done, cancelled)
-    private boolean held;          // started from the pause menu: the game is held until it ends
+    private boolean held;          // the game was running: held (as the pause menu does) until the conversion ends
+    private boolean asking;        // the start dialog is up
     private boolean running; private int threads; private long[] p = new long[12];
 
     D3Textures(Activity a, FrameLayout f, Game g) {
@@ -78,7 +79,7 @@ final class D3Textures {
         return new File(dir, "d3-astc.pack.part").exists() ? 1 : 0;
     }
     boolean running() { return running; }
-    boolean holdingStart() { return afterStart != null; }
+    boolean holdingStart() { return asking || afterStart != null; }   // the dialog is up or the conversion runs: the game does not start
 
     // The pause-menu row's text: its state.
     String label() {
@@ -92,22 +93,22 @@ final class D3Textures {
         if (!wanted(act) || sp.getBoolean("never", false) || cacheState() == 2) return false;
         int min = Math.max(5, nativeAstcEstimateMinutes()); String eta = min >= 90 ? t("около " + Math.round(min / 60f) + " ч", "about " + Math.round(min / 60f) + " h") : t("около " + min + " мин", "about " + min + " min");
         game.log("textures: cache state " + cacheState() + ", asking (estimate " + min + " min, " + nativeAstcBigCores() + " big cores)");
+        asking = true;
         new AlertDialog.Builder(act).setCancelable(false)
             .setTitle(t("Подготовить текстуры?", "Prepare textures?"))
             .setMessage(t("Снижает расход памяти и немного ускоряет игру на этом GPU (у него нет текстур BC). Займёт " + eta + " (" + (cacheState() == 1 ? "продолжит начатое; " : "")
                     + "телефон будет греться, игра подождёт), можно сделать позже из меню паузы. Нужно ~6 ГБ свободного места.",
                 "Lowers RAM use and speeds the game up a little on this GPU (it has no BC textures). Takes " + eta + " (" + (cacheState() == 1 ? "continues the earlier run; " : "")
                     + "the phone gets warm; the game waits), can be done later from the pause menu. Needs ~6 GB of free space."))
-            .setPositiveButton(t("Подготовить", "Prepare"), (d, w) -> { afterStart = start; begin(); })
-            .setNeutralButton(t("Больше не спрашивать", "Don't ask again"), (d, w) -> { sp.edit().putBoolean("never", true).apply(); start.run(); })
-            .setNegativeButton(t("Позже", "Later"), (d, w) -> start.run())
+            .setPositiveButton(t("Подготовить", "Prepare"), (d, w) -> { asking = false; afterStart = start; begin(); })
+            .setNeutralButton(t("Больше не спрашивать", "Don't ask again"), (d, w) -> { asking = false; sp.edit().putBoolean("never", true).apply(); start.run(); })
+            .setNegativeButton(t("Позже", "Later"), (d, w) -> { asking = false; start.run(); })
             .show();
         return true;
     }
     // The pause-menu row.
     void fromMenu() {
         if (running) { showOverlay(); return; }
-        if (game.running()) { game.hold(true); held = true; }
         if (cacheState() == 2) {
             new AlertDialog.Builder(act).setMessage(t("Текстуры уже подготовлены. Сделать заново?", "The textures are prepared already. Make them again?"))
                 .setPositiveButton(t("Заново", "Again"), (d, w) -> { new File(data, "astc/manifest.json").delete(); new File(data, "astc/d3-astc.pack").delete(); begin(); })
@@ -118,6 +119,9 @@ final class D3Textures {
     }
 
     private void begin() {
+        // the whole conversion with the game held (graphics, audio, guest clock: FrontMenu.Host.hold / nativeHold), owner 13.11; before
+        // the game's start it is simply not started until the conversion ends or is cancelled (holdingStart)
+        if (game.running() && !held) { game.hold(true); held = true; }
         threads = Math.max(1, nativeAstcBigCores());
         int r = nativeAstcStart(data.getAbsolutePath(), threads);
         game.log("textures: start " + r + " with " + threads + " threads");

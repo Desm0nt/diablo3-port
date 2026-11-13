@@ -347,14 +347,20 @@ void run_main(Run *R) {
     if (FILE *j = fopen(jpath.c_str(), "rb")) {
         char ln[256]; if (fgets(ln, sizeof ln, j) && !strncmp(ln, sig.c_str(), sig.size())) {
             while (fgets(ln, sizeof ln, j)) { Done d; unsigned long long off; unsigned len, b, db, pr, st;
+                if (!strchr(ln, '\n')) break;   // a torn last line: not committed
                 if (sscanf(ln, "%x %x %u %x %u %u %u %u %u %llu %u %u %u", &d.k.crc, &d.k.adler, &d.k.bytes, &d.k.fmt, &d.k.w, &d.k.h, &d.k.levels, &b, &db, &off, &len, &pr, &st) == 13) {
                     d.b = b; d.db100 = db; d.off = off; d.len = len; d.preset = pr; d.steps = st; finished.push_back(d); if (b) end = std::max<uint64_t>(end, off + len); } } }
         fclose(j);
     }
+    // A fresh run makes a new part file (a new inode) instead of truncating the old one: a game that opened the old one as a partial
+    // cache (xbg_game.cpp astccache, round 4) keeps reading its committed bytes. A resumed run only truncates to the last committed byte.
+    if (finished.empty()) { unlink(part.c_str()); unlink(jpath.c_str()); }
     int pf = ::open(part.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0664); if (pf < 0) return fail("cannot write " + part + ": " + strerror(errno));
-    if (finished.empty()) { end = 64; if (ftruncate(pf, 64)) {} uint8_t z[64] = {}; if (pwrite(pf, z, 64, 0) != 64) {} write_file_atomic(jpath, sig + "\n"); }
+    if (finished.empty()) { end = 64; uint8_t z[64] = {}; if (pwrite(pf, z, 64, 0) != 64) {} write_file_atomic(jpath, sig + "\n"); }
     else if (ftruncate(pf, off_t(end))) {}
     FILE *jf = fopen(jpath.c_str(), "ab"); if (!jf) { close(pf); return fail("cannot write " + jpath); }
+    // "#total <n>": the unique BC textures of this run, for the engine's partial-cache line ("N of M textures committed")
+    fprintf(jf, "#total %llu\n", (unsigned long long)jobs.size()); fflush(jf); fdatasync(fileno(jf));
     std::set<Key> have; for (auto &d : finished) have.insert(d.k);
     std::vector<Item> todo; for (auto &j : jobs) if (!have.count(j.k)) todo.push_back(j);
     if (const char *lim = getenv("DM_ASTC_CONV_LIMIT")) if (atol(lim) > 0 && todo.size() > size_t(atol(lim))) {   // tests: a partial cache

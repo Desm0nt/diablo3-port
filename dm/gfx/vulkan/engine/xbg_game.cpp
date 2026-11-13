@@ -2553,6 +2553,7 @@ namespace astccache {
 int state=-1;int fd=-1;std::string path;std::vector<XbgAcEntry> idx;std::unordered_set<uint64_t> shapes,refused;bool block_ok[3]={};
 uint64_t hits=0,miss_shape=0,miss_hash=0,miss_block=0,lost=0,upgraded=0,uploads=0,upload_bytes=0,zero_fixed=0,read_fails=0,hash_ns=0;
 std::string data_root(){std::string d=cfg.shader_directory?cfg.shader_directory:"";for(int i=0;i<2;i++){size_t c=d.find_last_of('/');d=c==std::string::npos?std::string("."):d.substr(0,c);}return d;}
+bool open_partial(const char *m);
 void init(){
     state=0;const char *m=getenv("DM_GFX_ASTC_CACHE");const int mode=m && *m && strcmp(m,"auto")?atoi(m):-1;
     const char *why=nullptr;
@@ -2562,7 +2563,8 @@ void init(){
     const char *pe=getenv("DM_ASTC_CACHE_PATH");path=pe && *pe?pe:data_root()+"/astc/d3-astc.pack";
     if(!why){
         fd=open(path.c_str(),O_RDONLY|O_CLOEXEC);XbgAcHeader h{};struct stat st{};
-        if(fd<0)why="no astc/d3-astc.pack (run setup, copy its astc folder next to romfs)";
+        if(fd<0 && open_partial(m)){state=1;return;}
+        if(fd<0)why="no astc/d3-astc.pack and no started conversion (run setup, copy its astc folder next to romfs, or Prepare textures in the pause menu)";
         else if(fstat(fd,&st) || pread(fd,&h,sizeof h,0)!=ssize_t(sizeof h) || xbg_ac_header_check(h,uint64_t(st.st_size),&why)){if(!why)why="unreadable";}
         else{idx.resize(h.entries);const size_t n=sizeof(XbgAcEntry)*h.entries;
             if(pread(fd,idx.data(),n,off_t(h.index_off))!=ssize_t(n))why="index unreadable";
@@ -2577,6 +2579,29 @@ void init(){
                     path.c_str(),h.entries,h.data_bytes/1073741824.0,int(block_ok[0]),int(block_ok[1]),int(block_ok[2]),m?m:"auto");}}
     }
     if(state!=1){if(fd>=0)close(fd);fd=-1;idx.clear();xbg_logf("NVN astc cache: not used (%s; %s); BC textures are decoded",why?why:"?",path.c_str());}
+}
+// Round 4: no finished pack, but the on-phone builder's d3-astc.pack.part + .journal-phone: the textures committed so far are served
+// (xbg_ac_journal_parse), the rest is decoded. A snapshot at the first BC texture: the part file's size then bounds every entry, a
+// builder running in this process only appends past it (a fresh run makes a new file, so this descriptor keeps the old bytes).
+bool open_partial(const char *m){
+    const std::string dir=path.substr(0,path.find_last_of('/')),part=dir+"/d3-astc.pack.part",jp=dir+"/.journal-phone";
+    const int pf=open(part.c_str(),O_RDONLY|O_CLOEXEC);if(pf<0)return false;
+    struct stat st{};std::string text;
+    if(fstat(pf,&st)){close(pf);return false;}
+    if(FILE *j=fopen(jp.c_str(),"rb")){char b[65536];size_t r;while((r=fread(b,1,sizeof b,j))>0)text.append(b,r);fclose(j);}
+    uint64_t total=0;std::vector<XbgAcEntry> e;
+    if(xbg_ac_journal_parse(text.data(),text.size(),uint64_t(st.st_size),e,&total)!=0 || e.empty()){close(pf);
+        xbg_logf("NVN astc cache: %s has no committed textures yet (journal %zu bytes)",part.c_str(),text.size());return false;}
+    std::sort(e.begin(),e.end(),xbg_ac_entry_before);
+    idx.swap(e);fd=pf;
+    const uint8_t sizes[3]={4,5,6};const VkFormatFeatureFlags need_f=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    for(int k=0;k<3;k++){VkFormatProperties a{},b{};vkGetPhysicalDeviceFormatProperties(cfg.physical,xbg_ac_format(sizes[k],sizes[k],0x44),&a);vkGetPhysicalDeviceFormatProperties(cfg.physical,xbg_ac_format(sizes[k],sizes[k],0x48),&b);
+        block_ok[k]=(a.optimalTilingFeatures&need_f)==need_f && (b.optimalTilingFeatures&need_f)==need_f;}
+    for(auto &x:idx)shapes.insert(xbg_ac_shape(x.bytes,x.format,x.levels,x.width,x.height));
+    uint64_t data=0;for(auto &x:idx)data+=x.data_bytes;
+    xbg_logf("NVN astc cache: using partial %s: %zu of %llu textures committed, %.2f GB of ASTC (the rest is decoded; the conversion can go on, new textures are picked up at the next start; blocks 4x4=%d 5x5=%d 6x6=%d; DM_GFX_ASTC_CACHE=%s)",
+        part.c_str(),idx.size(),(unsigned long long)total,data/1073741824.0,int(block_ok[0]),int(block_ok[1]),int(block_ok[2]),m?m:"auto");
+    return true;
 }
 void note(){
     const uint64_t n=hits+miss_shape+miss_hash+miss_block;if(n<64 || (n&(n-1)))return;

@@ -743,7 +743,7 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetOpmode(JNIEnv 
 // [D3] On-phone ASTC texture cache (astc_convert.cpp, D3Textures.java; issue #20): "[astc] ..." lines go to logcat and, once the game
 // has opened its log, into boot.log (stderr).
 #include "astc_convert.h"
-static void astc_log(const char *line) { __android_log_print(ANDROID_LOG_INFO, "dm", "%s", line); fprintf(stderr, "[dm] %s\n", line); }
+static void astc_log(const char *line) { __android_log_print(ANDROID_LOG_INFO, "dm", "%s", line); }   // one sink: the wrapped __android_log_print also reaches boot.log (stderr as well wrote every line twice)
 JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcStart(JNIEnv *env, jclass cls, jstring dir, jint threads) {
     (void)cls; const char *d = (*env)->GetStringUTFChars(env, dir, NULL); astc_conv_set_log(astc_log);
     int r = astc_conv_start(d, threads); (*env)->ReleaseStringUTFChars(env, dir, d); return r;
