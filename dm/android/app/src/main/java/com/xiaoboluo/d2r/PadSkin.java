@@ -64,6 +64,22 @@ final class PadSkin {
         }
         return any;
     }
+    // [D3] One arrow of the skin's d-pad (dir: a PadTheme.DPAD_PARTS index) centred at (cx, cy), at the size it has when the whole d-pad is drawn in a
+    // box of half extent hw: for a d-pad whose arrows the player placed, sized or hid apart (D3PadView, GitHub issue #17). Only that arrow's idle / held
+    // sprite, no decor; its idle sprite's centre is the arrow's place (a held one sits a few px lower, as in the whole d-pad). False when the skin has none.
+    // (This repository's copy of frontend-common's PadSkin; the shared file does not have it yet.)
+    boolean drawDpadPart(Canvas cv, int dir, float cx, float cy, float hw, boolean held, float alpha, float viewH) {
+        if (skin == null) return false;
+        int ci = theme.index(layout, "dpad"); if (ci < 0) return false;
+        PadTheme.Ctl c = theme.layouts[layout][ci];
+        float k = viewH / skin.dh * Math.min(2 * hw / (c.w * viewH), 2 * hw / (c.h * viewH));
+        PadTheme.Sprite idle = null, pick = null;
+        for (PadTheme.Sprite s : skin.sprites) if (s.ctl == ci && s.dir == dir) { if (s.state == PadTheme.IDLE) idle = s; if (s.state == (held ? PadTheme.HELD : PadTheme.IDLE)) pick = s; }
+        if (pick == null) pick = idle; if (pick == null) return false;
+        PadTheme.Sprite at = idle != null ? idle : pick;
+        sprite(cv, pick, cx - (at.ox + at.w / skin.scale / 2) * k, cy - (at.oy + at.h / skin.scale / 2) * k, k, Math.max(0, Math.min(1, alpha)));
+        return true;
+    }
     private void sprite(Canvas cv, PadTheme.Sprite s, float cx, float cy, float k, float alpha) {
         src.set((int) s.u, (int) s.v, (int) (s.u + s.w), (int) (s.v + s.h));
         float x0 = cx + s.ox * k, y0 = cy + s.oy * k;
