@@ -427,6 +427,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 if (startedAspect == 2) Os.setenv("DM_D3_WIDE", "1", true); else Os.unsetenv("DM_D3_WIDE");
                 // Widescreen only: loading screens' 16:9 art presented alone, stretched to the screen (hle_d3.c ls_present_crop)
                 Os.setenv("DM_D3_WIDE_STRETCH_LOADING", p.getBoolean("d3_stretch_loading", true) ? "1" : "0", true);
+                // Mods / cheats (hle_d3_mods.c; all off by default, gear "Mods / cheats", showD3Mods): offline season, season theme, cheats
+                int season = p.getInt("d3_season", 0);
+                if (season > 0) Os.setenv("DM_D3_SEASON", String.valueOf(season), true); else Os.unsetenv("DM_D3_SEASON");
+                String theme = p.getString("d3_theme", "");
+                if (!theme.isEmpty()) Os.setenv("DM_D3_THEME", theme, true); else Os.unsetenv("DM_D3_THEME");
+                String cheats = p.getString("d3_cheats", "");
+                if (!cheats.isEmpty()) Os.setenv("DM_D3_CHEATS", cheats, true); else Os.unsetenv("DM_D3_CHEATS");
             } else {
             if (p.getBoolean("drs", false)) Os.setenv("DM_DOOM_DRS", "1", true); else Os.unsetenv("DM_DOOM_DRS");
             int res = p.getInt("res", 0);
@@ -985,6 +992,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             note(box, ui.getString(R.string.d3_skill_icons_note));
             android.widget.Button editB = new android.widget.Button(this); editB.setText(ui.getString(R.string.d3_edit)); box.addView(editB);
             note(box, ui.getString(R.string.d3_edit_note));
+            android.widget.Button modsB = new android.widget.Button(this); modsB.setText(ui.getString(R.string.d3_mods_open)); box.addView(modsB);
+            modsB.setOnClickListener(v -> showD3Mods());   // its own dialog on top of this one, with its own Save
             heading(box, when(ui, R.string.d3_deadzone, true));
             RadioGroup dz = radios(box, texts(ui, D3_DZ_LABELS), 4000, nearest(DEADZONES, cp.getFloat("move_dz", 0f)), true);
             // Touch layout: walking toward a held finger (D3PadView.HERO_* / DEPTH_*) and what menu-mode swipes press.
@@ -1031,6 +1040,61 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 })
                 .setNegativeButton(ui.getString(R.string.d3_cancel), null).show();
             editB.setOnClickListener(v -> { save.run(); dlg.dismiss(); if (d3Pad != null) d3Pad.startEdit(); });   // drag controls on the pad; "Done" there ends it
+        });
+    }
+    // [D3] "Mods / cheats" (hle_d3_mods.c; facts from d3hack by god-jester, GPL-2.0, see docs/THIRD_PARTY.md). Saved in "doom_graphics":
+    // d3_season (0 = off, else the season number) -> DM_D3_SEASON, d3_theme ("" off, "auto" = the season's own theme, or one buff key)
+    // -> DM_D3_THEME, d3_cheats (comma separated keys) -> DM_D3_CHEATS; all apply on the next launch (applyDoomSettings).
+    static final int D3_SEASON_FIRST = 14, D3_SEASON_LAST = 37;   // the seasons with a known theme (hle_d3_mods.c k_themes)
+    static final String[] D3_BUFF_KEYS = {"goblins", "bags", "grandeur", "nightmares", "triune", "pandemonium", "kanai", "tempests", "clones", "cube4",
+        "ethereal", "shards", "swarm", "sanctified", "alchemy", "nesting", "keystones", "bloodshards"};   // hle_d3_mods.c k_buffs keys
+    static final int[] D3_BUFF_LABELS = {R.string.d3_buff_goblins, R.string.d3_buff_bags, R.string.d3_buff_grandeur, R.string.d3_buff_nightmares,
+        R.string.d3_buff_triune, R.string.d3_buff_pandemonium, R.string.d3_buff_kanai, R.string.d3_buff_tempests, R.string.d3_buff_clones,
+        R.string.d3_buff_cube4, R.string.d3_buff_ethereal, R.string.d3_buff_shards, R.string.d3_buff_swarm, R.string.d3_buff_sanctified,
+        R.string.d3_buff_alchemy, R.string.d3_buff_nesting, R.string.d3_buff_keystones, R.string.d3_buff_bloodshards};
+    static final String[] D3_CHEAT_KEYS = {"difficulty", "portal", "cooldowns", "craft", "cube", "gem100", "gemfast", "resource", "orbs", "legendary"};   // k_cheats
+    static final int[] D3_CHEAT_LABELS = {R.string.d3_cheat_difficulty, R.string.d3_cheat_portal, R.string.d3_cheat_cooldowns, R.string.d3_cheat_craft,
+        R.string.d3_cheat_cube, R.string.d3_cheat_gem100, R.string.d3_cheat_gemfast, R.string.d3_cheat_resource, R.string.d3_cheat_orbs, R.string.d3_cheat_legendary};
+    void showD3Mods() {
+        runOnUiThread(() -> {
+            android.content.Context ui = d3Ui();
+            SharedPreferences p = doomPrefs();
+            LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(48, 24, 48, 0);
+            note(box, ui.getString(R.string.d3_mods_note));
+            heading(box, when(ui, R.string.d3_season, false));
+            String[] seasons = new String[D3_SEASON_LAST - D3_SEASON_FIRST + 2]; seasons[0] = ui.getString(R.string.d3_off);
+            for (int i = 1; i < seasons.length; i++) seasons[i] = ui.getString(R.string.d3_season_n, D3_SEASON_FIRST + i - 1);
+            int sWas = p.getInt("d3_season", 0);
+            android.widget.Spinner seasonS = new android.widget.Spinner(this);
+            seasonS.setAdapter(new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, seasons));
+            seasonS.setSelection(sWas >= D3_SEASON_FIRST && sWas <= D3_SEASON_LAST ? sWas - D3_SEASON_FIRST + 1 : 0); box.addView(seasonS);
+            note(box, ui.getString(R.string.d3_season_note));
+            heading(box, when(ui, R.string.d3_theme, false));
+            String[] themes = new String[D3_BUFF_KEYS.length + 2]; themes[0] = ui.getString(R.string.d3_off); themes[1] = ui.getString(R.string.d3_theme_auto);
+            for (int i = 0; i < D3_BUFF_KEYS.length; i++) themes[i + 2] = ui.getString(D3_BUFF_LABELS[i]);
+            String tWas = p.getString("d3_theme", ""); int tAt = "auto".equals(tWas) ? 1 : 0;
+            for (int i = 0; i < D3_BUFF_KEYS.length; i++) if (D3_BUFF_KEYS[i].equals(tWas)) tAt = i + 2;
+            android.widget.Spinner themeS = new android.widget.Spinner(this);
+            themeS.setAdapter(new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, themes));
+            themeS.setSelection(tAt); box.addView(themeS);
+            note(box, ui.getString(R.string.d3_theme_note));
+            heading(box, when(ui, R.string.d3_cheats, false));
+            java.util.List<String> cWas = java.util.Arrays.asList(p.getString("d3_cheats", "").split(","));
+            CheckBox[] cheatC = new CheckBox[D3_CHEAT_KEYS.length];
+            for (int i = 0; i < D3_CHEAT_KEYS.length; i++) {
+                cheatC[i] = new CheckBox(this); cheatC[i].setText(ui.getString(D3_CHEAT_LABELS[i])); cheatC[i].setChecked(cWas.contains(D3_CHEAT_KEYS[i])); box.addView(cheatC[i]);
+            }
+            note(box, ui.getString(R.string.d3_cheats_note));
+            android.widget.ScrollView scroll = new android.widget.ScrollView(this); scroll.addView(box);
+            new AlertDialog.Builder(this).setTitle(ui.getString(R.string.d3_mods_title)).setView(scroll)
+                .setPositiveButton(ui.getString(R.string.d3_save), (d, w) -> {
+                    int s = seasonS.getSelectedItemPosition(), t = themeS.getSelectedItemPosition();
+                    StringBuilder c = new StringBuilder();
+                    for (int i = 0; i < D3_CHEAT_KEYS.length; i++) if (cheatC[i].isChecked()) c.append(c.length() > 0 ? "," : "").append(D3_CHEAT_KEYS[i]);
+                    p.edit().putInt("d3_season", s > 0 ? D3_SEASON_FIRST + s - 1 : 0).putString("d3_theme", t == 0 ? "" : t == 1 ? "auto" : D3_BUFF_KEYS[t - 2])
+                        .putString("d3_cheats", c.toString()).apply();
+                })
+                .setNegativeButton(ui.getString(R.string.d3_cancel), null).show();
         });
     }
     // [D3] A percentage slider that saves "doom_controls" <key> and updates the pad while it moves (shown behind the dialog).

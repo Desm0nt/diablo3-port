@@ -12,6 +12,7 @@ Each ported file says so in a comment and keeps the original copyright line.
 | nxnative | MIT, Copyright (c) 2026 seedds | https://github.com/seedds/nxnative |
 | nx2android | MIT, Copyright (c) 2026 seedds (its embedded `nxnative/LICENSE`) | https://github.com/shirai91/nx2android (the source comments cite it as `seedds/nx2android`) |
 | nx2android gamepad themes | MIT, Copyright (c) 2026 seedds (`dm/android/front-assets/LICENSE-nx2android-themes.txt`) | https://github.com/shirai91/nx2android — the on-screen gamepad skins (`themes/`) and the default layout (`overlay_default.tsv`) in `dm/android/front-assets`, unmodified |
+| d3hack | GPL-2.0, god-jester | https://github.com/god-jester/d3hack (studied at c0f0dbd) — facts only, no code, see below |
 | BOTWRecompAndroid | MIT, Copyright (c) 2026 Peiikai + notice mamcjr | https://github.com/mamcjr/BOTWRecompAndroid (studied at 5675618) — ideas only, see below |
 | D3CPKUnpack (`cpklib.py`) | MIT, Copyright (c) 2026 Krzysztof Janiszewski (RedMadKnight) — `tools/d3cpklib.LICENSE` | https://github.com/RedMadKnight/D3CPKUnpack at 9fa02146e33d3ef38b2ea6ec5dfdb3aebceba10e — vendored unmodified (below a two-line header) as `tools/d3cpklib.py`; `tools/d3_cpk.py` is our front-end |
 | libadrenotools | BSD-2-Clause, bylaws | https://github.com/bylaws/libadrenotools — `third_party/libadrenotools` (git submodule, with its own `lib/linkernsbypass`) |
@@ -87,6 +88,20 @@ the source in a comment.
 | `dm/android/vk_driver.c`, `vk_tramp.S` / `vk_tramp_names.h` | BOTWRecompAndroid `runtime/nvn/vulkan/android_driver.c` (adrenotools + volk) | Vulkan driver chosen at run time (system driver or Turnip through libadrenotools, `DM_VK_DRIVER`); we use trampolines instead of volk |
 | `gfx/nvn/hle_nvn.c` `nvnSyncWait` (`DM_NVN_SYNC_LAG=1`, off by default) | BOTWRecompAndroid 82b71e2 "sync lag" | Wait for the fence of frame N-1 instead of N |
 | `gfx/nvn/nvn_obj.h` `FITS55` limits | BOTWRecompAndroid NVN object writes | Size limits of NVN 55 objects (DOOM Eternal) |
+
+## Facts from d3hack (GPL-2.0)
+
+d3hack by god-jester is an exlaunch module for the Switch game (build 2.7.6.90885): offline seasons, community events, cheats,
+challenge rifts, a resolution hack and an ImGui overlay. Its GPL-2.0 does not fit this MIT tree, so **no d3hack code, table or text
+was copied**. Studied on 13.11.2026 at c0f0dbd, only for facts about the game: which game function, XVar or instruction does what, and
+the value d3hack gives it. Those sites were then found in our build (update 2.7.7, build-id 2607a74f) by matching the game's own code,
+and `dm/host/hle_d3_mods.c` was written from scratch (it names d3hack in its header comment).
+
+| Our code | Facts used | What |
+|---|---|---|
+| `dm/host/hle_d3_mods.c` season sites, `DM_D3_SEASON` | season XVars `Num` / `State` / `OverrideEnabled`; `IsSeasonsInitialized`, `IsSignedInOnline`, the hero-create season-confirm callback, `ValidateHeroForPartyMember`, the "Connect to Diablo Servers" entry, `SetGameParamsForHero` season_created | Offline seasons |
+| `dm/host/hle_d3_mods.c` `k_buffs`, `DM_D3_THEME` | the `CommunityEvent*` XVars, `CommunityEventEnabled` / `SeasonOnly`, the buff time window | Season themes (community buffs); the season-to-theme list is public season history |
+| `dm/host/hle_d3_mods.c` cheat sites, `DM_D3_CHEATS` | which instruction each cheat changes and to what | Unlock difficulties, instant portal, no cooldowns, instant crafting, cube without materials, gem upgrades, unlimited resource, extra GR orbs, several copies of a legendary |
 
 No code or idea from LASRecomp / LASRecompAndroid (Peiikai, mamcjr) is in this tree; they are credited in the DOOM Mobile
 repository, where they apply.
