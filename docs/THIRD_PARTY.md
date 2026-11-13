@@ -12,6 +12,7 @@ Each ported file says so in a comment and keeps the original copyright line.
 | nxnative | MIT, Copyright (c) 2026 seedds | https://github.com/seedds/nxnative |
 | nx2android | MIT, Copyright (c) 2026 seedds (its embedded `nxnative/LICENSE`) | https://github.com/shirai91/nx2android (the source comments cite it as `seedds/nx2android`) |
 | nx2android gamepad themes | MIT, Copyright (c) 2026 seedds (`dm/android/front-assets/LICENSE-nx2android-themes.txt`) | https://github.com/shirai91/nx2android — the on-screen gamepad skins (`themes/`) and the default layout (`overlay_default.tsv`) in `dm/android/front-assets`, unmodified |
+| d3hack | GPL-2.0, Copyright (C) god-jester and contributors (`dm/host/hle_d3_mods.LICENSE`) | https://github.com/god-jester/d3hack (studied at c0f0dbd) — code ported into `dm/host/hle_d3_mods.c`, see below |
 | BOTWRecompAndroid | MIT, Copyright (c) 2026 Peiikai + notice mamcjr | https://github.com/mamcjr/BOTWRecompAndroid (studied at 5675618) — ideas only, see below |
 | D3CPKUnpack (`cpklib.py`) | MIT, Copyright (c) 2026 Krzysztof Janiszewski (RedMadKnight) — `tools/d3cpklib.LICENSE` | https://github.com/RedMadKnight/D3CPKUnpack at 9fa02146e33d3ef38b2ea6ec5dfdb3aebceba10e — vendored unmodified (below a two-line header) as `tools/d3cpklib.py`; `tools/d3_cpk.py` is our front-end |
 | libadrenotools | BSD-2-Clause, bylaws | https://github.com/bylaws/libadrenotools — `third_party/libadrenotools` (git submodule, with its own `lib/linkernsbypass`) |
@@ -20,6 +21,7 @@ Each ported file says so in a comment and keeps the original copyright line.
 | deko3d (layout size algorithm) | zlib, Copyright (C) 2018-2020 fincs | https://github.com/devkitPro/deko3d — `dm/gfx/nvn/nvn_tex.c` (inherited from d2r-mobile, see DEPENDENCIES.md) |
 | Mesa Turnip (adrenotools build by The412Banner) | MIT | https://github.com/The412Banner/Banners-Turnip — **not stored here**; `tools/fetch_turnip.py` downloads v27.0.0-20261029 at build time with a pinned SHA-256 and the APK bundles it as its default driver |
 | Granite (texture decode shaders) | MIT, Copyright (c) 2017-2026 Hans-Kristian Arntzen (shader headers: 2020-2026) | https://github.com/Themaister/Granite at 69f450c62dc3, `assets/shaders/decode/{bc6.comp,bc7.comp,bitextract.h}` — ported (modified) into `dm/gfx/vulkan/engine/xbg_bc_gpu.glsl` by the DOOM 2016 port (GPU BC decode, `DM_GFX_BC_DECODE=gpu`); licence and hashes in `dm/gfx/vulkan/engine/third_party/granite_decode/` |
+| ARM astc-encoder 5.7.0 | Apache-2.0, Copyright 2011-2026 Arm Limited (one file also 2008 Jose Fonseca; `dm/third_party/astcenc/LICENSE.txt`) | https://github.com/ARM-software/astc-encoder at tag 5.7.0 (commit baff485b0ff36d2f95d28961605106502c653966) — the library sources (`astcenc*.cpp` / `.h`), unmodified, in `dm/third_party/astcenc`; built into libdm (NEON) for the on-phone ASTC texture cache (`dm/android/astc_convert.cpp`). The PC setup uses the same encoder through astc-encoder-py (MIT, pip, not stored here) |
 | DOOM Mobile (DOOM 2016 port) | MIT (this host) | https://github.com/Desm0nt/doom-port — logs and crash reports, driver choice and verification, non-Adreno fallbacks, GPU BC decode, ARMv8.0 thunks, Android 10 build: [d3/DOOM_PORTS.md](d3/DOOM_PORTS.md) |
 
 Only the parts that Diablo III (and the sibling ports sharing this host) use were ported, on an Adreno 750 target.
@@ -87,6 +89,26 @@ the source in a comment.
 | `dm/android/vk_driver.c`, `vk_tramp.S` / `vk_tramp_names.h` | BOTWRecompAndroid `runtime/nvn/vulkan/android_driver.c` (adrenotools + volk) | Vulkan driver chosen at run time (system driver or Turnip through libadrenotools, `DM_VK_DRIVER`); we use trampolines instead of volk |
 | `gfx/nvn/hle_nvn.c` `nvnSyncWait` (`DM_NVN_SYNC_LAG=1`, off by default) | BOTWRecompAndroid 82b71e2 "sync lag" | Wait for the fence of frame N-1 instead of N |
 | `gfx/nvn/nvn_obj.h` `FITS55` limits | BOTWRecompAndroid NVN object writes | Size limits of NVN 55 objects (DOOM Eternal) |
+
+## d3hack (GPL-2.0)
+
+d3hack by god-jester is an exlaunch module for the Switch game (build 2.7.6.90885): offline seasons, community events, cheats,
+challenge rifts, a resolution hack and an ImGui overlay. Studied on 13.11.2026 at c0f0dbd. **`dm/host/hle_d3_mods.c` contains code
+derived from it and is therefore GPL-2.0** (`SPDX-License-Identifier: GPL-2.0-only` in the file, license text in
+`dm/host/hle_d3_mods.LICENSE`; d3hack's sources have no per-file copyright headers, so the file names d3hack, its author and the commit).
+Its C++ (exlaunch hooks, `config.toml`) was ported to C on our hook mechanism (the function's first instructions replaced by a jump to the
+host, the originals run from a trampoline) and its 2.7.6 offsets were moved to update 2.7.7 (build-id 2607a74f) by matching the game's code.
+The rest of the tree stays MIT; the APK, which links this file, is distributed under the GPL-2.0 (README "License").
+
+| d3hack source | Taken into `hle_d3_mods.c` |
+|---|---|
+| `d3/patches.cpp` PatchDynamicSeasonal, PatchBase | offline season: season XVars and the patches of `IsSeasonsInitialized`, `IsSignedInOnline`, the season-confirm callback, `ValidateHeroForPartyMember`, the "Connect to Diablo Servers" entry, season_created (`DM_D3_SEASON`) |
+| `d3/patches.cpp` PatchDynamicEvents, `offsets_patch_only.inl` event XVars | season buffs / events: the `CommunityEvent*` XVars, CommunityEventEnabled / SeasonOnly, the buff window, Anniversary, EasterEggWorld (`DM_D3_BUFFS`) |
+| `config.cpp` BuildSeasonEventMap | which season had which theme (`k_themes`) |
+| `d3/patches.cpp` PortCheatCodes, PatchBase, PatchInfiniteMp | cheat patches: difficulties, portal, cooldowns, crafting, cube, gems, resource, GR orbs, legendaries (`DM_D3_CHEATS`) |
+| `d3/hooks/util.hpp` MoveSpeed, AttackSpeed, EquipAny, ForceAncient + AugmentSpecifier | speed multipliers (`DM_D3_SPEED`, `DM_D3_ATKSPEED`), `equipany`, `ancient` / `primal` |
+| `main.cpp` sInitializeWorld hook, `d3/_lobby.hpp` EnableGod, FlagsAreFun | `god`, `dbgflags` |
+| `d3/types/*.hpp` | attribute ids, actor flag bits, AppGlobals / Player / ACD / LootSpecifier offsets used above |
 
 No code or idea from LASRecomp / LASRecompAndroid (Peiikai, mamcjr) is in this tree; they are credited in the DOOM Mobile
 repository, where they apply.

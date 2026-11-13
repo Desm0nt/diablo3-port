@@ -20,9 +20,9 @@ set -u
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 RT="$HERE/tools/.runtime"
 VENV="$RT/venv"
-PKGS=(cryptography zstandard lz4 'capstone<6' 'unicorn<3')
+PKGS=(cryptography zstandard lz4 'capstone<6' 'unicorn<3' 'astc-encoder-py==0.1.12' 'numpy<2.4')
 NEED_VER='import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'
-NEED_ALL='import sys; assert sys.version_info >= (3, 10); import cryptography, zstandard, lz4, capstone, unicorn'
+NEED_ALL='import sys; assert sys.version_info >= (3, 10); import cryptography, zstandard, lz4, capstone, unicorn, astc_encoder, numpy'
 
 venv_py() {   # Scripts/python.exe only for Git Bash / MSYS (under WSL a venv made by setup.bat must not be used)
   case "$(uname -s)" in

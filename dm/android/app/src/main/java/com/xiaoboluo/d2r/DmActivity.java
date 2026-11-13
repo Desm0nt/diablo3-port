@@ -57,6 +57,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final boolean DOOM = "doom".equals(BuildConfig.DM_GAME) || ETERNAL || XC2 || D3;
     static final String DATA_DIR = D3 ? "Diablo3Mobile" : XC2 ? "Xenoblade2Mobile" : ETERNAL ? "DOOM Eternal Mobile" : "DOOM Mobile";   // [DOOM] Download/<DATA_DIR>/{romfs,dm,drivers}
     private DoomPadView doomPad;
+    private D3Textures textures; private boolean texturesAsked;   // [D3] the on-phone ASTC texture cache (issue #20)
     private D3PadView d3Pad;   // [D3] its own on-screen controls (touch / gamepad layouts) instead of doomPad
     static native int nativeStart(String filesDir, String extDir, String romfsSrc, String lang);
     static native void nativeSurface(Object surface, int w, int h);
@@ -127,6 +128,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             finish(); return;
         }
         current = new WeakReference<>(this);
+        if (D3) updates = new UpdateNotice(new Updates());   // [D3] from DOOM 2.41: started at the first frames (onFrameStats "first frames presented")
         if (DOOM) checkLastRun();   // [DOOM] crash report of the last run, before anything of this one is written
         displays = getSystemService(DisplayManager.class);
         if (displays != null) displays.registerDisplayListener(this, null);
@@ -154,7 +156,15 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override public boolean ready() { return started; }
     @Override public void hold(boolean on) { if (!libraryLoaded) return; try { nativeHold(on); } catch (UnsatisfiedLinkError e) { android.util.Log.e("dm", "nativeHold missing: the game is not paused (" + e.getMessage() + ")"); } }
     @Override public void gameSettings() { showDoomSettings(); }
+    @Override public boolean hasMods() { return D3; }   // [D3] "Mods / cheats" is a row of the pause menu (owner 11-13), not inside the game settings
+    @Override public void mods() { showD3Mods(); }
+    // [D3] the on-phone ASTC texture cache (D3Textures): a pause-menu row on GPUs without BC
+    @Override public boolean hasTextures() { return D3 && textures != null && D3Textures.wanted(this); }
+    @Override public String texturesLabel() { return textures != null ? textures.label() : null; }
+    @Override public void textures() { if (textures != null) textures.fromMenu(); }
     @Override public FrontMenu.Saves saves() { if (saves == null) saves = SaveTransfer.forGame(this, DATA_DIR); return saves; }
+    @Override public boolean updates() { return updates != null; }   // [D3] the pause menu's "Check for updates"
+    @Override public void checkUpdates() { if (updates != null) updates.checkNow(); }
     @Override public void quit() {
         android.util.Log.i("dm", "[java] quit from the pause menu");
         if (DOOM) CrashLog.sessionEnd(this);   // [DOOM] a clean end: no crash report at the next start
@@ -186,6 +196,44 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
 
     // ---- [D3] (from the DOOM 2016 port, its BUGS_AND_FIXES 2.22) crash logs and breadcrumbs (CrashLog.java)
     // A "[java] ..." line in boot.log (and logcat); kept until the native log exists (nativeStart opens it).
+    // ---- [D3] "a new version is out" (UpdateNotice.java from DOOM 2016 2.41 / frontend-common): GitHub's releases/latest of Desm0nt/diablo3-port,
+    // once per start after the first frames, a one-time dialog with the release notes; "Check for updates" in the pause menu asks now. No
+    // game-files check (requiredGameFiles 0). Switches: DM_UPDATE_CHECK=0 / always, DM_UPDATE_AS=<version>; prefs "front" upd_*.
+    private UpdateNotice updates;
+    static final String UPDATE_REPO = "Desm0nt/diablo3-port";
+    private static final String[] UPD_KEYS = {"upd_heading", "upd_version_line", "upd_check_now", "upd_check_start", "upd_checking", "upd_title", "upd_message",
+        "upd_whats_new", "upd_open", "upd_close", "upd_latest", "upd_failed", "upd_err_offline", "upd_err_limit", "gf_title", "gf_message", "gf_howto", "gf_note",
+        "gf_guide", "gf_line_ok", "gf_line_nostamp", "gf_line_old", "gf_line_none"};
+    private static final int[] UPD_IDS = {R.string.upd_heading, R.string.upd_version_line, R.string.upd_check_now, R.string.upd_check_start, R.string.upd_checking,
+        R.string.upd_title, R.string.upd_message, R.string.upd_whats_new, R.string.upd_open, R.string.upd_close, R.string.upd_latest, R.string.upd_failed,
+        R.string.upd_err_offline, R.string.upd_err_limit, R.string.gf_title, R.string.gf_message, R.string.gf_howto, R.string.gf_note, R.string.gf_guide,
+        R.string.gf_line_ok, R.string.gf_line_nostamp, R.string.gf_line_old, R.string.gf_line_none};
+    private final class Updates implements UpdateNotice.Host {
+        @Override public Activity activity() { return DmActivity.this; }
+        @Override public String appName() { return "Diablo III Mobile"; }
+        @Override public String repoSlug() { return UPDATE_REPO; }
+        @Override public String currentVersion() { return BuildConfig.VERSION_NAME; }
+        @Override public int requiredGameFiles() { return 0; }
+        @Override public File gameFilesStamp() { return null; }
+        @Override public int gameFilesBaseline() { return 0; }
+        @Override public String gameFilesFeatures(int have, int need) { return ""; }
+        @Override public SharedPreferences prefs() { return getSharedPreferences(Ui.PREFS, MODE_PRIVATE); }
+        @Override public String text(String key, Object... args) {
+            for (int i = 0; i < UPD_KEYS.length; i++) if (UPD_KEYS[i].equals(key)) return args.length == 0 ? getString(UPD_IDS[i]) : getString(UPD_IDS[i], args);
+            return key;
+        }
+        @Override public void crumb(String line) { DmActivity.this.crumb(line); }
+        @Override public void immersive() { immersiveBars(); }
+        @Override public boolean canShowNotice() {
+            return resumed && started && !isFinishing() && hasWindowFocus() && inputDialog == null
+                && (front == null || !front.isOpen()) && (d3Pad == null || !d3Pad.editing());
+        }
+        @Override public boolean holdGame(boolean on) {
+            if (on) { if (front != null && front.isOpen()) return false; if (d3Pad != null) d3Pad.releaseAll(); }
+            hold(on); return true;
+        }
+    }
+
     void crumb(String s) {
         if (nativeLogReady) { try { nativeLog(s); return; } catch (Throwable t) { /* an older library */ } }
         android.util.Log.i("dm", "[java] " + s);
@@ -217,7 +265,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 android.widget.Toast.makeText(app, d3Ui().getString(R.string.d3_toast_last_crash, f.getAbsolutePath()), android.widget.Toast.LENGTH_LONG).show();
             }));
             if (last != null) crumb(last);
-            CrashLog.startLiveLogcat(app);   // [D3] logs/logcat.txt written live (survives a kill); after checkPrevious read the old run
+            // [D3] logs/logcat.txt written live (survives a kill); after checkPrevious read the old run (its report took boot.log's snapshot already).
+            // Gear "Write logs" off (issue #19): no capture, and the old copies in logs/ go
+            if (CrashLog.logsOn(app)) CrashLog.startLiveLogcat(app); else CrashLog.dropLogs(app);
         }
     }
     // A start / boot failure screen: the report now (the screen names it), once per message and process.
@@ -422,11 +472,26 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 // renders 1600x900, handheld the game's own 720p preset. dm/env still wins (it is applied after this).
                 startedHandheld = p.getBoolean("handheld", false);
                 Os.setenv("DM_OPMODE", startedHandheld ? "0" : "1", true);
-                // Picture shape 2 = widescreen (hle_d3.c DM_D3_WIDE: the game renders at the screen's aspect, Hor+; next launch)
+                // Picture shape 2 = widescreen (hle_d3.c DM_D3_WIDE: the game renders at the screen's aspect, Hor+ on wider screens, Hor- down
+                // to 4:3 on narrower ones), 3 = 4:3 (DM_D3_WIDE=4:3, 1200x900 with bars); next launch
                 startedAspect = p.getInt("aspect", 0);
-                if (startedAspect == 2) Os.setenv("DM_D3_WIDE", "1", true); else Os.unsetenv("DM_D3_WIDE");
+                if (startedAspect == 2) Os.setenv("DM_D3_WIDE", "1", true); else if (startedAspect == 3) Os.setenv("DM_D3_WIDE", "4:3", true); else Os.unsetenv("DM_D3_WIDE");
                 // Widescreen only: loading screens' 16:9 art presented alone, stretched to the screen (hle_d3.c ls_present_crop)
                 Os.setenv("DM_D3_WIDE_STRETCH_LOADING", p.getBoolean("d3_stretch_loading", true) ? "1" : "0", true);
+                // Gear "Write logs" (issue #19, CrashLog.logsOn): off keeps boot.log in the private runtime dir (jni_android.c log_init)
+                Os.setenv("DM_LOG_PUBLIC", CrashLog.logsOn(this) ? "1" : "0", true);
+                // Mods / cheats (hle_d3_mods.c, GPL-2.0, from d3hack; all off by default, gear "Mods / cheats", showD3Mods): offline season,
+                // season buffs (any number at once), cheats, speed multipliers
+                int season = p.getInt("d3_season", 0);
+                if (season > 0) Os.setenv("DM_D3_SEASON", String.valueOf(season), true); else Os.unsetenv("DM_D3_SEASON");
+                String buffs = p.getString("d3_buffs", "");
+                if (!buffs.isEmpty()) Os.setenv("DM_D3_BUFFS", buffs, true); else Os.unsetenv("DM_D3_BUFFS");
+                String cheats = p.getString("d3_cheats", "");
+                if (!cheats.isEmpty()) Os.setenv("DM_D3_CHEATS", cheats, true); else Os.unsetenv("DM_D3_CHEATS");
+                String speed = p.getString("d3_speed", "1");
+                if (!"1".equals(speed)) Os.setenv("DM_D3_SPEED", speed, true); else Os.unsetenv("DM_D3_SPEED");
+                String atk = p.getString("d3_atkspeed", "1");
+                if (!"1".equals(atk)) Os.setenv("DM_D3_ATKSPEED", atk, true); else Os.unsetenv("DM_D3_ATKSPEED");
             } else {
             if (p.getBoolean("drs", false)) Os.setenv("DM_DOOM_DRS", "1", true); else Os.unsetenv("DM_DOOM_DRS");
             int res = p.getInt("res", 0);
@@ -442,6 +507,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             Os.setenv("DM_DRIVERS_DIR", drivers.getAbsolutePath(), true);
             extractBundledDrivers(drivers);   // the APK's default driver (Turnip 27, assets/drivers/<name>/; as DOOM 2016)
             importDrivers(new File(Environment.getExternalStorageDirectory(), "Download/" + DATA_DIR + "/drivers"), drivers);
+            if (D3) pruneDrivers(p, drivers);   // [D3] GitHub issue #9: copies of packages the player deleted from Download/.../drivers go too
             if (D3) updateDriversInBackground(drivers);   // [D3] (from the DOOM 2016 port) packages for other Adreno GPUs from drivers/manifest.json when online
             // Game language (DOOM takes it from the system like on the Switch: hle_oe.c GetDesiredLanguage reads DM_LANG; jni sets
             // DM_LANG from the phone locale only when it is unset). "" = follow the phone.
@@ -655,7 +721,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     byte[] zip = httpGet(o.getString("url"), 64 << 20);
                     String got = sha256(zip);
                     if (!got.equalsIgnoreCase(o.getString("sha256"))) { android.util.Log.e("dm", "driver " + name + ": SHA-256 mismatch " + got + ", skipped"); continue; }
-                    unzipDriver(new java.io.ByteArrayInputStream(zip), new File(dir, name));
+                    unzipDriver(new java.io.ByteArrayInputStream(zip), new File(dir, name)); markDriver(new File(dir, name), DRIVER_FROM_NET);
                     android.util.Log.i("dm", "driver " + name + ": downloaded (" + zip.length + " bytes)");
                 }
             } catch (Exception e) { android.util.Log.i("dm", "driver update skipped: " + e); }
@@ -726,10 +792,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 String name = d.getName().substring(0, d.getName().length() - 4); File out = new File(dst, name);
                 if (!hasDriverLib(out)) try (java.io.InputStream in = new java.io.FileInputStream(d)) { unzipDriver(in, out); android.util.Log.i("dm", "driver package " + name + ": unpacked from zip"); }
                 catch (java.io.IOException e) { android.util.Log.e("dm", "driver package " + d.getName() + ": " + e); }
+                if (hasDriverLib(out)) markDriver(out, DRIVER_FROM_USER);
                 continue;
             }
             File[] files = d.isDirectory() ? d.listFiles() : null; if (files == null) continue;
-            File out = new File(dst, d.getName()); out.mkdirs();
+            File out = new File(dst, d.getName()); out.mkdirs(); if (D3) markDriver(out, DRIVER_FROM_USER);
             for (File f : files) {
                 File o = new File(out, f.getName());
                 if (o.length() == f.length()) continue;
@@ -739,6 +806,52 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 } catch (java.io.IOException e) { android.util.Log.e("dm", "driver package " + d.getName() + ": " + e); }
             }
         }
+    }
+
+    // [D3] Where a package in files/drivers came from (GitHub issue #9: the list kept drivers the player had deleted from Download/.../drivers,
+    // their private copies stayed): a marker file in the package, written by importDrivers (the player's) and updateDriversInBackground (the
+    // manifest's). Packages from before the markers: the APK's assets and the cached manifest's names are not the player's, anything else is.
+    static final String DRIVER_FROM_USER = ".from-download", DRIVER_FROM_NET = ".from-manifest";
+    static void markDriver(File d, String mark) { File m = new File(d, mark); if (!m.isFile()) try { m.createNewFile(); } catch (IOException e) { /* only the pruning's hint */ } }
+    private boolean userDriver(File dir, String name) {
+        File d = new File(dir, name);
+        try { String[] b = getAssets().list("drivers"); if (b != null && java.util.Arrays.asList(b).contains(name)) return false; } catch (IOException e) { return false; }   // bundled Turnip: never
+        if (new File(d, DRIVER_FROM_USER).isFile()) return true;
+        if (new File(d, DRIVER_FROM_NET).isFile()) return false;
+        try { org.json.JSONArray pk = new org.json.JSONObject(readSmall(new File(dir, "manifest.json"))).getJSONArray("packages");
+            for (int i = 0; i < pk.length(); i++) if (name.equals(pk.getJSONObject(i).optString("name"))) return false; } catch (Exception e) { /* no cached manifest */ }
+        return true;
+    }
+    // The player's packages whose source (Download/<DATA_DIR>/drivers/<name>/ or <name>.zip) is gone are removed; a saved choice of one falls back to
+    // the default (the pref is dropped, defaultDriver decides). Nothing happens when the data folder cannot be listed (no file access yet).
+    private void pruneDrivers(SharedPreferences p, File dir) {
+        File src = new File(Environment.getExternalStorageDirectory(), "Download/" + DATA_DIR + "/drivers");
+        if (src.getParentFile() == null || src.getParentFile().listFiles() == null) return;
+        for (String name : driverPackages()) {
+            if (new File(src, name).isDirectory() || new File(src, name + ".zip").isFile() || !userDriver(dir, name)) continue;
+            deleteDriverTree(new File(dir, name));
+            crumb("driver package " + name + ": gone from " + src.getName() + "/, its copy removed");
+            if (name.equals(p.getString("driver", null))) { p.edit().remove("driver").apply(); crumb("driver: the saved choice " + name + " was removed, back to the default " + defaultDriver()); }
+        }
+    }
+    // The gear's "Delete driver" (a player's package): the private copy and its source in Download/<DATA_DIR>/drivers (else the next start imports it
+    // again); a chosen one falls back to the default. True when the copy is gone; a source that could not be deleted is logged.
+    private boolean deleteUserDriver(String name) {
+        File src = new File(Environment.getExternalStorageDirectory(), "Download/" + DATA_DIR + "/drivers");
+        File sd = new File(src, name), sz = new File(src, name + ".zip");
+        if (sd.isDirectory()) deleteDriverTree(sd);
+        if (sz.isFile()) sz.delete();
+        if (sd.exists() || sz.exists()) android.util.Log.e("dm", "driver package " + name + ": its source in " + src + " could not be deleted");
+        File d = new File(new File(getFilesDir(), "drivers"), name); deleteDriverTree(d);
+        SharedPreferences p = doomPrefs();
+        if (name.equals(p.getString("driver", null))) p.edit().remove("driver").apply();
+        crumb("driver package " + name + ": deleted by the player");
+        return !d.exists();
+    }
+    private String[] userDriverPackages() {
+        File dir = new File(getFilesDir(), "drivers"); java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        for (String n : driverPackages()) if (userDriver(dir, n)) out.add(n);
+        return out.toArray(new String[0]);
     }
 
     // [D3] (from the DOOM 2016 port) adrenotools package helpers: a folder with a .so; unpack a zip (meta.json + library, at the zip
@@ -836,7 +949,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             try { nativeFrameStats(guardStats); } catch (Throwable t) { guardStats[0] = 0; }
             if (guardStats[0] > 0 && !driverGuardDone) { driverGuard().delete(); driverGuardDone = true; android.util.Log.i("dm", "driver guard: first frames presented, guard cleared"); }
             if (guardStats[0] > 0 && !firstFrameDone) { firstFrameDone = true;
-                crumb(String.format(Locale.ROOT, "first frames presented %.1f s after the game started (%.0f fps, frame %.1f ms)", (android.os.SystemClock.uptimeMillis() - gameStartedAt) / 1000.0, guardStats[0], guardStats[1])); }
+                crumb(String.format(Locale.ROOT, "first frames presented %.1f s after the game started (%.0f fps, frame %.1f ms)", (android.os.SystemClock.uptimeMillis() - gameStartedAt) / 1000.0, guardStats[0], guardStats[1]));
+                if (updates != null) updates.start(); }   // [D3] the "a new version is out" check (once per start, after the first frames)
         }
         if (!(driverGuardDone && driverStatusDone && firstFrameDone)) view.postDelayed(this, 1000);
     } };
@@ -862,16 +976,18 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final int[] D3_DZ_LABELS = {R.string.d3_dz_none, R.string.d3_dz_small, R.string.d3_dz_medium, R.string.d3_dz_large};   // DEADZONES
     static final int[] D3_GEAR_LABELS = {R.string.d3_gear_normal, R.string.d3_gear_faded};   // DoomPadView.GEAR_*
     private int d3FpsLimit() { return doomPrefs().getInt("fps_limit", 60) == 30 ? 30 : 60; }
-    // [D3] The game's render size, as the native side picks it: docked 1600x900, handheld 1280x720; widescreen (DM_D3_WIDE=1,
+    // [D3] The game's render size, as the native side picks it: docked 1600x900, handheld 1280x720; widescreen (aspect 2, DM_D3_WIDE=1,
     // hle_d3.c dm_d3_wide_install) W x 900 with W = front_game_res(1) (front_android.c: 900 x screen aspect, rounded to 8, max 4096)
-    // rounded to 16 (max 3200; not wider than 1600 = no widescreen), handheld (W x 4/5 rounded to 16) x 720. 2400x1080 -> 2000x900 / 1600x720.
-    static int[] d3RenderSize(boolean wide, boolean handheld, int sw, int sh) {
+    // rounded to 16 (max 3200), or for a screen narrower than 16:9 900 x its aspect rounded to 16, at least 1200 (4:3); 4:3 (aspect 3,
+    // DM_D3_WIDE=4:3) 1200x900; handheld (W x 4/5 rounded to 16) x 720. 2400x1080 -> 2000x900 / 1600x720, 2048x1536 -> 1200x900 / 960x720.
+    static int[] d3RenderSize(int aspect, boolean handheld, int sw, int sh) {
         int w = 1600;
-        if (wide && sw > 0 && sh > 0 && (long) sw * 9 > (long) sh * 16) {
+        if (aspect == 3) w = 1200;
+        else if (aspect == 2 && sw > 0 && sh > 0 && (long) sw * 9 > (long) sh * 16) {
             long bw = Math.round(900.0 * sw / sh / 8) * 8; if (bw > 4096) bw = 4096;
             w = (int) Math.min(3200, (bw + 8) / 16 * 16);
-        }
-        if (w <= 1600) return handheld ? new int[] {1280, 720} : new int[] {1600, 900};
+        } else if (aspect == 2 && sw > 0 && sh > 0 && (long) sw * 9 < (long) sh * 16) w = (int) Math.max(1200, Math.round(900.0 * sw / sh / 16) * 16);
+        if (w == 1600) return handheld ? new int[] {1280, 720} : new int[] {1600, 900};
         return handheld ? new int[] {(w * 4 / 5 + 8) / 16 * 16, 720} : new int[] {w, 900};
     }
     @SuppressWarnings("deprecation")
@@ -885,11 +1001,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     int[] d3RenderSize() {
         if (startedAspect < 0) return null;
         int[] sc = screenSize();
-        return d3RenderSize(startedAspect == 2, startedHandheld, sc[0], sc[1]);
+        return d3RenderSize(startedAspect, startedHandheld, sc[0], sc[1]);
     }
     SurfaceView gameSurface() { return view; }
-    private void d3ModeLabels(RadioGroup modeG, android.content.Context ui, boolean wide) {
-        int[] sc = screenSize(), dk = d3RenderSize(wide, false, sc[0], sc[1]), hh = d3RenderSize(wide, true, sc[0], sc[1]);
+    private void d3ModeLabels(RadioGroup modeG, android.content.Context ui, int aspect) {
+        int[] sc = screenSize(), dk = d3RenderSize(aspect, false, sc[0], sc[1]), hh = d3RenderSize(aspect, true, sc[0], sc[1]);
         ((RadioButton) modeG.getChildAt(0)).setText(ui.getString(R.string.d3_mode_docked, dk[0] + "×" + dk[1]));
         ((RadioButton) modeG.getChildAt(1)).setText(ui.getString(R.string.d3_mode_handheld, hh[0] + "×" + hh[1]));
     }
@@ -930,13 +1046,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             note(box, ui.getString(R.string.d3_game_lang_note));
             heading(box, when(ui, R.string.d3_mode, false));
             RadioGroup modeG = radios(box, new String[] {"", ""}, 1000, p.getBoolean("handheld", false) ? 1 : 0, false);
-            d3ModeLabels(modeG, ui, p.getInt("aspect", 0) == 2);   // the size the next launch renders at (widescreen: the screen's aspect)
+            d3ModeLabels(modeG, ui, p.getInt("aspect", 0));   // the size the next launch renders at (widescreen: the screen's aspect)
             note(box, ui.getString(R.string.d3_mode_note));
             heading(box, when(ui, R.string.d3_aspect, true));
-            RadioGroup aspG = radios(box, new String[] {ui.getString(R.string.d3_aspect_bars), ui.getString(R.string.d3_aspect_stretch), ui.getString(R.string.d3_aspect_wide)}, 8000, p.getInt("aspect", 0), false);
+            RadioGroup aspG = radios(box, new String[] {ui.getString(R.string.d3_aspect_bars), ui.getString(R.string.d3_aspect_stretch), ui.getString(R.string.d3_aspect_wide), ui.getString(R.string.d3_aspect_43)}, 8000, p.getInt("aspect", 0), false);
             note(box, ui.getString(R.string.d3_aspect_wide_note));
             CheckBox stretchL = new CheckBox(this); stretchL.setText(when(ui, R.string.d3_stretch_loading, false)); stretchL.setChecked(p.getBoolean("d3_stretch_loading", true)); box.addView(stretchL);
-            aspG.setOnCheckedChangeListener((g, id) -> d3ModeLabels(modeG, ui, id == 8002));
+            aspG.setOnCheckedChangeListener((g, id) -> d3ModeLabels(modeG, ui, id - 8000));
             heading(box, when(ui, R.string.d3_sharpen, false));
             RadioGroup sh = radios(box, texts(ui, D3_SHARPEN_LABELS), 2000, p.getInt("sharpen", 0), true);
             heading(box, when(ui, R.string.d3_fps_limit, false));
@@ -949,6 +1065,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             heading(box, when(ui, R.string.d3_driver, false));
             // [D3] (from the DOOM 2016 port, 2.25) packages that cannot run here (driverProblem: another GPU family, a glibc build, a missing
             // library) are not offered; a line lists them with the reason
+            pruneDrivers(p, new File(getFilesDir(), "drivers"));   // issue #9: a package deleted from Download/.../drivers while the game runs leaves the list now
             java.util.ArrayList<String> offered = new java.util.ArrayList<>(); StringBuilder hiddenWhy = new StringBuilder();
             for (String n : driverPackages()) { String why = driverProblem(n); if (why == null) offered.add(n); else hiddenWhy.append("\n- ").append(driverLabel(n)).append(": ").append(driverReasonText(why)); }
             final String[] drvNames = offered.toArray(new String[0]);
@@ -966,8 +1083,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 if (fell || (st.length > 3 && !st[0].isEmpty())) note(box, (fell ? driverReasonText(st[2]) + (st.length > 3 ? "; " : "") : "") + (st.length > 3 ? st[3] : ""));
             }
             note(box, ui.getString(R.string.d3_driver_note));
+            final String[] userDrv = userDriverPackages();   // [D3] issue #9: the player's own packages can be deleted here (bundled / downloaded ones not)
+            android.widget.Button delDrv = new android.widget.Button(this); delDrv.setText(ui.getString(R.string.d3_driver_delete));
+            if (userDrv.length > 0) box.addView(delDrv);
             CheckBox rumble = new CheckBox(this); rumble.setText(when(ui, R.string.d3_rumble, false)); rumble.setChecked(p.getBoolean("rumble", false)); box.addView(rumble);
             CheckBox fps = new CheckBox(this); fps.setText(when(ui, R.string.d3_fps_counter, true)); fps.setChecked(cp.getBoolean("fps", true)); box.addView(fps);
+            CheckBox logsC = new CheckBox(this); logsC.setText(when(ui, R.string.d3_logs, false)); logsC.setChecked(p.getBoolean("d3_logs", true)); box.addView(logsC);   // CrashLog.logsOn
+            note(box, ui.getString(R.string.d3_logs_note));
             // On-screen controls (D3PadView): layout touch / gamepad (applies when picked, the pad is visible behind the dialog), opacity and
             // size of the whole layout (live sliders), and the edit mode for positions (kept per layout).
             heading(box, when(ui, R.string.d3_layout, true));
@@ -1015,10 +1137,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             Runnable save = () -> {
                 int drvPick = picked(drvG, 7000, drvNames.length + 1);
                 p.edit().putString("ui_lang", D3_UI_LANGS[picked(uiG, 9100, D3_UI_LANGS.length)]).putString("lang", D3_LANG_CODES[picked(langG, 5000, D3_LANG_CODES.length)])
-                    .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 3))
+                    .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 4))
                     .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
                     .putString("driver", drvPick > 0 ? drvNames[drvPick - 1] : "").putBoolean("rumble", rumble.isChecked())
-                    .putBoolean("d3_stretch_loading", stretchL.isChecked()).apply();
+                    .putBoolean("d3_stretch_loading", stretchL.isChecked()).putBoolean("d3_logs", logsC.isChecked()).apply();
                 cp.edit().putBoolean("fps", fps.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putBoolean("d3_hide_sticks", hideSt.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
                     .putInt("gear_mode", picked(gearG, 9000, D3_GEAR_LABELS.length)).putInt("d3_menu_swipe", picked(swG, 9300, 2)).apply();
                 if (d3Pad != null) d3Pad.reloadSettings();
@@ -1031,6 +1153,109 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 })
                 .setNegativeButton(ui.getString(R.string.d3_cancel), null).show();
             editB.setOnClickListener(v -> { save.run(); dlg.dismiss(); if (d3Pad != null) d3Pad.startEdit(); });   // drag controls on the pad; "Done" there ends it
+            delDrv.setOnClickListener(v -> {   // pick one, confirm, delete; the dialog is saved first (as the editor button) and reopened with the new list
+                String[] labels = new String[userDrv.length]; for (int i = 0; i < userDrv.length; i++) labels[i] = driverLabel(userDrv[i]);
+                new AlertDialog.Builder(this).setTitle(ui.getString(R.string.d3_driver_delete)).setItems(labels, (d, w) -> new AlertDialog.Builder(this)
+                    .setMessage(ui.getString(R.string.d3_driver_delete_confirm, labels[w]))
+                    .setPositiveButton(ui.getString(R.string.d3_driver_delete_yes), (d2, w2) -> {
+                        save.run(); dlg.dismiss();
+                        boolean ok = deleteUserDriver(userDrv[w]);
+                        android.widget.Toast.makeText(this, ui.getString(ok ? R.string.d3_driver_deleted : R.string.d3_driver_delete_failed, labels[w]), android.widget.Toast.LENGTH_LONG).show();
+                        showD3Settings();
+                    }).setNegativeButton(ui.getString(R.string.d3_cancel), null).show())
+                    .setNegativeButton(ui.getString(R.string.d3_cancel), null).show();
+            });
+        });
+    }
+    // [D3] "Mods / cheats" (hle_d3_mods.c, GPL-2.0, partly ported from d3hack by god-jester, see docs/THIRD_PARTY.md). Saved in "doom_graphics":
+    // d3_season (0 = off, else the season number) -> DM_D3_SEASON; d3_buffs (comma separated buff keys, any number) -> DM_D3_BUFFS;
+    // d3_cheats (comma separated keys) -> DM_D3_CHEATS; d3_speed / d3_atkspeed ("1" = off) -> DM_D3_SPEED / DM_D3_ATKSPEED. All apply on the
+    // next launch (applyDoomSettings). Three groups: Season, Season buffs (checkboxes), Cheats.
+    static final int D3_SEASON_FIRST = 14, D3_SEASON_LAST = 37;   // the seasons with a known theme (hle_d3_mods.c k_themes)
+    static final String[] D3_BUFF_KEYS = {"goblins", "bags", "grandeur", "nightmares", "triune", "pandemonium", "kanai", "tempests", "clones", "cube4",
+        "ethereal", "shards", "swarm", "sanctified", "alchemy", "nesting", "keystones", "bloodshards", "anniversary", "eggworld"};   // hle_d3_mods.c k_buffs keys
+    static final int[] D3_BUFF_LABELS = {R.string.d3_buff_goblins, R.string.d3_buff_bags, R.string.d3_buff_grandeur, R.string.d3_buff_nightmares,
+        R.string.d3_buff_triune, R.string.d3_buff_pandemonium, R.string.d3_buff_kanai, R.string.d3_buff_tempests, R.string.d3_buff_clones,
+        R.string.d3_buff_cube4, R.string.d3_buff_ethereal, R.string.d3_buff_shards, R.string.d3_buff_swarm, R.string.d3_buff_sanctified,
+        R.string.d3_buff_alchemy, R.string.d3_buff_nesting, R.string.d3_buff_keystones, R.string.d3_buff_bloodshards, R.string.d3_buff_anniversary,
+        R.string.d3_buff_eggworld};
+    // season -> its theme buffs (hle_d3_mods.c k_themes), for "Tick the chosen season's theme"
+    static final String[] D3_THEMES = {"14 goblins", "15 bags", "16 grandeur", "17 nightmares", "18 triune", "19 pandemonium", "20 kanai", "21 tempests",
+        "22 clones cube4", "24 ethereal", "25 shards", "26 swarm", "27 sanctified", "28 alchemy", "29 nesting", "30 shards", "31 kanai", "32 ethereal",
+        "33 clones cube4", "34 sanctified", "35 pandemonium", "36 shards", "37 kanai"};
+    static final String[] D3_CHEAT_KEYS = {"god", "dbgflags", "difficulty", "portal", "cooldowns", "resource", "craft", "cube", "gem100", "gemfast",
+        "orbs", "legendary", "equipany"};   // hle_d3_mods.c k_sites features and hooks
+    static final int[] D3_CHEAT_LABELS = {R.string.d3_cheat_god, R.string.d3_cheat_dbgflags, R.string.d3_cheat_difficulty, R.string.d3_cheat_portal,
+        R.string.d3_cheat_cooldowns, R.string.d3_cheat_resource, R.string.d3_cheat_craft, R.string.d3_cheat_cube, R.string.d3_cheat_gem100,
+        R.string.d3_cheat_gemfast, R.string.d3_cheat_orbs, R.string.d3_cheat_legendary, R.string.d3_cheat_equipany};
+    static final String[] D3_LOOT_KEYS = {"", "ancient", "primal"};   // also in d3_cheats (hooks LootRollForAncientLegendary)
+    static final String[] D3_MULTS = {"1", "1.25", "1.5", "2", "3"};
+    private android.widget.Spinner d3Spinner(LinearLayout box, String[] items, int at) {
+        android.widget.Spinner sp = new android.widget.Spinner(this);
+        sp.setAdapter(new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, items));
+        sp.setSelection(Math.max(0, Math.min(items.length - 1, at))); box.addView(sp); return sp;
+    }
+    private static String[] multLabels(android.content.Context ui) {
+        String[] l = new String[D3_MULTS.length]; l[0] = ui.getString(R.string.d3_off);
+        for (int i = 1; i < l.length; i++) l[i] = "×" + D3_MULTS[i];
+        return l;
+    }
+    void showD3Mods() {
+        runOnUiThread(() -> {
+            android.content.Context ui = d3Ui();
+            SharedPreferences p = doomPrefs();
+            LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(48, 24, 48, 0);
+            note(box, ui.getString(R.string.d3_mods_note));
+            // Season: the number seasonal heroes are created for
+            heading(box, when(ui, R.string.d3_season, false));
+            String[] seasons = new String[D3_SEASON_LAST - D3_SEASON_FIRST + 2]; seasons[0] = ui.getString(R.string.d3_off);
+            for (int i = 1; i < seasons.length; i++) seasons[i] = ui.getString(R.string.d3_season_n, D3_SEASON_FIRST + i - 1);
+            int sWas = p.getInt("d3_season", 0);
+            android.widget.Spinner seasonS = d3Spinner(box, seasons, sWas >= D3_SEASON_FIRST && sWas <= D3_SEASON_LAST ? sWas - D3_SEASON_FIRST + 1 : 0);
+            note(box, ui.getString(R.string.d3_season_note));
+            // Season buffs: every season's theme on its own, any number at once
+            heading(box, when(ui, R.string.d3_buffs, false));
+            java.util.List<String> bWas = java.util.Arrays.asList(p.getString("d3_buffs", "").split(","));
+            CheckBox[] buffC = new CheckBox[D3_BUFF_KEYS.length];
+            for (int i = 0; i < D3_BUFF_KEYS.length; i++) {
+                buffC[i] = new CheckBox(this); buffC[i].setText(ui.getString(D3_BUFF_LABELS[i])); buffC[i].setChecked(bWas.contains(D3_BUFF_KEYS[i])); box.addView(buffC[i]);
+            }
+            android.widget.Button themeB = new android.widget.Button(this); themeB.setText(ui.getString(R.string.d3_buffs_theme)); box.addView(themeB);
+            themeB.setOnClickListener(v -> {
+                int s = seasonS.getSelectedItemPosition(); if (s == 0) return;
+                String n = String.valueOf(D3_SEASON_FIRST + s - 1);
+                for (String t : D3_THEMES) { String[] f = t.split(" "); if (!f[0].equals(n)) continue;
+                    for (int k = 1; k < f.length; k++) for (int i = 0; i < D3_BUFF_KEYS.length; i++) if (D3_BUFF_KEYS[i].equals(f[k])) buffC[i].setChecked(true); }
+            });
+            note(box, ui.getString(R.string.d3_buffs_note));
+            // Cheats
+            heading(box, when(ui, R.string.d3_cheats, false));
+            java.util.List<String> cWas = java.util.Arrays.asList(p.getString("d3_cheats", "").split(","));
+            CheckBox[] cheatC = new CheckBox[D3_CHEAT_KEYS.length];
+            for (int i = 0; i < D3_CHEAT_KEYS.length; i++) {
+                cheatC[i] = new CheckBox(this); cheatC[i].setText(ui.getString(D3_CHEAT_LABELS[i])); cheatC[i].setChecked(cWas.contains(D3_CHEAT_KEYS[i])); box.addView(cheatC[i]);
+            }
+            TextView lootT = new TextView(this); lootT.setText(ui.getString(R.string.d3_loot)); lootT.setPadding(0, 16, 0, 0); box.addView(lootT);
+            int lootAt = cWas.contains("primal") ? 2 : cWas.contains("ancient") ? 1 : 0;
+            android.widget.Spinner lootS = d3Spinner(box, new String[] {ui.getString(R.string.d3_off), ui.getString(R.string.d3_loot_ancient), ui.getString(R.string.d3_loot_primal)}, lootAt);
+            TextView moveT = new TextView(this); moveT.setText(ui.getString(R.string.d3_speed)); moveT.setPadding(0, 16, 0, 0); box.addView(moveT);
+            android.widget.Spinner moveS = d3Spinner(box, multLabels(ui), java.util.Arrays.asList(D3_MULTS).indexOf(p.getString("d3_speed", "1")));
+            TextView atkT = new TextView(this); atkT.setText(ui.getString(R.string.d3_atkspeed)); atkT.setPadding(0, 16, 0, 0); box.addView(atkT);
+            android.widget.Spinner atkS = d3Spinner(box, multLabels(ui), java.util.Arrays.asList(D3_MULTS).indexOf(p.getString("d3_atkspeed", "1")));
+            note(box, ui.getString(R.string.d3_cheats_note));
+            android.widget.ScrollView scroll = new android.widget.ScrollView(this); scroll.addView(box);
+            new AlertDialog.Builder(this).setTitle(ui.getString(R.string.d3_mods_title)).setView(scroll)
+                .setPositiveButton(ui.getString(R.string.d3_save), (d, w) -> {
+                    int s = seasonS.getSelectedItemPosition();
+                    StringBuilder b = new StringBuilder(), c = new StringBuilder();
+                    for (int i = 0; i < D3_BUFF_KEYS.length; i++) if (buffC[i].isChecked()) b.append(b.length() > 0 ? "," : "").append(D3_BUFF_KEYS[i]);
+                    for (int i = 0; i < D3_CHEAT_KEYS.length; i++) if (cheatC[i].isChecked()) c.append(c.length() > 0 ? "," : "").append(D3_CHEAT_KEYS[i]);
+                    String loot = D3_LOOT_KEYS[lootS.getSelectedItemPosition()];
+                    if (!loot.isEmpty()) c.append(c.length() > 0 ? "," : "").append(loot);
+                    p.edit().putInt("d3_season", s > 0 ? D3_SEASON_FIRST + s - 1 : 0).putString("d3_buffs", b.toString()).putString("d3_cheats", c.toString())
+                        .putString("d3_speed", D3_MULTS[moveS.getSelectedItemPosition()]).putString("d3_atkspeed", D3_MULTS[atkS.getSelectedItemPosition()]).apply();
+                })
+                .setNegativeButton(ui.getString(R.string.d3_cancel), null).show();
         });
     }
     // [D3] A percentage slider that saves "doom_controls" <key> and updates the pad while it moves (shown behind the dialog).
@@ -1056,10 +1281,15 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         runOnUiThread(() -> {
             int fw = gameFrame.getWidth(), fh = gameFrame.getHeight();
             int mode = XC2 && startedAspect == 2 ? 2 : doomPrefs().getInt("aspect", XC2 ? ASPECT_DEFAULT : 0);
-            if (D3) mode = startedAspect == 2 ? 2 : mode == 2 ? 0 : mode;   // [D3] widescreen = whole screen only when the game was started with it
+            if (D3) mode = startedAspect >= 2 ? startedAspect : mode >= 2 ? 0 : mode;   // [D3] widescreen / 4:3 only when the game was started with it
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -1, android.view.Gravity.CENTER);
             if (mode == 0 && fw > 0 && fh > 0 && fw * 9 > fh * 16) lp.width = fh * 16 / 9;
             else if (mode == 0 && fw > 0 && fh > 0 && fw * 9 < fh * 16) lp.height = fw * 9 / 16;
+            else if (D3 && mode >= 2 && fw > 0 && fh > 0) {   // [D3] the game's own shape (4:3 picked, a screen below 4:3, width capped at 3200):
+                int[] rs = d3RenderSize();                     // bars where it differs by more than 1 % (the width's rounding to 16 is below that)
+                if (rs != null && (long) fw * rs[1] * 100 > (long) fh * rs[0] * 101) lp.width = (int) ((long) fh * rs[0] / rs[1]);
+                else if (rs != null && (long) fh * rs[0] * 100 > (long) fw * rs[1] * 101) lp.height = (int) ((long) fw * rs[1] / rs[0]);
+            }
             FrameLayout.LayoutParams cur = (FrameLayout.LayoutParams) view.getLayoutParams();
             if (cur == null || cur.width != lp.width || cur.height != lp.height || cur.gravity != lp.gravity) view.setLayoutParams(lp);
         });
@@ -1185,6 +1415,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             gameFrame.addView(touchOverlay, new FrameLayout.LayoutParams(-1, -1));
             touchOverlay.requestApplyInsets();
         }
+        if (D3 && textures == null) textures = new D3Textures(this, gameFrame, new D3Textures.Game() {
+            @Override public boolean running() { return started; }
+            @Override public void hold(boolean on) { DmActivity.this.hold(on); }
+            @Override public void log(String line) { crumb(line); } });
+        // [D3] GPUs without BC: offer the ASTC texture cache before the game starts; while it is made (up front only) the game waits
+        if (D3 && !started && textures.holdingStart()) return;
+        if (D3 && !started && !texturesAsked) { texturesAsked = true; if (textures.askAtStart(this::startHost)) return; }
         if (!view.getHolder().getSurface().isValid() || view.getWidth() <= 0 || view.getHeight() <= 0) return;
         File ext = getExternalFilesDir(null);
         if (ext == null) { showStartError(getString(R.string.dmAndroidStorage)); return; }
@@ -1431,7 +1668,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override protected void onStop() { if (started) { nativeFocus(1); if (DOOM && bootFailure == 0) CrashLog.session(this, "bg"); }
         if (DOOM && libraryLoaded) { android.content.Context app = getApplicationContext(); new Thread(() -> CrashLog.mirrorBootLogs(app), "dm-logcopy").start(); }   // [DOOM] boot.log next to crash.txt
         com.xiaoboluo.d2r.widget.HeroWidgetProvider.requestUpdate(this); super.onStop(); }
-    @Override protected void onDestroy() { if (DOOM && isFinishing()) { crumb("activity finishing"); CrashLog.sessionEnd(this); } if (displays != null) displays.unregisterDisplayListener(this); if (inputs != null) inputs.unregisterInputDeviceListener(this); if (inputDialog != null) inputDialog.dismiss(); if (current.get() == this) current.clear(); super.onDestroy(); }
+    @Override protected void onDestroy() { if (updates != null) updates.dismiss(); if (DOOM && isFinishing()) { crumb("activity finishing"); CrashLog.sessionEnd(this); } if (displays != null) displays.unregisterDisplayListener(this); if (inputs != null) inputs.unregisterInputDeviceListener(this); if (inputDialog != null) inputDialog.dismiss(); if (current.get() == this) current.clear(); super.onDestroy(); }
     @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) immersiveBars(); else releaseTouches(); }
 
     @Override public void surfaceCreated(SurfaceHolder h) {}
