@@ -173,7 +173,8 @@ game's Switch shaders need something the GPU lacks (all ported from the DOOM 201
 format-less storage writes or `shaderImageGatherExtended` (those shaders are skipped or degraded), no D24 depth (D32
 is used), no GPU timestamps, no linear filtering of some formats (nearest), no depth bounds / non-solid fill / depth bias
 clamp, no `nullDescriptor`, texel buffer limits, driver pipeline failures (skipped instead of fatal), interrupted fence
-waits on Mali. BC textures, which Mali and PowerVR cannot sample, are decoded on the GPU in batches. One boot.log line
+waits on Mali. BC textures, which Mali and PowerVR cannot sample, come from the ASTC texture cache that setup builds
+(`Download/Diablo3Mobile/astc`, about the BC size in memory), or without it are decoded on the GPU in batches (4-8x larger). One boot.log line
 lists what the device needed: `NVN fallbacks on this device: ...`. `DM_GFX_SIM_GPU=mali` (or `powervr`, `xclipse`) in
 `Download/Diablo3Mobile/dm/env` simulates such a GPU on a Snapdragon for testing. Reports (device, GPU, driver,
 `crash.txt`) are very welcome.
