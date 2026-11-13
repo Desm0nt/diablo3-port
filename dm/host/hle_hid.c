@@ -107,7 +107,20 @@ uint64_t dm_stick_last_ns(void) { return atomic_load(&g_stick_ns); }   // 「点
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }   // 游戏已取手柄的累计次数（前端据此判断一下按键是否已被游戏看到） | cumulative number of times the game has read the controller (the front end uses it to judge whether a key press has been seen by the game)
 
 static uint32_t connected_id(void) { return dm_opmode() == 0 ? NPAD_HANDHELD : 0; }   // 跟运行模式走（hle_oe.c 唯一来源） | follows the operation mode (hle_oe.c is the single source)
+#ifdef DM_GAME_D3
+// [D3] Local co-op on one phone (DM_MP_PADS, gear "Multiplayer"): players 2-4 are npads No2..No4 (ids 1..3), each a full-key controller fed by
+// its own physical controller (front_android.c routes devices to slots: dm_pad_set_n). That is what a docked Switch shows the game: D3 polls
+// Handheld + No1..No4 (main 0xf6c10: SetSupportedNpadIdType {0,1,2,3,0x20}; 0xf6f50 polls each pad object, 0xf7310 reads GetNpadStyleSet
+// and the GetNpadStates of the connected style), and a pad that turns connected is how another local player can join; in handheld mode the
+// game itself narrows the ids to {Handheld, No1} (table 0xeb3f84) - one player, as on the console. Slots stay disconnected (style 0, zero
+// states) until a controller is routed to them, so with DM_MP_PADS=0 (default) nothing differs from a single-player host.
+// Unlike player 1 (fill(): touch, scripts, UI pumps), these reads only copy the controller's buttons / sticks and latch short presses.
+static struct { _Atomic int on; _Atomic uint64_t btn, axes, latch; _Atomic int64_t sampling; } g_xpad[4];   // [1..3]
+#endif
 static uint32_t style_of(uint32_t id) {
+#ifdef DM_GAME_D3
+    if (id >= 1 && id <= 3) return dm_opmode() != 0 && atomic_load(&g_xpad[id].on) ? STYLE_FULLKEY : 0;
+#endif
     if (id != connected_id()) return 0;
     return id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY;
 }
@@ -1082,8 +1095,18 @@ HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoE
 // the controller applets without a result, StopSixAxisSensor.
 // GetNpadStates(out, n, id): newest first, n entries: the current state repeated with consecutive sampling numbers (no history on the host;
 // on hardware the 16-entry history is always full and games read all of it whatever count comes back - nxnative, Super Mario Odyssey).
+static void xpad_fill(NpadState *s, uint32_t id, uint32_t style) {   // players 2-4: the routed controller only
+    memset(s, 0, sizeof *s);
+    s->sampling = atomic_fetch_add(&g_xpad[id].sampling, 1) + 1;
+    if (!(style_of(id) & style)) return;
+    s->buttons = atomic_load(&g_xpad[id].btn) | atomic_exchange(&g_xpad[id].latch, 0);
+    uint64_t ax = atomic_load(&g_xpad[id].axes);
+    s->lx = (int16_t)ax; s->ly = (int16_t)(ax >> 16); s->rx = (int16_t)(ax >> 32); s->ry = (int16_t)(ax >> 48);
+    s->attributes = ATTR_CONNECTED | ATTR_LEFT_CONN | ATTR_RIGHT_CONN;
+}
 static int d3_states(NpadState *out, int n, uint32_t id, uint32_t style) {
     if (n <= 0) return 0;
+    if (id >= 1 && id <= 3) xpad_fill(out, id, style); else
     fill(out, id, style);
     for (int i = 1; i < n; i++) { out[i] = out[0]; out[i].sampling = out[0].sampling - i; }
     return n;
@@ -1101,6 +1124,21 @@ static void *_Atomic g_d3_style_ev[9];
 static int d3_style_slot(uint32_t id) { return id < 8 ? (int)id : id == NPAD_HANDHELD ? 8 : -1; }
 void dm_hid_style_changed(void) {   // hle_oe.c dm_set_opmode
     for (int i = 0; i < 9; i++) { void *ev = atomic_load(&g_d3_style_ev[i]); if (ev) hle_signal_system_event(ev); }
+}
+// Players 2-4 (front_android.c): a controller routed to slot 1..3 / gone. A change of "connected" signals that npad's style event, as the hid
+// service does when a controller attaches or detaches.
+void dm_pad_set_n(int slot, int connected, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
+void dm_pad_set_n(int slot, int connected, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    if (slot < 1 || slot > 3) return;
+    uint64_t prev = atomic_exchange(&g_xpad[slot].btn, connected ? buttons : 0);
+    if (connected) atomic_fetch_or(&g_xpad[slot].latch, buttons & ~prev);
+    atomic_store(&g_xpad[slot].axes, connected ? (uint64_t)(uint16_t)lx | (uint64_t)(uint16_t)ly << 16 | (uint64_t)(uint16_t)rx << 32 | (uint64_t)(uint16_t)ry << 48 : 0);
+    if (atomic_exchange(&g_xpad[slot].on, connected) != connected) {
+        if (!connected) atomic_store(&g_xpad[slot].latch, 0);
+        LOG("[coop] npad No%d (player %d) %s%s", slot + 1, slot + 1, connected ? "connected: full-key controller" : "disconnected",
+            connected && dm_opmode() == 0 ? " (handheld mode: the game only reads Handheld / No1, switch to docked for local co-op)" : "");
+        void *ev = atomic_load(&g_d3_style_ev[slot]); if (ev) hle_signal_system_event(ev);
+    }
 }
 HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", "controller style update event: bound, signalled for a connected controller and on mode switches",
           void, h_d3_BindStyleEv, const uint32_t *id, void *ev, int clear) {

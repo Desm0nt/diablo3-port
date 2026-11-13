@@ -69,16 +69,19 @@ static int sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint6
     return sk_idle(tv ? tv[0] * 1000 + tv[1] / 1000 : -1);
 }
 #endif
+#ifndef DM_GAME_D3   // [D3] [TL2] these overloads (and Listen) are in the local-play block at the end (real while local play is on)
 SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { (void)a; (void)b; (void)c; return sk_fail(); }
 SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { (void)s; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
+#endif
 #ifdef DM_GAME_DOOM
 HLE_FORCE("_ZN2nn6socket5CloseEi", "bsd close -> host close", int, h_sk_Close, int s) { int r = close(s); if (r < 0) t_skerr = errno; return r; }
 #else
 SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { (void)s; return sk_fail(); }
 #endif
+#ifndef DM_GAME_D3
 SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
@@ -86,11 +89,13 @@ SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, i
 SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c) { (void)s; (void)c; return sk_fail(); }
 SKF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, int t) { (void)f; (void)n; (void)t; return sk_fail(); }
 SKF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { (void)n; (void)r; (void)w; (void)e; (void)t; return sk_fail(); }
+#endif
 SKF("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", h_sk_EventFd, unsigned long v, int f) { (void)v; (void)f; return sk_fail(); }
 SKF("_ZN2nn6socket11EventFdReadEiPm", h_sk_EventFdRead, int s, unsigned long *v) { (void)s; (void)v; return sk_fail(); }
 SKF("_ZN2nn6socket12EventFdWriteEim", h_sk_EventFdWrite, int s, unsigned long v) { (void)s; (void)v; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
+#ifndef DM_GAME_D3
 HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "bsd 套接字服务（剪）", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
 HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "bsd 套接字服务（剪）", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return sk_fail(); }
 HLE_FORCE("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "bsd 套接字服务（剪）", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
@@ -98,6 +103,7 @@ HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "域名解�
     (void)h; (void)s; (void)hint; if (res) *res = NULL; return 4;   // EAI_FAIL
 }
 HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", "与 GetAddrInfo 配对（剪）", void, h_sk_FreeAddrInfo, void *ai) { (void)ai; }
+#endif
 HLE_FORCE("_ZN2nn6socket16GetHostEntByNameEPKcPKNS0_14ResolverOptionEm", "域名解析（剪）：NULL", void *, h_sk_GetHostEnt, const char *n, const void *o, unsigned long c) { (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }
 HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "套接字错误码由宿主记录", int, h_sk_GetLastError, void) { return t_skerr; }
 // C 接口
@@ -176,7 +182,22 @@ SSC("nnsslContextDestroy", h_nssl_CtxDestroy) SSC("nnsslContextGetContextId", h_
 #include <poll.h>
 #include <sys/select.h>
 #include <unistd.h>
+#ifdef DM_GAME_D3
+// [D3] [TL2] Local play (LAN emulation of nn::ldn, hle_ldn.c): once the game has opened an access point or a station, the sockets follow what
+// Horizon's bsd service really reports to these SDK 8 games (the semantics Ryujinx implements): errno values are Linux's (D3 main 0xc07a20 waits
+// for 115 = EINPROGRESS after a non-blocking connect, 0xb15d40 for 11 / 115), O_NONBLOCK is 0x800 (main 0xc07930 / 0xc08040 set it with
+// Fcntl(4)), IPPROTO_IP options are FreeBSD's (Pia: IP_TTL = 4), Listen is real (the host's game server, 0xb15ff0), numeric addresses resolve,
+// and LAN destinations are allowed (only the subnet / broadcast / session nodes / DM_LDN_PEERS; the internet stays unreachable). Until then
+// nothing changes: the offline answers below.
+int dm_ldn_lan_on(void);                    // hle_ldn.c: local play opened in this process
+int dm_ldn_lan_route(uint32_t ip);          // host order: a destination on the local-play network
+uint32_t dm_ldn_lan_bind(uint32_t ip);      // a bind to the configured "virtual" address (DM_LDN_IP behind NAT) -> any
+#define LAN_ON() dm_ldn_lan_on()
+#else
+#define LAN_ON() 0
+#endif
 static int bsd_errno(int e) {
+    if (LAN_ON()) return e;   // Linux numbering (see above)
     switch (e) {
     case EAGAIN: return 35; case EINPROGRESS: return 36; case EALREADY: return 37; case ENOTSOCK: return 38; case EMSGSIZE: return 40;
     case EADDRINUSE: return 48; case EADDRNOTAVAIL: return 49; case ENETDOWN: return 50; case ENETUNREACH: return 51; case ECONNRESET: return 54;
@@ -199,6 +220,10 @@ static void sa_out(const struct sockaddr_storage *in, socklen_t len, uint8_t *b,
 }
 static int sol_level(int l) { return l == 0xffff ? SOL_SOCKET : l; }
 static int so_opt(int l, int o) {
+    if (l == 0 && LAN_ON()) switch (o) {   // IPPROTO_IP, FreeBSD -> Linux
+    case 1: return IP_OPTIONS; case 2: return IP_HDRINCL; case 3: return IP_TOS; case 4: return IP_TTL; case 9: return IP_MULTICAST_IF;
+    case 10: return IP_MULTICAST_TTL; case 11: return IP_MULTICAST_LOOP; case 12: return IP_ADD_MEMBERSHIP; case 13: return IP_DROP_MEMBERSHIP; default: return o;
+    }
     if (l != 0xffff) return o;
     switch (o) {
     case 0x1: return SO_DEBUG; case 0x4: return SO_REUSEADDR; case 0x8: return SO_KEEPALIVE; case 0x10: return SO_DONTROUTE; case 0x20: return SO_BROADCAST;
@@ -214,15 +239,27 @@ SKD("_ZN2nn6socket6SocketEiii", h_d_sk_Socket, int a, int b, int c) {
     if (b & 0x20000000) t |= SOCK_NONBLOCK; if (b & 0x10000000) t |= SOCK_CLOEXEC;
     int fd = sk_ret(socket(a, t, c)); LOG("[net] socket(%d, %#x, %d) -> %d", a, b, c, fd); return fd;
 }
-SKD("_ZN2nn6socket4BindEiPK8sockaddrj", h_d_sk_Bind, int s, const uint8_t *a, unsigned l) { struct sockaddr_storage ss; socklen_t n = sa_in(a, l, &ss); return sk_ret(bind(s, (struct sockaddr *)&ss, n)); }
+SKD("_ZN2nn6socket4BindEiPK8sockaddrj", h_d_sk_Bind, int s, const uint8_t *a, unsigned l) {
+    struct sockaddr_storage ss; socklen_t n = sa_in(a, l, &ss);
+    if (LAN_ON() && ss.ss_family == AF_INET) { struct sockaddr_in *si = (struct sockaddr_in *)&ss; si->sin_addr.s_addr = htonl(dm_ldn_lan_bind(ntohl(si->sin_addr.s_addr))); }
+    int r = sk_ret(bind(s, (struct sockaddr *)&ss, n));
+    if (LAN_ON() && ss.ss_family == AF_INET) { static int k; if (k++ < 24) { const struct sockaddr_in *si = (const struct sockaddr_in *)&ss; uint32_t v = ntohl(si->sin_addr.s_addr);
+        LOG("[net] lan: bind %d to %u.%u.%u.%u:%u -> %d%s", s, v >> 24, v >> 16 & 255, v >> 8 & 255, v & 255, ntohs(si->sin_port), r, r < 0 ? " (failed)" : ""); } }
+    return r;
+}
 // Offline build: only loopback traffic may leave a socket (lobby / voice / HTTP all stay local, like D2R's offline port).
 static int sa_offline(const struct sockaddr_storage *ss) {
+    if (LAN_ON() && ss->ss_family == AF_INET) {
+        uint32_t ip = ntohl(((const struct sockaddr_in *)ss)->sin_addr.s_addr); int ok = dm_ldn_lan_route(ip);
+        static int k; if (k++ < 24) LOG("[net] lan: to %u.%u.%u.%u:%u %s", ip >> 24, ip >> 16 & 255, ip >> 8 & 255, ip & 255, ntohs(((const struct sockaddr_in *)ss)->sin_port), ok ? "allowed" : "refused (not on the local network)");
+        return !ok;
+    }
     if (ss->ss_family == AF_INET) return (ntohl(((const struct sockaddr_in *)ss)->sin_addr.s_addr) >> 24) != 127;
     return ss->ss_family != AF_UNSPEC;   // IPv6 and anything else: not allowed
 }
 SKD("_ZN2nn6socket7ConnectEiPK8sockaddrj", h_d_sk_Connect, int s, const uint8_t *a, unsigned l) {
     struct sockaddr_storage ss; socklen_t n = sa_in(a, l, &ss);
-    if (sa_offline(&ss)) { t_skerr = 51; return -1; }   // ENETUNREACH
+    if (sa_offline(&ss)) { t_skerr = LAN_ON() ? ENETUNREACH : 51; return -1; }   // ENETUNREACH
     return sk_ret(connect(s, (struct sockaddr *)&ss, n));
 }
 SKD("_ZN2nn6socket6AcceptEiP8sockaddrPj", h_d_sk_Accept, int s, uint8_t *a, unsigned *l) {
@@ -236,13 +273,18 @@ HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "bsd recvfrom -> host", lo
 HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "bsd send -> host", long, h_d_sk_Send, int s, const void *b, unsigned long n, int f) { long r = send(s, b, n, msg_flags(f) | MSG_NOSIGNAL); if (r < 0) { sk_ret(r); return -1; } return r; }
 HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "bsd sendto -> host", long, h_d_sk_SendTo, int s, const void *b, unsigned long n, int f, const uint8_t *a, unsigned l) {
     struct sockaddr_storage ss; socklen_t sl = sa_in(a, l, &ss);
-    if (a && sa_offline(&ss)) { t_skerr = 51; return -1; }   // offline: ENETUNREACH
+    if (a && sa_offline(&ss)) { t_skerr = LAN_ON() ? ENETUNREACH : 51; return -1; }   // offline: ENETUNREACH
     long r = sendto(s, b, n, msg_flags(f) | MSG_NOSIGNAL, a ? (struct sockaddr *)&ss : NULL, sl);
     if (r < 0) { sk_ret(r); return -1; } return r;
 }
 SKD("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", h_d_sk_Select, int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *t) { return sk_ret(select(n, r, w, e, t)); }
 SKD("_ZN2nn6socket4PollEP6pollfdmi", h_d_sk_Poll, struct pollfd *f, unsigned long n, int t) { return sk_ret(poll(f, (nfds_t)n, t)); }
 SKD("_ZN2nn6socket5FcntlEiiz", h_d_sk_Fcntl, int s, int c, long a) {
+    if (LAN_ON() && (c == F_GETFL || c == F_SETFL)) {   // Horizon's O_NONBLOCK 0x800 (the Linux value): only that bit is kept, as the bsd service does
+        int cur = fcntl(s, F_GETFL); if (cur < 0) return sk_ret(cur);
+        if (c == F_GETFL) return (cur & O_NONBLOCK) ? 0x800 : 0;
+        return sk_ret(fcntl(s, F_SETFL, (a & 0x800) ? (cur | O_NONBLOCK) : (cur & ~O_NONBLOCK)));
+    }
     if (c == F_GETFL) { int r = fcntl(s, F_GETFL); if (r < 0) return sk_ret(r); return (r & O_NONBLOCK) ? 4 : 0; }
     if (c == F_SETFL) { int cur = fcntl(s, F_GETFL); if (cur < 0) return sk_ret(cur); return sk_ret(fcntl(s, F_SETFL, (a & 4) ? (cur | O_NONBLOCK) : (cur & ~O_NONBLOCK))); }
     t_skerr = 22; return -1;
@@ -257,8 +299,38 @@ SKD("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", h_d_sk_GetName, int s, uint8_t *
     struct sockaddr_storage ss; socklen_t n = sizeof ss; int r = sk_ret(getsockname(s, (struct sockaddr *)&ss, &n)); if (r >= 0) sa_out(&ss, n, a, l); return r;
 }
 SKD("_ZN2nn6socket8ShutdownEii", h_d_sk_Shutdown, int s, int h) { return sk_ret(shutdown(s, h)); }
-SKD("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", h_d_sk_GetAddrInfo, const char *n, const char *sv, const void *h, void **r) { (void)n; (void)sv; (void)h; if (r) *r = NULL; t_skerr = SK_ENETDOWN; return -1; }   // name resolution stays offline
-HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "nothing was allocated", void, h_d_sk_FreeAddrInfo, void *a) { (void)a; }
+#ifdef DM_GAME_D3
+// [D3] [TL2] Local play: numeric IPv4 only (no DNS ever), in the guest's addrinfo layout (FreeBSD order: ai_canonname before ai_addr, as D3
+// main 0xb15d40 reads ai_addr at +0x20), with a marker so FreeAddrInfo frees only what came from here
+typedef struct bsd_ai { int32_t flags, family, socktype, protocol; uint32_t addrlen, mark; char *canon; uint8_t *addr; struct bsd_ai *next; uint8_t sa[16]; } bsd_ai;
+_Static_assert(offsetof(bsd_ai, addr) == 0x20 && offsetof(bsd_ai, next) == 0x28, "guest addrinfo");
+enum { BSD_AI_MARK = 0x4c414e31 };
+static int lan_getaddrinfo(const char *host, const char *serv, const int32_t *hints, void **res) {
+    if (res) *res = NULL;
+    struct in_addr in; long port = serv ? strtol(serv, NULL, 10) : 0;
+    if (!host) in.s_addr = htonl(hints && (hints[0] & 1) ? INADDR_ANY : INADDR_LOOPBACK);   // AI_PASSIVE
+    else if (inet_pton(AF_INET, host, &in) != 1) return 8;                                   // EAI_NONAME: names are not resolved
+    if (hints && hints[1] && hints[1] != 2) return 5;                                         // EAI_FAMILY: IPv4 only
+    bsd_ai *r = calloc(1, sizeof *r); if (!r) return 6;                                        // EAI_MEMORY
+    r->family = 2; r->socktype = hints && hints[2] ? hints[2] : 1; r->protocol = hints ? hints[3] : 0; r->addrlen = 16; r->mark = BSD_AI_MARK;
+    r->sa[0] = 16; r->sa[1] = 2; uint16_t p = htons((uint16_t)port); memcpy(r->sa + 2, &p, 2); memcpy(r->sa + 4, &in.s_addr, 4); r->addr = r->sa;
+    *res = r; return 0;
+}
+static void lan_freeaddrinfo(void *a) { bsd_ai *r = a; if (r && r->mark == BSD_AI_MARK) { r->mark = 0; free(r); } }
+#endif
+SKD("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", h_d_sk_GetAddrInfo, const char *n, const char *sv, const void *h, void **r) {
+#ifdef DM_GAME_D3
+    if (LAN_ON()) { int e = lan_getaddrinfo(n, sv, h, r); LOG("[net] lan: getaddrinfo(%s, %s) -> %d", n ? n : "(null)", sv ? sv : "(null)", e); return e; }
+#endif
+    (void)n; (void)sv; (void)h; if (r) *r = NULL; t_skerr = SK_ENETDOWN; return -1;   // name resolution stays offline
+}
+HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "nothing was allocated (local play: the numeric result is freed)", void, h_d_sk_FreeAddrInfo, void *a) {
+#ifdef DM_GAME_D3
+    lan_freeaddrinfo(a);
+#else
+    (void)a;
+#endif
+}
 HLE_FORCE("_ZN2nn6socket13GetHostByNameEPKc", "name resolution offline: NULL", void *, h_d_sk_GetHostByName, const char *n) { (void)n; t_skerr = SK_ENETDOWN; return NULL; }
 HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "last socket error (thread-local)", int, h_d_sk_GetLastErrno, void) { return t_skerr; }
 HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEP7in_addrS2_S2_S2_S2_", "offline: no IP configuration", Result, h_d_nifm_IpCfg, void *a, void *b, void *c, void *d, void *e) {
@@ -270,4 +342,35 @@ HLE_FORCE("_ZN2nn3ssl7ContextD1Ev", "ssl context object: no session", void, h_d_
 HLE_FORCE("_ZN2nn3ssl7Context15ImportServerPkiEPmPKcjNS0_17CertificateFormatE", "ssl offline: import fails", Result, h_d_ssl_ImportPki, void *self, uint64_t *id, const char *p, unsigned n, int fmt) {
     (void)self; (void)p; (void)n; (void)fmt; if (id) *id = 0; return RES_FAIL;
 }
+#ifdef DM_GAME_D3
+// [D3] [TL2] The typed overloads (Family / SockAddr / Level / MsgFlag ...; TL2's Pia uses them) and Listen: the offline failures above until
+// local play is on, then the same host sockets as the int / sockaddr overloads (the enums carry the same numbers). SendTo(MsgFlag) and
+// Shutdown(ShutdownMethod) were TL2-only stubs in hle_tl2.c.
+#define LANF(m, cname, ret, ...) HLE_FORCE(m, "[D3] [TL2] bsd socket: offline failure; a host socket while local play is on (hle_ldn.c)", ret, cname, __VA_ARGS__)
+LANF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_l_Socket, int, int a, int b, int c) { return LAN_ON() ? h_d_sk_Socket(a, b, c) : sk_fail(); }
+LANF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_l_Bind, int, int s, const uint8_t *a, unsigned n) { return LAN_ON() ? h_d_sk_Bind(s, a, n) : sk_fail(); }
+LANF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_l_Connect, int, int s, const uint8_t *a, unsigned n) { return LAN_ON() ? h_d_sk_Connect(s, a, n) : sk_fail(); }
+LANF("_ZN2nn6socket6ListenEii", h_l_Listen, int, int s, int n) { return LAN_ON() ? sk_ret(listen(s, n)) : sk_fail(); }
+LANF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_l_Accept, int, int s, uint8_t *a, unsigned *n) { return LAN_ON() ? h_d_sk_Accept(s, a, n) : sk_fail(); }
+LANF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_l_GetPeerName, int, int s, uint8_t *a, unsigned *l) {
+    if (!LAN_ON()) return sk_fail();
+    struct sockaddr_storage ss; socklen_t n = sizeof ss; int r = sk_ret(getpeername(s, (struct sockaddr *)&ss, &n)); if (r >= 0) sa_out(&ss, n, a, l); return r;
+}
+LANF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_l_GetSockName, int, int s, uint8_t *a, unsigned *l) { return LAN_ON() ? h_d_sk_GetName(s, a, l) : sk_fail(); }
+LANF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_l_GetSockOpt, int, int s, int l, int o, void *v, unsigned *n) { return LAN_ON() ? h_d_sk_GetOpt(s, l, o, v, n) : sk_fail(); }
+LANF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_l_SetSockOpt, int, int s, int l, int o, const void *v, unsigned n) { return LAN_ON() ? h_d_sk_SetOpt(s, l, o, v, n) : sk_fail(); }
+LANF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_l_Fcntl, int, int s, int c, long a) { return LAN_ON() ? h_d_sk_Fcntl(s, c, a) : sk_fail(); }
+LANF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_l_Poll, int, struct pollfd *f, unsigned long n, int t) { return LAN_ON() ? h_d_sk_Poll(f, n, t) : sk_fail(); }
+LANF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_l_Select, int, int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *t) { return LAN_ON() ? h_d_sk_Select(n, r, w, e, t) : sk_fail(); }
+LANF("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", h_l_Recv, long, int s, void *b, unsigned long n, int f) { return LAN_ON() ? h_d_sk_Recv(s, b, n, f) : sk_fail(); }
+LANF("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", h_l_RecvFrom, long, int s, void *b, unsigned long n, int f, uint8_t *a, unsigned *al) { return LAN_ON() ? h_d_sk_RecvFrom(s, b, n, f, a, al) : sk_fail(); }
+LANF("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", h_l_Send, long, int s, const void *b, unsigned long n, int f) { return LAN_ON() ? h_d_sk_Send(s, b, n, f) : sk_fail(); }
+LANF("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", h_l_SendTo, long, int s, const void *b, unsigned long n, int f, const uint8_t *a, unsigned al) { return LAN_ON() ? h_d_sk_SendTo(s, b, n, f, a, al) : sk_fail(); }
+LANF("_ZN2nn6socket8ShutdownEiNS0_14ShutdownMethodE", h_l_Shutdown, int, int s, int h) { return LAN_ON() ? h_d_sk_Shutdown(s, h) : sk_fail(); }
+LANF("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", h_l_GetAddrInfo, int, const char *h, const char *s, const int32_t *hint, void **res) {
+    if (LAN_ON()) return lan_getaddrinfo(h, s, hint, res);
+    if (res) *res = NULL; return 4;   // EAI_FAIL
+}
+LANF("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", h_l_FreeAddrInfo, void, void *ai) { lan_freeaddrinfo(ai); }
+#endif
 #endif

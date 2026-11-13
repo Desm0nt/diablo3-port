@@ -42,6 +42,13 @@
     <string name="d3_driver_deleted">Deleted: %1$s</string>
     <string name="d3_driver_delete_failed">Could not delete %1$s</string>
     <string name="d3_rumble">Vibration</string>
+    <string name="d3_mp_pads">Local co-op: controllers</string>
+    <string name="d3_mp_pads_off">Off (every controller is player 1)</string>
+    <string name="d3_mp_pads_each">Each controller is a player (the first one is player 1)</string>
+    <string name="d3_mp_pads_touch">Touch screen is player 1, controllers are players 2–4</string>
+    <string name="d3_mp_pads_note">Players 2–4 join the way they do on a docked Switch: press a button on their controller in the game. Docked mode only (handheld mode has one player, as on the Switch).</string>
+    <string name="d3_mp_lan">Local wireless play over Wi-Fi</string>
+    <string name="d3_mp_lan_note">The game\'s \"Local wireless\" play works between phones on the same Wi-Fi or hotspot. Nothing is opened until you start or search for a local game.</string>
     <string name="d3_fps_counter">FPS and frame time counter</string>
     <string name="d3_logs">Write logs</string>
     <string name="d3_logs_note">Logs go to Download/Diablo3Mobile/logs (boot.log, logcat.txt, several MB each). Off: none are written there; a crash report (crash.txt) is still written if the game crashes.</string>

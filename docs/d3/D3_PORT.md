@@ -380,3 +380,46 @@ ImGui-оверлей, resolution hack (свой `DM_D3_WIDE`). На телефо
 ожидание), первая версия (очередь под мьютексом) → кольцо: пустые задания 8 / 128 / 1200 в пачке — 1,9 → 4,1,
 3,3 → 8,4, 5,3 → 13,2 млн заданий/с; задания ~0,1 мкс — 0,75 → 3,1, 2,6 → 7,1, 5,9 → 9,9; задания ~1–2 мкс — 0,28 → 0,70,
 1,1 → 2,0, 2,2 → 2,2 (упор в сами задания). Сборка APK. На телефоне не проверено.
+
+## Мультиплеер: локальный кооп на одном телефоне и локальная беспроводная игра по LAN — 13.11.2026 (ветка `wt/mp`, issues #13, #16)
+
+Собрано, на телефонах **не проверено**. port-kb: HLE-34 (LDN по LAN), IN-11 (геймпады 2–4). Модуль `port-common/modules/ldn-lan` (тот же код в TL2).
+
+**Что игра делает на Switch** (update 2.7.7 main, headless Ghidra по копии `ghidra-ui`):
+- *Кооп на одной консоли:* `0xf6c10` — SetSupportedNpadIdType {No1..No4, Handheld} (`0xeb3f70`), пять объектов пада по 0x3180 (`0x17c87a8` Handheld,
+  `0x17cb930`.. No1..No4), BindNpadStyleSetUpdateEvent на каждый; `0xf6f50` каждый кадр опрашивает их (`0xf7310`: GetNpadStyleSet → «подключён»,
+  GetNpadStates своего стиля), подключение/отключение пада игрока → `0x160310` / `0x160420` (экран «подключите геймпад»). В портативном режиме
+  список сужается до {Handheld, No1} (`0xeb3f84`). `ShowControllerSupport(arg)` зовёт поток CSAThread (`0xf9a70`) — у нас сразу «готово».
+- *Локальная беспроводная:* сессия партии `0xc031b0` зовёт `ldn::Initialize` только для локальной сессии (флаг `0xc07f80`), транспорт 0x9a8
+  (`0xc12520`): хост `0xc134b0` — OpenAccessPoint, SetAdvertiseData(0x180), CreateNetwork, GetIpv4Address, сервер слушает адрес; клиент `0xc133a0` Scan,
+  `0xc12f80` OpenStation + Connect, адрес хоста — NetworkInfo+0x68; `0xc13aa0` опрашивает GetNetworkInfo + NodeLatestUpdate[8], себя ищет по адресу.
+  Сокеты игры (`0xc07930`..`0xc083d4`, сервер `0xb15ff0` с Listen, клиент `0xb15d40` через GetAddrInfo): errno — Linux-номера (115/11), O_NONBLOCK 0x800.
+  Онлайн (NEX / Battle.net-слой, nifm) не трогали — остаётся офлайн.
+
+**Что сделано:**
+- `hle_ldn_core.{h,c}` + `hle_ldn.c`: nn::ldn по LAN (протокол ldn_mitm, UDP/TCP 11452), узлы = реальные адреса телефонов; до OpenAccessPoint /
+  OpenStation ни сокета, ни потока. `hle_net.c`: после открытия локальной игры — семантика сокетов Horizon (Linux errno, O_NONBLOCK 0x800,
+  Listen, IPPROTO_IP-опции, числовой GetAddrInfo) и выход только в локальную сеть. `hle_d3.c`: заглушки ldn убраны.
+- `hle_hid.c`: npad No2..No4 — full-key, каждый от своего геймпада (`dm_pad_set_n`), событие стиля при подключении; `front_android.c`: маршрут
+  устройств (`xp_route`). ⚙: «Локальный кооп: геймпады» (выкл / каждый геймпад — игрок / экран — игрок 1, геймпады — 2–4) и
+  «Локальная беспроводная игра по Wi-Fi» (вкл. по умолчанию). Со следующего запуска.
+
+| Переключатель | Умолчание | Что |
+|---|---|---|
+| `DM_LDN` | 1 (⚙ «Локальная беспроводная…») | 0 = как раньше: Initialize падает, игра говорит «недоступно» |
+| `DM_MP_PADS` | 0 (⚙ «Локальный кооп») | 1 — каждый геймпад свой игрок; 2 — экран игрок 1, геймпады 2–4 |
+| `DM_LDN_IP`, `DM_LDN_PEERS`, `DM_LDN_PORT`, `DM_LDN_SCAN_MS` | — / — / 11452 / 600 | отладка: свой адрес[/маска], доп. адреса скана (VPN, сети без broadcast), порт, время скана |
+
+**План проверки на телефонах** (Mi 14 Ultra + Mi 13, один APK `work/D3-port-debug.apk` ветки `wt/mp`, оба в одной Wi-Fi; перед установкой — бэкап `files/save`):
+1. *Без мультиплеера (регрессия):* обычный запуск, 2–3 мин игры: в boot.log нет строк `[ldn]` / `[coop]` / `[net] lan:`; fps как на 0.2.12.
+2. *LAN, хост (телефон A):* меню игры → «Локальная беспроводная игра» → создать игру. Ждать: `[ldn] initialized: wlan0 <ip>/<mask>`,
+   `[ldn] local play opened…`, `[ldn] host: network created by "<имя>" at <ip>: local id 01001b300b9be000 …`, `[net] lan: bind N to <ip>:<порт>`.
+3. *LAN, клиент (телефон B):* «Локальная беспроводная игра» → поиск. Ждать на B: `[ldn] scan: 1 network(s) answered, 1 match …: host <ip A>`;
+   на A: `[ldn] host: scan from <ip B>:… answered`. Присоединиться: на A `[ldn] host: node 1 joined: "<имя B>" <ip B> …`, на B
+   `[ldn] station: connected to "<имя A>" … this node 1`, затем `[net] lan: to <ip A>:<порт> allowed` (трафик игры). Дальше — в игре оба героя.
+4. *Выход:* B выходит → на A `[ldn] host: node 1 (<ip B>) left: closed`; A закрывает игру → на B `[ldn] station: host link closed: disconnected`.
+5. *Если скан пуст:* проверить, что оба в одной подсети (строка `initialized`); попробовать точку доступа одного телефона; затем
+   `DM_LDN_PEERS=<ip другого>` в dm/env (только для отладки). ПК-проверка одного телефона: `python tools/ldn_peer.py scan` / `join` / `host`.
+6. *Кооп на одном телефоне:* ⚙ → «Локальный кооп» = «Экран — игрок 1, геймпады — 2–4», перезапуск, режим «В доке»; подключить BT-геймпад,
+   нажать кнопку: `[coop] controller device N -> player 2 (npad No2)`, `[coop] npad No2 (player 2) connected: full-key controller`; в игре —
+   вход второго игрока кнопкой на геймпаде. Отключить геймпад: `[coop] … removed: player 2's npad disconnected` (игра покажет свой экран).

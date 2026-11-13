@@ -3,7 +3,7 @@
 // the host does not have (nfp, ldn, applets, ...) and aborts. The port is offline-only: every network / local-wireless / amiibo /
 // shop entry answers "unavailable / none / empty" the way the SDK's callers expect, so the game takes its offline branch.
 // The nfp and ldn parts are ported from nxnative (MIT, https://github.com/seedds/nxnative: dm/host/hle_sdk16.c "nfp: amiibo",
-// dm/host/hle_offline.c "ldn: local wireless"); the account / fs / oe entries follow hle_xc2.c (itself from nxnative).
+// dm/host/hle_offline.c "ldn: local wireless", now replaced by hle_ldn.c); the account / fs / oe entries follow hle_xc2.c (itself from nxnative).
 #ifdef DM_GAME_D3
 #include "hle.h"
 #include <arpa/inet.h>
@@ -96,28 +96,8 @@ HLE_FORCE("_ZN2nn3nfp19StartGameDataEraserEPNS0_12DeviceHandleERKNS0_24AmiiboSet
 HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "amiibo nickname and owner settings applet: no tag",
           Result, h_nfp_Nick, NfpDeviceHandle *h, uint8_t *changed, void *reg, const void *p, const void *tag) { (void)h; (void)reg; (void)p; (void)tag; if (changed) *changed = 0; return nfp_no_tag("StartNicknameAndOwnerSettings"); }
 
-// ---- ldn: local wireless (nxnative hle_offline.c, MIT). Initialization fails, state is always "none"; MakeIpv4Address / operator== are
-// pure and stay in the SDK.
-HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless (cut): initialization fails", Result, h_ldn_Init, void) { LOG("ldn::Initialize: local wireless unavailable"); return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn8FinalizeEv", "local wireless (cut)", void, h_ldn_Fini, void) {}
-HLE_FORCE("_ZN2nn3ldn8GetStateEv", "local wireless (cut): state 0 (none)", int, h_ldn_State, void) { return 0; }
-HLE_FORCE("_ZN2nn3ldn11OpenStationEv", "local wireless (cut)", Result, h_ldn_OpenSta, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn12CloseStationEv", "local wireless (cut)", Result, h_ldn_CloseSta, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn15OpenAccessPointEv", "local wireless (cut)", Result, h_ldn_OpenAp, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn16CloseAccessPointEv", "local wireless (cut)", Result, h_ldn_CloseAp, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn10DisconnectEv", "local wireless (cut)", Result, h_ldn_Disc, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14DestroyNetworkEv", "local wireless (cut)", Result, h_ldn_Destroy, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn4ScanEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless scan (cut): 0 found", Result, h_ldn_Scan, void *out, int *n, int max, const void *f, int ch) {
-    (void)out; (void)max; (void)f; (void)ch; if (n) *n = 0; return RES_FAIL;
-}
-HLE_FORCE("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE", "local wireless (cut)", Result, h_ldn_Create,
-          const void *a, const void *b, const void *c) { (void)a; (void)b; (void)c; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_14SecurityConfigERKNS0_10UserConfigEiNS0_13ConnectOptionE", "local wireless (cut)", Result, h_ldn_Connect,
-          const void *a, const void *b, const void *c, int v, int o) { (void)a; (void)b; (void)c; (void)v; (void)o; return RES_FAIL; }
-// [D3] SDK 8 overload with the node update array (not in nxnative's list)
-HLE_FORCE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoEPNS0_16NodeLatestUpdateEi", "local wireless (cut)", Result, h_ldn_NetInfoU, void *o, void *upd, int n) { (void)o; (void)upd; (void)n; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", "local wireless (cut)", Result, h_ldn_Ip, uint32_t *a, uint32_t *m) { if (a) *a = 0; if (m) *m = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless (cut)", Result, h_ldn_Adv, const void *d, uint64_t n) { (void)d; (void)n; return RES_FAIL; }
+// ---- ldn: local wireless: hle_ldn.c (local play over the LAN, DM_LDN; DM_LDN=0 gives the former nxnative answers: Initialize fails, state
+// none). MakeIpv4Address / operator== are pure and stay in the SDK.
 
 // ---- Widescreen (DM_D3_WIDE, default off until tested on the phone; docs/d3/WIDESCREEN.md)
 // D3 never asks the system for a display size. NX64NVNCore's init (update 2.7.7 main 0xe7830, called once from the Gfx window open

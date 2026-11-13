@@ -138,6 +138,46 @@ static void pad_publish(void) {
     int32_t lx, ly, rx, ry; stick(g_pad_ax[0], g_pad_ax[1], &lx, &ly); stick(g_pad_ax[2], g_pad_ax[3], &rx, &ry);
     dm_pad_set(b, lx, ly, rx, ry);
 }
+#ifdef DM_GAME_D3
+// [D3] Local co-op (DM_MP_PADS, gear "Multiplayer"): controllers past player 1 get npads No2..No4 (hle_hid.c dm_pad_set_n), in the order they
+// first send input; a removed controller frees its slot (the game shows its own "reconnect the controller" for that player, as on a Switch).
+//   0 (default)  off: every controller drives player 1, the last one used wins (unchanged)
+//   1            each controller is a player: the first one is player 1 (with the touch pad), the next ones players 2-4
+//   2            the touch screen is player 1; every controller is players 2-4 (one phone + one Bluetooth pad = two players)
+void dm_pad_set_n(int slot, int connected, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);   // hle_hid.c
+static struct { int dev; uint64_t keys, trig; float ax[8]; } g_xp[4] = {{-1, 0, 0, {0}}, {-1, 0, 0, {0}}, {-1, 0, 0, {0}}, {-1, 0, 0, {0}}};   // UI thread only; [1..3]
+static int mp_mode(void) {
+    static int m = -1;
+    if (m < 0) { const char *e = getenv("DM_MP_PADS"); m = e ? atoi(e) : 0; if (m < 0 || m > 2) m = 0; if (m) LOG("[coop] DM_MP_PADS=%d: %s", m, m == 1 ? "each controller is a player (the first one is player 1)" : "the touch screen is player 1, controllers are players 2-4"); }
+    return m;
+}
+static void stick(float x, float y, int32_t *ox, int32_t *oy);
+// 0: player 1's channel (the code below), 1..3: an extra player's slot, -1: no slot left (the input is dropped)
+static int xp_route(int device) {
+    int m = mp_mode();
+    if (!m || device == 0x7d00) return 0;   // 0x7d00: the on-screen pad (DoomPadView) is always player 1
+    for (int i = 1; i < 4; i++) if (g_xp[i].dev == device) return i;
+    if (m == 1 && (g_pad_dev < 0 || g_pad_dev == device)) return 0;
+    for (int i = 1; i < 4; i++) if (g_xp[i].dev < 0) {
+        g_xp[i].dev = device; g_xp[i].keys = g_xp[i].trig = 0; memset(g_xp[i].ax, 0, sizeof g_xp[i].ax);
+        LOG("[coop] controller device %d -> player %d (npad No%d)", device, i + 1, i + 1);
+        return i;
+    }
+    static int full; if (!full++) LOG("[coop] controller device %d: players 2-4 are taken, its input is ignored", device);
+    return -1;
+}
+static void xp_publish(int i) {
+    uint64_t b = g_xp[i].keys; float *ax = g_xp[i].ax;
+    for (int k = 0; k < 2; k++) { uint64_t bit = k ? DM_BTN_ZR : DM_BTN_ZL; float v = ax[4 + k];
+        if (v > 0.35f) g_xp[i].trig |= bit; else if (v < 0.25f) g_xp[i].trig &= ~bit; }
+    b |= g_xp[i].trig;
+    if (ax[6] < -0.5f) b |= DM_BTN_LEFT; if (ax[6] > 0.5f) b |= DM_BTN_RIGHT;
+    if (ax[7] < -0.5f) b |= DM_BTN_UP; if (ax[7] > 0.5f) b |= DM_BTN_DOWN;
+    int32_t lx, ly, rx, ry; int save = g_pad_dev; g_pad_dev = -1;   // stick(): the physical controllers' dead zone
+    stick(ax[0], ax[1], &lx, &ly); stick(ax[2], ax[3], &rx, &ry); g_pad_dev = save;
+    dm_pad_set_n(i, 1, b, lx, ly, rx, ry);
+}
+#endif
 static void pad_using(int device) {
     if (device == g_pad_dev) return;
     if (g_pad_dev >= 0) { g_pad_keys = g_pad_trig = 0; memset(g_pad_ax, 0, sizeof g_pad_ax); }   // another controller took over: nothing stays held from the old one
@@ -151,6 +191,11 @@ int front_android_pad_key(int device, int keycode, int down) {
         if (down && keycode >= 0 && keycode < 512 && !(seen[keycode >> 3] >> (keycode & 7) & 1)) { seen[keycode >> 3] |= (uint8_t)(1 << (keycode & 7)); LOG("[input] controller key %d (device %d): not mapped", keycode, device); }
         return 0;
     }
+#ifdef DM_GAME_D3
+    { int sl = xp_route(device);
+      if (sl < 0) return 1;
+      if (sl > 0) { if (down) g_xp[sl].keys |= bit; else g_xp[sl].keys &= ~bit; xp_publish(sl); return 1; } }
+#endif
     pad_using(device);
     { static int n; if (down && n++ < 20) LOG("[input] key %d (device %d) -> button %#llx", keycode, device, (unsigned long long)bit); }
     if (down) g_pad_keys |= bit; else g_pad_keys &= ~bit;
@@ -158,11 +203,23 @@ int front_android_pad_key(int device, int keycode, int down) {
     return 1;
 }
 void front_android_pad_axes(int device, const float axes[8]) {
+#ifdef DM_GAME_D3
+    { int sl = xp_route(device);
+      if (sl < 0) return;
+      if (sl > 0) { memcpy(g_xp[sl].ax, axes, sizeof g_xp[sl].ax); xp_publish(sl); return; } }
+#endif
     pad_using(device);
     memcpy(g_pad_ax, axes, sizeof g_pad_ax);
     pad_publish();
 }
 void front_android_pad_removed(int device) {
+#ifdef DM_GAME_D3
+    for (int i = 1; i < 4; i++) if (g_xp[i].dev == device) {
+        g_xp[i].dev = -1; g_xp[i].keys = g_xp[i].trig = 0; memset(g_xp[i].ax, 0, sizeof g_xp[i].ax);
+        dm_pad_set_n(i, 0, 0, 0, 0, 0, 0); LOG("[coop] controller device %d removed: player %d's npad disconnected", device, i + 1);
+        return;
+    }
+#endif
     if (device != g_pad_dev) return;
     g_pad_keys = g_pad_trig = 0; memset(g_pad_ax, 0, sizeof g_pad_ax); g_pad_dev = -1;
     dm_pad_set(0, 0, 0, 0, 0); dm_haptics_android_device(-1);

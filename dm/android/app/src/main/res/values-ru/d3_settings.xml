@@ -41,6 +41,13 @@
     <string name="d3_driver_deleted">Удалён: %1$s</string>
     <string name="d3_driver_delete_failed">Не удалось удалить %1$s</string>
     <string name="d3_rumble">Вибрация</string>
+    <string name="d3_mp_pads">Локальный кооп: геймпады</string>
+    <string name="d3_mp_pads_off">Выкл. (любой геймпад — игрок 1)</string>
+    <string name="d3_mp_pads_each">Каждый геймпад — свой игрок (первый — игрок 1)</string>
+    <string name="d3_mp_pads_touch">Экран — игрок 1, геймпады — игроки 2–4</string>
+    <string name="d3_mp_pads_note">Игроки 2–4 входят так же, как на Switch в доке: нажать кнопку на своём геймпаде в игре. Только режим «В доке» (в портативном режиме один игрок, как на Switch).</string>
+    <string name="d3_mp_lan">Локальная беспроводная игра по Wi-Fi</string>
+    <string name="d3_mp_lan_note">«Локальная беспроводная» игра работает между телефонами в одной сети Wi-Fi или на одной точке доступа. Пока не создана или не ищется локальная игра, ничего не открывается.</string>
     <string name="d3_fps_counter">Счётчик FPS и времени кадра</string>
     <string name="d3_logs">Записывать логи</string>
     <string name="d3_logs_note">Логи пишутся в Download/Diablo3Mobile/logs (boot.log, logcat.txt, по несколько МБ). Выкл: туда ничего не пишется; если игра вылетит, отчёт о сбое (crash.txt) всё равно сохранится.</string>

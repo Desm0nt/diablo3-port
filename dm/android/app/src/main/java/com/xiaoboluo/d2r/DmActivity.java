@@ -449,6 +449,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final int ASPECT_DEFAULT = 2;
     private int startedAspect = -1;   // the aspect mode the running game was started with (widened needs a restart)
     private boolean startedHandheld;  // [D3] the Switch mode the running game was started with (DM_OPMODE 0)
+    private int startedMpPads;        // [D3] local co-op controllers mode the running game was started with (DM_MP_PADS): 2 keeps the touch pad for player 1
     static final float[] LOOK_GAINS = {0.6f, 0.8f, 1.0f, 1.3f, 1.7f};
     static final String[] LOOK_LABELS = {"0.6", "0.8", "1.0", "1.3", "1.7"};
     static final float[] DEADZONES = {0f, 0.08f, 0.15f, 0.25f};
@@ -492,6 +493,12 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 if (!"1".equals(speed)) Os.setenv("DM_D3_SPEED", speed, true); else Os.unsetenv("DM_D3_SPEED");
                 String atk = p.getString("d3_atkspeed", "1");
                 if (!"1".equals(atk)) Os.setenv("DM_D3_ATKSPEED", atk, true); else Os.unsetenv("DM_D3_ATKSPEED");
+                // Multiplayer (gear "Multiplayer", next launch): local co-op with several controllers (hle_hid.c npads No2..No4, front_android.c:
+                // 0 off = every controller is player 1, 1 = each controller its own player, the first one player 1, 2 = the touch screen is player 1,
+                // controllers players 2-4); local wireless play over the LAN (hle_ldn.c, on by default: nothing opens until the game's local play does)
+                startedMpPads = p.getInt("mp_pads", 0);
+                Os.setenv("DM_MP_PADS", String.valueOf(startedMpPads), true);
+                Os.setenv("DM_LDN", p.getBoolean("mp_lan", true) ? "1" : "0", true);
             } else {
             if (p.getBoolean("drs", false)) Os.setenv("DM_DOOM_DRS", "1", true); else Os.unsetenv("DM_DOOM_DRS");
             int res = p.getInt("res", 0);
@@ -1090,6 +1097,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             CheckBox fps = new CheckBox(this); fps.setText(when(ui, R.string.d3_fps_counter, true)); fps.setChecked(cp.getBoolean("fps", true)); box.addView(fps);
             CheckBox logsC = new CheckBox(this); logsC.setText(when(ui, R.string.d3_logs, false)); logsC.setChecked(p.getBoolean("d3_logs", true)); box.addView(logsC);   // CrashLog.logsOn
             note(box, ui.getString(R.string.d3_logs_note));
+            // [D3] Multiplayer: local co-op on this phone with several controllers (players 2-4 on their own npads, as on a docked Switch) and
+            // local wireless play with other phones on the same Wi-Fi / hotspot (nn::ldn over the LAN); both from the next launch
+            heading(box, when(ui, R.string.d3_mp_pads, false));
+            RadioGroup mpG = radios(box, new String[] {ui.getString(R.string.d3_mp_pads_off), ui.getString(R.string.d3_mp_pads_each), ui.getString(R.string.d3_mp_pads_touch)}, 9400, Math.max(0, Math.min(2, p.getInt("mp_pads", 0))), false);
+            note(box, ui.getString(R.string.d3_mp_pads_note));
+            CheckBox lanC = new CheckBox(this); lanC.setText(when(ui, R.string.d3_mp_lan, false)); lanC.setChecked(p.getBoolean("mp_lan", true)); box.addView(lanC);
+            note(box, ui.getString(R.string.d3_mp_lan_note));
             // On-screen controls (D3PadView): layout touch / gamepad (applies when picked, the pad is visible behind the dialog), opacity and
             // size of the whole layout (live sliders), and the edit mode for positions (kept per layout).
             heading(box, when(ui, R.string.d3_layout, true));
@@ -1140,7 +1154,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 4))
                     .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
                     .putString("driver", drvPick > 0 ? drvNames[drvPick - 1] : "").putBoolean("rumble", rumble.isChecked())
-                    .putBoolean("d3_stretch_loading", stretchL.isChecked()).putBoolean("d3_logs", logsC.isChecked()).apply();
+                    .putBoolean("d3_stretch_loading", stretchL.isChecked()).putBoolean("d3_logs", logsC.isChecked())
+                    .putInt("mp_pads", picked(mpG, 9400, 3)).putBoolean("mp_lan", lanC.isChecked()).apply();
                 cp.edit().putBoolean("fps", fps.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putBoolean("d3_hide_sticks", hideSt.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
                     .putInt("gear_mode", picked(gearG, 9000, D3_GEAR_LABELS.length)).putInt("d3_menu_swipe", picked(swG, 9300, 2)).apply();
                 if (d3Pad != null) d3Pad.reloadSettings();
@@ -1657,7 +1672,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         String s = list.toString();   // one log per change: which device hides the on-screen pad is visible in boot.log
         if (!s.equals(lastInputDevices)) { lastInputDevices = s; android.util.Log.i("dm", "[input] devices (on-screen pad " + (any ? "hidden: controller" : "shown") + "):" + s); }
         if (doomPad != null) doomPad.setControllerMode(any);
-        if (d3Pad != null) d3Pad.setControllerMode(any);
+        if (d3Pad != null) d3Pad.setControllerMode(any && startedMpPads != 2);   // [D3] co-op mode 2: the touch pad stays for player 1
     }
     @Override public void onDisplayAdded(int id) { updateRefresh(); }
     @Override public void onDisplayRemoved(int id) { updateRefresh(); }
