@@ -222,6 +222,21 @@ void doom_alias_init(void) {
     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");
     if (!(g_alias_exposed = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_exposed))) die("alias exposure bitmap calloc");
 }
+// [D3] Host helpers that read the game's own data (hle_d3_ui.c: the UI control map) copy straight out of guest memory committed
+// with MapPhysicalMemory. D3 keeps all of its memory in the alias region (SetHeapSize stays 0, census "heap 0 MB"), so the
+// heap-only fast path never matched and every field cost a process_vm_readv. The check and the copy run under g_map_lock, the lock
+// MapPhysicalMemory / UnmapPhysicalMemory hold across their mprotect and bitmap update, so no page can be dropped in between.
+// 1 = copied; 0 = not copied (outside the alias region, or a 4 KiB page of the range not committed: the caller falls back).
+int dm_guest_alias_read(uint64_t a, void *out, size_t n) {
+    uint64_t b = (uint64_t)(uintptr_t)g_alias;
+    if (!g_alias_bits || !n || a < b || n > g_alias_cap || a - b > g_alias_cap - n) return 0;
+    uint64_t p0 = (a - b) >> 12, p1 = (a - b + n - 1) >> 12; int ok = 1;
+    pthread_mutex_lock(&g_map_lock);
+    for (uint64_t p = p0; p <= p1 && ok; p++) ok = (int)((atomic_load_explicit(&g_alias_bits[p >> 6], memory_order_relaxed) >> (p & 63)) & 1);
+    if (ok) memcpy(out, (const void *)(uintptr_t)a, n);
+    pthread_mutex_unlock(&g_map_lock);
+    return ok;
+}
 // [ETERNAL] ring of the last MapPhysicalMemory / UnmapPhysicalMemory calls: a crash inside the alias region names the calls that covered its page
 static struct { uint64_t a, n; int map; unsigned tid; } g_alias_ring[1024]; static _Atomic unsigned g_alias_ring_n;
 static void alias_ring_add(uint64_t a, uint64_t n, int map) { unsigned i = atomic_fetch_add(&g_alias_ring_n, 1) & 1023; g_alias_ring[i].a = a; g_alias_ring[i].n = n; g_alias_ring[i].map = map; g_alias_ring[i].tid = (unsigned)gettid(); }
