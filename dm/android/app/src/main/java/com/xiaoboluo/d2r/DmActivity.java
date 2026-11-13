@@ -217,7 +217,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 android.widget.Toast.makeText(app, d3Ui().getString(R.string.d3_toast_last_crash, f.getAbsolutePath()), android.widget.Toast.LENGTH_LONG).show();
             }));
             if (last != null) crumb(last);
-            CrashLog.startLiveLogcat(app);   // [D3] logs/logcat.txt written live (survives a kill); after checkPrevious read the old run
+            // [D3] logs/logcat.txt written live (survives a kill); after checkPrevious read the old run (its report took boot.log's snapshot already).
+            // Gear "Write logs" off (issue #19): no capture, and the old copies in logs/ go
+            if (CrashLog.logsOn(app)) CrashLog.startLiveLogcat(app); else CrashLog.dropLogs(app);
         }
     }
     // A start / boot failure screen: the report now (the screen names it), once per message and process.
@@ -427,6 +429,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 if (startedAspect == 2) Os.setenv("DM_D3_WIDE", "1", true); else Os.unsetenv("DM_D3_WIDE");
                 // Widescreen only: loading screens' 16:9 art presented alone, stretched to the screen (hle_d3.c ls_present_crop)
                 Os.setenv("DM_D3_WIDE_STRETCH_LOADING", p.getBoolean("d3_stretch_loading", true) ? "1" : "0", true);
+                // Gear "Write logs" (issue #19, CrashLog.logsOn): off keeps boot.log in the private runtime dir (jni_android.c log_init)
+                Os.setenv("DM_LOG_PUBLIC", CrashLog.logsOn(this) ? "1" : "0", true);
             } else {
             if (p.getBoolean("drs", false)) Os.setenv("DM_DOOM_DRS", "1", true); else Os.unsetenv("DM_DOOM_DRS");
             int res = p.getInt("res", 0);
@@ -442,6 +446,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             Os.setenv("DM_DRIVERS_DIR", drivers.getAbsolutePath(), true);
             extractBundledDrivers(drivers);   // the APK's default driver (Turnip 27, assets/drivers/<name>/; as DOOM 2016)
             importDrivers(new File(Environment.getExternalStorageDirectory(), "Download/" + DATA_DIR + "/drivers"), drivers);
+            if (D3) pruneDrivers(p, drivers);   // [D3] GitHub issue #9: copies of packages the player deleted from Download/.../drivers go too
             if (D3) updateDriversInBackground(drivers);   // [D3] (from the DOOM 2016 port) packages for other Adreno GPUs from drivers/manifest.json when online
             // Game language (DOOM takes it from the system like on the Switch: hle_oe.c GetDesiredLanguage reads DM_LANG; jni sets
             // DM_LANG from the phone locale only when it is unset). "" = follow the phone.
@@ -655,7 +660,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     byte[] zip = httpGet(o.getString("url"), 64 << 20);
                     String got = sha256(zip);
                     if (!got.equalsIgnoreCase(o.getString("sha256"))) { android.util.Log.e("dm", "driver " + name + ": SHA-256 mismatch " + got + ", skipped"); continue; }
-                    unzipDriver(new java.io.ByteArrayInputStream(zip), new File(dir, name));
+                    unzipDriver(new java.io.ByteArrayInputStream(zip), new File(dir, name)); markDriver(new File(dir, name), DRIVER_FROM_NET);
                     android.util.Log.i("dm", "driver " + name + ": downloaded (" + zip.length + " bytes)");
                 }
             } catch (Exception e) { android.util.Log.i("dm", "driver update skipped: " + e); }
@@ -726,10 +731,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 String name = d.getName().substring(0, d.getName().length() - 4); File out = new File(dst, name);
                 if (!hasDriverLib(out)) try (java.io.InputStream in = new java.io.FileInputStream(d)) { unzipDriver(in, out); android.util.Log.i("dm", "driver package " + name + ": unpacked from zip"); }
                 catch (java.io.IOException e) { android.util.Log.e("dm", "driver package " + d.getName() + ": " + e); }
+                if (hasDriverLib(out)) markDriver(out, DRIVER_FROM_USER);
                 continue;
             }
             File[] files = d.isDirectory() ? d.listFiles() : null; if (files == null) continue;
-            File out = new File(dst, d.getName()); out.mkdirs();
+            File out = new File(dst, d.getName()); out.mkdirs(); if (D3) markDriver(out, DRIVER_FROM_USER);
             for (File f : files) {
                 File o = new File(out, f.getName());
                 if (o.length() == f.length()) continue;
@@ -739,6 +745,52 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 } catch (java.io.IOException e) { android.util.Log.e("dm", "driver package " + d.getName() + ": " + e); }
             }
         }
+    }
+
+    // [D3] Where a package in files/drivers came from (GitHub issue #9: the list kept drivers the player had deleted from Download/.../drivers,
+    // their private copies stayed): a marker file in the package, written by importDrivers (the player's) and updateDriversInBackground (the
+    // manifest's). Packages from before the markers: the APK's assets and the cached manifest's names are not the player's, anything else is.
+    static final String DRIVER_FROM_USER = ".from-download", DRIVER_FROM_NET = ".from-manifest";
+    static void markDriver(File d, String mark) { File m = new File(d, mark); if (!m.isFile()) try { m.createNewFile(); } catch (IOException e) { /* only the pruning's hint */ } }
+    private boolean userDriver(File dir, String name) {
+        File d = new File(dir, name);
+        try { String[] b = getAssets().list("drivers"); if (b != null && java.util.Arrays.asList(b).contains(name)) return false; } catch (IOException e) { return false; }   // bundled Turnip: never
+        if (new File(d, DRIVER_FROM_USER).isFile()) return true;
+        if (new File(d, DRIVER_FROM_NET).isFile()) return false;
+        try { org.json.JSONArray pk = new org.json.JSONObject(readSmall(new File(dir, "manifest.json"))).getJSONArray("packages");
+            for (int i = 0; i < pk.length(); i++) if (name.equals(pk.getJSONObject(i).optString("name"))) return false; } catch (Exception e) { /* no cached manifest */ }
+        return true;
+    }
+    // The player's packages whose source (Download/<DATA_DIR>/drivers/<name>/ or <name>.zip) is gone are removed; a saved choice of one falls back to
+    // the default (the pref is dropped, defaultDriver decides). Nothing happens when the data folder cannot be listed (no file access yet).
+    private void pruneDrivers(SharedPreferences p, File dir) {
+        File src = new File(Environment.getExternalStorageDirectory(), "Download/" + DATA_DIR + "/drivers");
+        if (src.getParentFile() == null || src.getParentFile().listFiles() == null) return;
+        for (String name : driverPackages()) {
+            if (new File(src, name).isDirectory() || new File(src, name + ".zip").isFile() || !userDriver(dir, name)) continue;
+            deleteDriverTree(new File(dir, name));
+            crumb("driver package " + name + ": gone from " + src.getName() + "/, its copy removed");
+            if (name.equals(p.getString("driver", null))) { p.edit().remove("driver").apply(); crumb("driver: the saved choice " + name + " was removed, back to the default " + defaultDriver()); }
+        }
+    }
+    // The gear's "Delete driver" (a player's package): the private copy and its source in Download/<DATA_DIR>/drivers (else the next start imports it
+    // again); a chosen one falls back to the default. True when the copy is gone; a source that could not be deleted is logged.
+    private boolean deleteUserDriver(String name) {
+        File src = new File(Environment.getExternalStorageDirectory(), "Download/" + DATA_DIR + "/drivers");
+        File sd = new File(src, name), sz = new File(src, name + ".zip");
+        if (sd.isDirectory()) deleteDriverTree(sd);
+        if (sz.isFile()) sz.delete();
+        if (sd.exists() || sz.exists()) android.util.Log.e("dm", "driver package " + name + ": its source in " + src + " could not be deleted");
+        File d = new File(new File(getFilesDir(), "drivers"), name); deleteDriverTree(d);
+        SharedPreferences p = doomPrefs();
+        if (name.equals(p.getString("driver", null))) p.edit().remove("driver").apply();
+        crumb("driver package " + name + ": deleted by the player");
+        return !d.exists();
+    }
+    private String[] userDriverPackages() {
+        File dir = new File(getFilesDir(), "drivers"); java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        for (String n : driverPackages()) if (userDriver(dir, n)) out.add(n);
+        return out.toArray(new String[0]);
     }
 
     // [D3] (from the DOOM 2016 port) adrenotools package helpers: a folder with a .so; unpack a zip (meta.json + library, at the zip
@@ -949,6 +1001,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             heading(box, when(ui, R.string.d3_driver, false));
             // [D3] (from the DOOM 2016 port, 2.25) packages that cannot run here (driverProblem: another GPU family, a glibc build, a missing
             // library) are not offered; a line lists them with the reason
+            pruneDrivers(p, new File(getFilesDir(), "drivers"));   // issue #9: a package deleted from Download/.../drivers while the game runs leaves the list now
             java.util.ArrayList<String> offered = new java.util.ArrayList<>(); StringBuilder hiddenWhy = new StringBuilder();
             for (String n : driverPackages()) { String why = driverProblem(n); if (why == null) offered.add(n); else hiddenWhy.append("\n- ").append(driverLabel(n)).append(": ").append(driverReasonText(why)); }
             final String[] drvNames = offered.toArray(new String[0]);
@@ -966,8 +1019,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 if (fell || (st.length > 3 && !st[0].isEmpty())) note(box, (fell ? driverReasonText(st[2]) + (st.length > 3 ? "; " : "") : "") + (st.length > 3 ? st[3] : ""));
             }
             note(box, ui.getString(R.string.d3_driver_note));
+            final String[] userDrv = userDriverPackages();   // [D3] issue #9: the player's own packages can be deleted here (bundled / downloaded ones not)
+            android.widget.Button delDrv = new android.widget.Button(this); delDrv.setText(ui.getString(R.string.d3_driver_delete));
+            if (userDrv.length > 0) box.addView(delDrv);
             CheckBox rumble = new CheckBox(this); rumble.setText(when(ui, R.string.d3_rumble, false)); rumble.setChecked(p.getBoolean("rumble", false)); box.addView(rumble);
             CheckBox fps = new CheckBox(this); fps.setText(when(ui, R.string.d3_fps_counter, true)); fps.setChecked(cp.getBoolean("fps", true)); box.addView(fps);
+            CheckBox logsC = new CheckBox(this); logsC.setText(when(ui, R.string.d3_logs, false)); logsC.setChecked(p.getBoolean("d3_logs", true)); box.addView(logsC);   // CrashLog.logsOn
+            note(box, ui.getString(R.string.d3_logs_note));
             // On-screen controls (D3PadView): layout touch / gamepad (applies when picked, the pad is visible behind the dialog), opacity and
             // size of the whole layout (live sliders), and the edit mode for positions (kept per layout).
             heading(box, when(ui, R.string.d3_layout, true));
@@ -1018,7 +1076,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 3))
                     .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
                     .putString("driver", drvPick > 0 ? drvNames[drvPick - 1] : "").putBoolean("rumble", rumble.isChecked())
-                    .putBoolean("d3_stretch_loading", stretchL.isChecked()).apply();
+                    .putBoolean("d3_stretch_loading", stretchL.isChecked()).putBoolean("d3_logs", logsC.isChecked()).apply();
                 cp.edit().putBoolean("fps", fps.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putBoolean("d3_hide_sticks", hideSt.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
                     .putInt("gear_mode", picked(gearG, 9000, D3_GEAR_LABELS.length)).putInt("d3_menu_swipe", picked(swG, 9300, 2)).apply();
                 if (d3Pad != null) d3Pad.reloadSettings();
@@ -1031,6 +1089,18 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 })
                 .setNegativeButton(ui.getString(R.string.d3_cancel), null).show();
             editB.setOnClickListener(v -> { save.run(); dlg.dismiss(); if (d3Pad != null) d3Pad.startEdit(); });   // drag controls on the pad; "Done" there ends it
+            delDrv.setOnClickListener(v -> {   // pick one, confirm, delete; the dialog is saved first (as the editor button) and reopened with the new list
+                String[] labels = new String[userDrv.length]; for (int i = 0; i < userDrv.length; i++) labels[i] = driverLabel(userDrv[i]);
+                new AlertDialog.Builder(this).setTitle(ui.getString(R.string.d3_driver_delete)).setItems(labels, (d, w) -> new AlertDialog.Builder(this)
+                    .setMessage(ui.getString(R.string.d3_driver_delete_confirm, labels[w]))
+                    .setPositiveButton(ui.getString(R.string.d3_driver_delete_yes), (d2, w2) -> {
+                        save.run(); dlg.dismiss();
+                        boolean ok = deleteUserDriver(userDrv[w]);
+                        android.widget.Toast.makeText(this, ui.getString(ok ? R.string.d3_driver_deleted : R.string.d3_driver_delete_failed, labels[w]), android.widget.Toast.LENGTH_LONG).show();
+                        showD3Settings();
+                    }).setNegativeButton(ui.getString(R.string.d3_cancel), null).show())
+                    .setNegativeButton(ui.getString(R.string.d3_cancel), null).show();
+            });
         });
     }
     // [D3] A percentage slider that saves "doom_controls" <key> and updates the pad while it moves (shown behind the dialog).

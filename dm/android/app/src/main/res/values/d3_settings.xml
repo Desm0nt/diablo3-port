@@ -35,8 +35,15 @@
     <string name="d3_driver_active">In use now: %1$s</string>
     <string name="d3_driver_active_fallback">In use now: system driver (%1$s did not start)</string>
     <string name="d3_driver_note">Driver packages (adrenotools: meta.json + .so, or a .zip) go to Download/Diablo3Mobile/drivers/.</string>
+    <string name="d3_driver_delete">Delete a driver…</string>
+    <string name="d3_driver_delete_confirm">Delete %1$s? Its package in Download/Diablo3Mobile/drivers/ is deleted too.</string>
+    <string name="d3_driver_delete_yes">Delete</string>
+    <string name="d3_driver_deleted">Deleted: %1$s</string>
+    <string name="d3_driver_delete_failed">Could not delete %1$s</string>
     <string name="d3_rumble">Vibration</string>
     <string name="d3_fps_counter">FPS and frame time counter</string>
+    <string name="d3_logs">Write logs</string>
+    <string name="d3_logs_note">Logs go to Download/Diablo3Mobile/logs (boot.log, logcat.txt, several MB each). Off: none are written there; a crash report (crash.txt) is still written if the game crashes.</string>
     <string name="d3_deadzone">On-screen sticks: game dead-zone compensation</string>
     <string name="d3_dz_none">None</string>
     <string name="d3_dz_small">Small</string>

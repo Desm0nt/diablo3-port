@@ -212,9 +212,11 @@ static void log_cpu(void) {
 static void log_init(void) {
     static int initialized; if (initialized) return; initialized = 1;
     // [D3] boot.log goes straight into Download/<data folder>/logs (next to crash.txt and logcat.txt, reachable with a file manager on
-    // Android 11+, and on disk line by line even when the system kills the app), else into the runtime dir as before
+    // Android 11+, and on disk line by line even when the system kills the app), else into the runtime dir as before.
+    // DM_LOG_PUBLIC=0 (gear "Write logs" off, GitHub issue #19: ~9 MB files in Download): the private runtime dir, where crash reports still read it
     char dir[1100]; snprintf(dir, sizeof dir, "%s/logs", g_src);
-    { struct stat st; if (!g_src[0] || ((stat(dir, &st) || !S_ISDIR(st.st_mode)) && mkdir(dir, 0775)) || access(dir, W_OK)) snprintf(dir, sizeof dir, "%s", g_runtime); }
+    const char *pub = getenv("DM_LOG_PUBLIC");
+    { struct stat st; if (!g_src[0] || (pub && *pub == '0') || ((stat(dir, &st) || !S_ISDIR(st.st_mode)) && mkdir(dir, 0775)) || access(dir, W_OK)) snprintf(dir, sizeof dir, "%s", g_runtime); }
     char prev[1220]; snprintf(g_log_path, sizeof g_log_path, "%s/boot.log", dir); snprintf(prev, sizeof prev, "%s/boot.prev.log", dir);
     if (rename(g_log_path, prev) && errno != ENOENT) unlink(g_log_path);   // [DOOM] one previous run kept; never append forever
     g_logf = fopen(g_log_path, "w"); g_log_fd = g_logf ? fileno(g_logf) : -1;
