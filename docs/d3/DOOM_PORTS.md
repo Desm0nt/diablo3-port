@@ -73,7 +73,7 @@ Forced crash: `kill -SEGV <pid>` while playing → next start: toast + `Download
 | `DM_LOG_MAX_MB` | 32 | boot.log size within a run |
 | `DM_STDOUT_FILE` | 0 | 1: stdout → `<runtime>/stdout.txt` |
 | `DM_D3_UI_CRUMBS` | 1 | UI focus breadcrumbs |
-| `DM_D3_UI_FAST` / `DM_D3_UI_FAST_VERIFY` | 7 / 0 | UI reader: direct alias-region reads, spread list walk, bulk sibling index (TOUCH_DESIGN §10) |
+| `DM_D3_UI_FAST` / `DM_D3_UI_FAST_VERIFY` / `DM_D3_UI_RDSTAT` | 63 / 0 / 1 | UI reader: direct alias-region reads, spread list walk, bulk sibling index, uncommitted alias = absent, tap snapshot from the walk, batched lock; kernel-read counters by region (TOUCH_DESIGN §10) |
 | `DM_GFX_CRUMBS` / `DM_GFX_CRUMBS_STALL_MS` | 0 / 2000 | GPU progress markers |
 | `DM_CPU_NOLSE` | 0 | force the ARMv8.0 variants |
 | `DM_GFX_SIM_GPU` | — | `mali` / `powervr` / `xclipse` / tokens: simulate a GPU family |

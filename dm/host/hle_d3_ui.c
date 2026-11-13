@@ -176,26 +176,53 @@ static char g_dir[1100];
 static _Atomic int g_menu_open;
 
 // ---- safe guest reads
-// DM_D3_UI_FAST (default 7, bits; 0 = the old behaviour). The big map / any in-game menu stalled every 10th frame by 55-97 ms and
+// DM_D3_UI_FAST (default 63, bits; 0 = the old behaviour). The big map / any in-game menu stalled every 10th frame by 55-97 ms and
 // every tap in a menu by 330-430 ms: D3 keeps all of its memory in the alias region (MapPhysicalMemory; SetHeapSize stays 0), so
 // rd() below took one process_vm_readv per field, and the list-rect walk (every 10 polls while a menu is open) and the tap snapshot
 // read the whole UI control map (> 8192 controls in game) field by field through the kernel.
 //   1  committed alias pages are copied directly (hle_svc.c dm_guest_alias_read, under the Map/UnmapPhysicalMemory lock)
 //   2  the list-rect walk is spread over the 10 polls (a tenth of the buckets per poll, published when it wraps) instead of whole
 //      every 10th poll
-//   4  the tap snapshot reads each parent's child vector in one copy for the sibling index (was one read per child per entry)
+//   4  the tap snapshot's sibling index: only the vectors of controls that are some control's parent (as the old per-child scan),
+//      each read in 4 KiB pieces (an unreadable piece = its entries absent, as the old per-entry reads gave), not one read per entry
+//   8  a read that touches an alias page not committed is "absent" at once (Horizon would fault there), no process_vm_readv
+//  16  a tap does not walk the control map: its snapshot is the list walk's last stable pass ({UIID, control} per node, used while
+//      the map keeps that bucket array, mask and count), one header read per control, the rest (rect, class, handlers, sibling
+//      index, z-order path) read only for the controls the tap looks at; the dump and a changed map still walk it whole
+//  32  runs of direct reads (list walk, snapshot, hit test) take the Map/UnmapPhysicalMemory lock once per 512 reads, not per read
+// DM_D3_UI_RDSTAT (default 1): the reads that still go through the kernel, counted by guest region (and how many of them failed),
+//   on the "[d3ui] snapshot" / "[d3ui] menu walk" lines.
 // DM_D3_UI_FAST_VERIFY=1: every 256th direct read is compared with process_vm_readv, the snapshot sibling index with the old one.
 // Log: "[d3ui] menu walk ..." when a menu closes (and every 600 polls while one stays open), "[d3ui] snapshot ..." per tap.
 int dm_guest_heap_readable(uint64_t a, size_t n);
 int dm_guest_alias_read(uint64_t a, void *out, size_t n) __attribute__((weak));
-static int g_fast = 7, g_fast_verify;
-static uint64_t g_rd_fast, g_rd_slow, g_rd_vchecks, g_rd_vbad;   // game thread (racy counters are fine: statistics)
+int dm_guest_region(uint64_t a) __attribute__((weak));
+static int g_fast = 63, g_fast_verify, g_rdstat = 1;
+static uint64_t g_rd_fast, g_rd_slow, g_rd_skip, g_rd_vchecks, g_rd_vbad;   // game thread (racy counters are fine: statistics)
+// kernel reads by region: 0 outside the guest address space, 1 heap, 2 alias (not committed), 3 stack region, 4 other inside the
+// address space, 5 a module image other than main; [r][0] reads, [r][1] of them failed; first address seen per region
+enum { RG_N = 6 };
+static const char *const k_rg_name[RG_N] = {"outside", "heap", "alias-uncommitted", "stack", "as-other", "module"};
+static uint64_t g_rg[RG_N][2], g_rg_first[RG_N];
+static int region_of(uint64_t a) {
+    for (int i = 0; i < g_nmod; i++) { uint64_t b = (uint64_t)(uintptr_t)g_mod[i].base; if (g_mod[i].base && a >= b && a - b < g_mod[i].size) return 5; }
+    return dm_guest_region ? dm_guest_region(a) : 0;
+}
+static void rg_text(char *out, size_t cap, const uint64_t (*rg0)[2]) {   // "region reads/failed@first ..." since rg0, empty when none
+    size_t k = 0; out[0] = 0;
+    for (int r = 0; r < RG_N && k + 80 < cap; r++) {
+        uint64_t n = g_rg[r][0] - rg0[r][0], f = g_rg[r][1] - rg0[r][1];
+        if (n) k += (size_t)snprintf(out + k, cap - k, " %s %llu/%llu failed (first %#llx);", k_rg_name[r], (unsigned long long)n, (unsigned long long)f,
+                                     (unsigned long long)g_rg_first[r]);
+    }
+}
 static int rd(uint64_t a, void *out, size_t n) {
     if (a < 0x10000 || a >= (1ull << 48) || n > (1u << 20)) return 0;
     if (dm_guest_heap_readable(a, n)) { memcpy(out, (const void *)(uintptr_t)a, n); return 1; }
     uint64_t b = (uint64_t)(uintptr_t)g_base;
     if (a >= b && n <= g_size && a - b <= g_size - n) { memcpy(out, (const void *)(uintptr_t)a, n); return 1; }
-    if ((g_fast & 1) && dm_guest_alias_read && dm_guest_alias_read(a, out, n)) {
+    int ar = (g_fast & 1) && dm_guest_alias_read ? dm_guest_alias_read(a, out, n) : 0;
+    if (ar > 0) {
         if (!(++g_rd_fast & 255) && g_fast_verify && n <= 256) {   // the same bytes through the kernel
             uint8_t chk[256]; struct iovec l = {chk, n}, r = {(void *)(uintptr_t)a, n};
             g_rd_vchecks++;
@@ -203,10 +230,12 @@ static int rd(uint64_t a, void *out, size_t n) {
         }
         return 1;
     }
+    if (ar < 0 && (g_fast & 8)) { g_rd_skip++; return 0; }   // an alias page not committed: unreadable on Horizon too
     g_rd_slow++;
     struct iovec l = {out, n}, r = {(void *)(uintptr_t)a, n};
     ssize_t got = syscall(SYS_process_vm_readv, getpid(), &l, 1UL, &r, 1UL, 0UL);
     if (got < 0) { static int said; if (!said++ && errno != EFAULT) LOG("[d3ui] process_vm_readv: errno %d (only heap / image reads)", errno); }
+    if (g_rdstat) { int rg = region_of(a); if (!g_rg[rg][0]) g_rg_first[rg] = a; g_rg[rg][0]++; g_rg[rg][1] += got != (ssize_t)n; }
     return got == (ssize_t)n;
 }
 static uint64_t rq(uint64_t a) { uint64_t v = 0; return rd(a, &v, 8) ? v : 0; }
@@ -222,7 +251,8 @@ static int setup(void) {
     const char *e = getenv("DM_D3_UIDUMP"); g_dump_mode = e && *e ? atoi(e) : 0;
     e = getenv("DM_D3_UITAP"); g_tap_mode = e && *e ? atoi(e) : 1;   // default on; 0 = off, 2 = dry run
     e = getenv("DM_D3_UI_CRUMBS"); g_crumbs = !(e && *e == '0');
-    e = getenv("DM_D3_UI_FAST"); g_fast = e && *e ? atoi(e) & 7 : 7;
+    e = getenv("DM_D3_UI_FAST"); g_fast = e && *e ? atoi(e) & 63 : 63;
+    e = getenv("DM_D3_UI_RDSTAT"); g_rdstat = !(e && *e == '0');
     e = getenv("DM_D3_UI_FAST_VERIFY"); g_fast_verify = e && *e == '1';
     if (!dm_guest_alias_read) g_fast &= ~1;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) { g_base = g_mod[i].base; g_size = g_mod[i].size; }
@@ -237,8 +267,8 @@ static int setup(void) {
             LOG("【红】[d3ui] vtable main+%#x slot %#x is not main+%#x: off", k_vts[i].vt, k_vts[i].slot, k_vts[i].fn); return 0; }
     e = getenv("DM_RUNTIME_DIR"); snprintf(g_dir, sizeof g_dir, "%s", e && *e ? e : "dm");
     LOG("[d3ui] on: dump %d, tap %d%s, crumbs %d, trigger %s/ui-dump-now, game thread tid %d; DM_D3_UI_FAST=%d (direct alias reads %d, spread list walk %d, "
-        "bulk sibling index %d)%s", g_dump_mode, g_tap_mode, g_tap_mode == 2 ? " (dry run)" : "", g_crumbs, g_dir, (int)gettid(), g_fast, g_fast & 1, g_fast >> 1 & 1,
-        g_fast >> 2 & 1, g_fast_verify ? ", verify on" : "");
+        "bulk sibling index %d, uncommitted alias absent %d, tap from the walk %d, batched lock %d), DM_D3_UI_RDSTAT=%d%s", g_dump_mode, g_tap_mode, g_tap_mode == 2 ? " (dry run)" : "", g_crumbs, g_dir,
+        (int)gettid(), g_fast, g_fast & 1, g_fast >> 1 & 1, g_fast >> 2 & 1, g_fast >> 3 & 1, g_fast >> 4 & 1, g_fast >> 5 & 1, g_rdstat, g_fast_verify ? ", verify on" : "");
     return g_ok = 1;
 }
 
@@ -291,17 +321,41 @@ static uint64_t child_id(uint64_t parent, const char *name) {
 // ---- UI manager and its control map (main 0x330000: {u32 mask, u32 count, alloc, buckets @0x10}; node {next, UIID, control})
 static uint64_t ui_mgr(void) { uint64_t o = rq(ma(O_G) + 0x10); return o ? rq(o + 0xb80) : 0; }
 enum { K_OTHER, K_LIST, K_CHECK, K_SELECTOR, K_BUTTON };
+enum { ST_RECT = 1, ST_BASIC = 2, ST_KIDS = 4, ST_PATH = 8 };   // which lazy parts of a snapshot entry are filled in
 typedef struct {
-    uint64_t id, c, vt, parent, h118; uint16_t flags; char type[24]; int has_rect, act, fh, kind, layer, depth, sib;
+    uint64_t id, c, vt, parent, h118; uint16_t flags; uint8_t st; char type[24]; int has_rect, act, fh, kind, layer, depth, sib;
     float r[4]; int path[MAX_DEPTH]; int npath;
 } ctrl;
 static ctrl *g_c; static int g_nc, g_cap;
 static int ctrl_cmp(const void *a, const void *b) { uint64_t x = ((const ctrl *)a)->id, y = ((const ctrl *)b)->id; return x < y ? -1 : x > y; }
-static ctrl *find(uint64_t id) {
-    int lo = 0, hi = g_nc;
-    while (lo < hi) { int m = (lo + hi) / 2; if (g_c[m].id < id) lo = m + 1; else hi = m; }
-    return lo < g_nc && g_c[lo].id == id ? &g_c[lo] : NULL;
+// id -> entry: open addressing over g_c (index + 1), rebuilt with every snapshot; duplicate ids (a node seen twice) are dropped
+static uint32_t *g_hix; static uint32_t g_hsize;
+static uint32_t id_hash(uint64_t id) { id ^= id >> 33; id *= 0xff51afd7ed558ccdull; id ^= id >> 33; return (uint32_t)id; }
+static int index_build(void) {
+    uint32_t need = 64; while (need < 2u * (uint32_t)g_nc + 2) need <<= 1;
+    if (need > g_hsize) { uint32_t *v = realloc(g_hix, need * sizeof *v); if (!v) { g_nc = 0; return 0; } g_hix = v; g_hsize = need; }
+    memset(g_hix, 0, g_hsize * sizeof *g_hix);
+    int w = 0; uint32_t m = g_hsize - 1;
+    for (int i = 0; i < g_nc; i++) {
+        uint32_t h = id_hash(g_c[i].id) & m; int dup = 0;
+        for (; g_hix[h]; h = (h + 1) & m) if (g_c[g_hix[h] - 1].id == g_c[i].id) { dup = 1; break; }
+        if (dup) continue;
+        if (w != i) g_c[w] = g_c[i];
+        g_hix[h] = (uint32_t)++w;
+    }
+    g_nc = w; return 1;
 }
+static ctrl *find(uint64_t id) {
+    if (!g_hix || !g_nc) return NULL;
+    uint32_t m = g_hsize - 1;
+    for (uint32_t h = id_hash(id) & m; g_hix[h]; h = (h + 1) & m) if (g_c[g_hix[h] - 1].id == id) return &g_c[g_hix[h] - 1];
+    return NULL;
+}
+// One run of direct reads under a single Map/UnmapPhysicalMemory lock (DM_D3_UI_FAST bit 32): only around pure reads, never around a
+// call into the game; released every 512 steps, so another thread's MapPhysicalMemory waits at most a fraction of a millisecond.
+void dm_guest_alias_hold(int on) __attribute__((weak));
+static void hold(int on) { if ((g_fast & 33) == 33 && dm_guest_alias_hold) dm_guest_alias_hold(on); }
+static void hold_tick(unsigned *k) { if (!(++*k & 511)) { hold(0); hold(1); } }
 // Class: every "cmp w1, #imm" (0x7100003f | imm12 << 10) of the vtable+0x88 IsA(type) up to its first ret / b, e.g. "37/1/51/2" (list).
 static void isa_types(uint64_t vt, char *out, size_t cap) {
     uint64_t f = rq(vt + 0x88); uint32_t w[16]; size_t n = 0; out[0] = 0;
@@ -310,10 +364,51 @@ static void isa_types(uint64_t vt, char *out, size_t cap) {
         if ((w[i] & 0xffc003ff) == 0x7100003f && n + 6 < cap) n += (size_t)snprintf(out + n, cap - n, "%s%u", n ? "/" : "", w[i] >> 10 & 0xfff);
     if (!n) snprintf(out, cap, "?");
 }
-// Sibling index of every control (its position in the parent's child vector +0x60 {UIID, ctrl, ctrl-if-visible} x 0x18, count +0x68).
-// The old way: per child, the parent's vector entry by entry until its id (one read each). DM_D3_UI_FAST & 4: per parent, the vector
-// in one copy, each entry's id looked up (the first position wins, as before); a vector that does not read whole goes entry by entry.
-static void sib_old(void) {
+// An entry from its control header (+0 vtable, +0x18 flags, +0x30 UIID, +0x38 parent): the eager part; the rest is filled in on demand
+static void fill_head(ctrl *c, uint64_t id, uint64_t a, const uint8_t h[0x40]) {
+    uint64_t vt = *(const uint64_t *)h, v = mo(vt);
+    c->id = id; c->c = a; c->vt = vt; c->flags = *(const uint16_t *)(h + 0x18); c->parent = *(const uint64_t *)(h + 0x38); c->st = 0;
+    c->kind = v == O_VT_LIST ? K_LIST : v == O_VT_CHECK ? K_CHECK : v == O_VT_SELECTOR ? K_SELECTOR : v == O_VT_BUTTON ? K_BUTTON : K_OTHER;
+    c->sib = -1; c->has_rect = 0; c->act = 0; c->fh = 0; c->h118 = 0; c->type[0] = 0; c->layer = c->depth = c->npath = 0;
+}
+static void ensure_rect(ctrl *c) {   // has_rect, r
+    if (c->st & ST_RECT) return;
+    c->st |= ST_RECT;
+    c->has_rect = rq(c->vt + 0xb0) == ma(O_UPDATERECT);
+    if (c->has_rect && !rd(c->c + 0x88, c->r, sizeof c->r)) c->has_rect = 0;
+}
+static void ensure_basic(ctrl *c) {   // class, CanActivate, focus handler, input handler table
+    if (c->st & ST_BASIC) return;
+    ensure_rect(c); c->st |= ST_BASIC;
+    uint64_t vt = c->vt; isa_types(vt, c->type, sizeof c->type);
+    int shown = c->flags >> 2 & 1; uint64_t act = mo(rq(vt + 0x10)); uint32_t f3c8 = 0, f1e8 = 0;
+    c->act = act == O_ACT_NONE ? 0 : act == O_ACT_BUTTON ? (rd(c->c + 0x3c8, &f3c8, 4) ? shown && (f3c8 & 0x20) : -1)
+           : act == O_ACT_EDIT ? (rd(c->c + 0x1e8, &f1e8, 4) ? shown && f1e8 : -1) : act == O_ACT_FLAG ? (rd(c->c + 0x3c8, &f3c8, 4) ? shown && (f3c8 & 1) : -1) : -1;
+    c->fh = mo(rq(vt + 0x40)) != O_FOCUS_NOP;
+    c->h118 = c->has_rect ? rq(c->c + 0x118) : 0;   // input handler table (0x3b26a0 copies desc+0x560..0x728): +0x20 + 8*button press
+}
+// Sibling index (the position in the parent's child vector +0x60 {UIID, ctrl, ctrl-if-visible} x 0x18, count +0x68) of a parent's
+// children: the vector in 4 KiB pieces aligned on the source (an unreadable piece leaves its entries absent, as the old per-entry
+// reads did), each entry's id looked up, the first position wins. Only for controls that are some control's parent (as the old scan).
+static void ensure_kids(ctrl *p) {
+    static uint8_t *buf;
+    if (p->st & ST_KIDS) return;
+    p->st |= ST_KIDS;
+    if (!buf && !(buf = malloc(4096 * 0x18))) return;
+    uint64_t pid = p->id, v = rq(p->c + 0x60), n = rq(p->c + 0x68);
+    if (!v || !n || v >= (1ull << 48)) return;
+    if (n > 4096) n = 4096;
+    uint64_t end = v + n * 0x18; uint8_t pok[32]; int np = 0;
+    for (uint64_t s0 = v; s0 < end && np < 32; np++) { uint64_t e = ((s0 >> 12) + 1) << 12; if (e > end) e = end; pok[np] = (uint8_t)rd(s0, buf + (s0 - v), e - s0); s0 = e; }
+    for (uint64_t k = 0; k < n; k++) {
+        uint64_t o = 0x18 * k, p0 = ((v + o) >> 12) - (v >> 12), p1 = ((v + o + 7) >> 12) - (v >> 12), id;
+        if ((int)p1 >= np || !pok[p0] || !pok[p1]) continue;
+        memcpy(&id, buf + o, 8);
+        ctrl *c = find(id);
+        if (c && c->parent == pid && c->sib < 0) c->sib = (int)k;
+    }
+}
+static void sib_old(void) {   // DM_D3_UI_FAST bit 4 off: per child, the parent's vector entry by entry until its id (one read each)
     for (int i = 0; i < g_nc; i++) {
         ctrl *c = &g_c[i]; c->sib = -1;
         ctrl *p = find(c->parent);
@@ -322,69 +417,89 @@ static void sib_old(void) {
             for (uint64_t k = 0; v && k < n && k < 4096; k++) if (rq(v + 0x18 * k) == c->id) { c->sib = (int)k; break; }
         }
     }
+    for (int i = 0; i < g_nc; i++) g_c[i].st |= ST_KIDS;
 }
 static void sib_bulk(void) {
-    static uint8_t *buf;
-    if (!buf && !(buf = malloc(4096 * 0x18))) { sib_old(); return; }
-    for (int i = 0; i < g_nc; i++) g_c[i].sib = -1;
-    for (int i = 0; i < g_nc; i++) {
-        uint64_t pid = g_c[i].id, v = rq(g_c[i].c + 0x60), n = rq(g_c[i].c + 0x68);
-        if (!v || !n) continue;
-        if (n > 4096) n = 4096;
-        int whole = rd(v, buf, (size_t)n * 0x18);
-        for (uint64_t k = 0; k < n; k++) {
-            uint64_t id; if (whole) memcpy(&id, buf + 0x18 * k, 8); else id = rq(v + 0x18 * k);
-            ctrl *c = find(id);   // g_c does not move: find() only searches it
-            if (c && c->parent == pid && c->sib < 0) c->sib = (int)k;
-        }
+    for (int i = 0; i < g_nc; i++) { g_c[i].sib = -1; g_c[i].st &= (uint8_t)~ST_KIDS; }
+    for (int i = 0; i < g_nc; i++) { ctrl *p = find(g_c[i].parent); if (p) ensure_kids(p); }
+    for (int i = 0; i < g_nc; i++) g_c[i].st |= ST_KIDS;
+}
+static void ensure_path(ctrl *c) {   // layer, depth, path: sibling indices from the root down
+    if (c->st & ST_PATH) return;
+    c->st |= ST_PATH;
+    int rev[MAX_DEPTH], n = 0; uint64_t root = c->id;
+    for (ctrl *x = c; x && n < MAX_DEPTH; x = find(x->parent)) { ctrl *p = find(x->parent); if (p) ensure_kids(p); rev[n++] = x->sib; root = x->id; }
+    c->layer = root == 3 ? 3 : root == 2 ? 2 : root == 1 ? 1 : 0;   // Root.TopLayer / WindowLayer / NormalLayer (main+0xeba350)
+    c->depth = n; c->npath = n; for (int k = 0; k < n; k++) c->path[k] = rev[n - 1 - k];
+}
+static int grow_ctrl(int want) {
+    if (want <= g_cap) return 1;
+    int nc = g_cap ? g_cap : 16384; while (nc < want && nc < MAX_CTRL) nc *= 2; if (nc > MAX_CTRL) nc = MAX_CTRL;
+    if (nc < want) return 0;
+    ctrl *v = realloc(g_c, (size_t)nc * sizeof *g_c); if (!v) return 0;
+    g_c = v; g_cap = nc; return 1;
+}
+// The control list the list walk collected on its last complete, stable pass (refresh_lists): {UIID, control} per node, with the map's
+// bucket array, mask and count at that time. DM_D3_UI_FAST bit 16: a tap builds its snapshot from it (one header read per control, the
+// rest on demand) while the map still has that bucket array, mask and count; else (and for the dump) the whole map is walked.
+typedef struct { uint64_t id, c; } ctrl_rec;
+static struct { ctrl_rec *recs; int n, cap; uint64_t map, buckets; uint32_t mask, count; } g_cs;
+static int g_snap_lazy;   // how the last snapshot was built (log)
+static int snapshot_lazy(uint64_t map, uint64_t buckets, uint32_t mask, uint32_t count) {
+    if (!(g_fast & 16) || g_cs.n <= 0 || g_cs.map != map || g_cs.buckets != buckets || g_cs.mask != mask || g_cs.count != count) return -2;
+    if (!grow_ctrl(g_cs.n)) return -2;
+    g_nc = 0; unsigned k = 0;
+    hold(1);
+    for (int i = 0; i < g_cs.n; i++, hold_tick(&k)) {
+        uint8_t h[0x40]; uint64_t vt; const ctrl_rec *r = &g_cs.recs[i];
+        if (!rd(r->c, h, sizeof h) || !in_image(vt = *(uint64_t *)h) || *(uint64_t *)(h + 0x30) != r->id) continue;   // gone since the walk
+        fill_head(&g_c[g_nc++], r->id, r->c, h);
     }
+    hold(0);
+    return index_build() ? g_nc : -1;
 }
 // Snapshot of every control (game thread). Returns the count, -1 when the UI does not exist yet. Grows to MAX_CTRL (in-game maps hold > 8192).
-static int snapshot_inner(uint64_t mgr);
-static int snapshot(uint64_t mgr) {
-    uint64_t t0 = now_ns(), f0 = g_rd_fast, s0 = g_rd_slow;
-    int n = snapshot_inner(mgr);
+// full = 1: every field of every entry now (the dump); 0: what a tap needs, the rest on demand (vis / hit / above / press_handler).
+static int snapshot_inner(uint64_t mgr, int full);
+static int snapshot(uint64_t mgr, int full) {
+    uint64_t t0 = now_ns(), f0 = g_rd_fast, s0 = g_rd_slow, k0 = g_rd_skip, rg0[RG_N][2]; memcpy(rg0, g_rg, sizeof rg0);
+    int n = snapshot_inner(mgr, full);
     static unsigned said;
-    if (n > 0 && said++ < 300)
-        LOG("[d3ui] snapshot: %d controls in %.1f ms (DM_D3_UI_FAST=%d; guest reads %llu direct, %llu through the kernel)", n, (now_ns() - t0) / 1e6, g_fast,
-            (unsigned long long)(g_rd_fast - f0), (unsigned long long)(g_rd_slow - s0));
+    if (n > 0 && said++ < 300) {
+        char rg[600]; rg_text(rg, sizeof rg, (const uint64_t (*)[2])rg0);
+        LOG("[d3ui] snapshot: %d controls in %.2f ms, %s (DM_D3_UI_FAST=%d; guest reads %llu direct, %llu through the kernel, %llu uncommitted alias absent)%s%s",
+            n, (now_ns() - t0) / 1e6, g_snap_lazy ? "from the list walk" : full ? "full" : "whole map walk", g_fast, (unsigned long long)(g_rd_fast - f0),
+            (unsigned long long)(g_rd_slow - s0), (unsigned long long)(g_rd_skip - k0), *rg ? "; kernel by region:" : "", rg);
+    }
     return n;
 }
-static int snapshot_inner(uint64_t mgr) {
+static int snapshot_inner(uint64_t mgr, int full) {
     uint64_t map = rq(mgr); uint32_t hdr[2]; uint64_t buckets;
+    g_snap_lazy = 0;
     if (!map || !rd(map, hdr, 8) || !(buckets = rq(map + 0x10))) return -1;
     uint32_t mask = hdr[0];
     if (mask > 0xfffff || (mask & (mask + 1))) return -1;
-    g_nc = 0; int full = 0;
-    for (uint32_t i = 0; i <= mask && !full; i++) {
+    if (!full) { int n = snapshot_lazy(map, buckets, mask, hdr[1]); if (n != -2) { g_snap_lazy = n > 0; return n; } }
+    g_nc = 0; int cut = 0; unsigned k = 0;
+    hold(1);
+    for (uint32_t i = 0; i <= mask && !cut; i++) {
         uint64_t node = rq(buckets + 8ull * i);
-        for (int guard = 0; node && guard < 4096; guard++) {
+        for (int guard = 0; node && guard < 4096; guard++, hold_tick(&k)) {
             uint64_t nd[3]; if (!rd(node, nd, sizeof nd)) break;
-            uint8_t h[0x40]; uint64_t vt;
-            if (nd[2] && rd(nd[2], h, sizeof h) && in_image(vt = *(uint64_t *)h) && *(uint64_t *)(h + 0x30) == nd[1]) {
-                if (g_nc == g_cap) {
-                    int nc = g_cap ? g_cap * 2 : 16384; if (nc > MAX_CTRL) nc = MAX_CTRL;
-                    ctrl *v = nc > g_cap ? realloc(g_c, (size_t)nc * sizeof *g_c) : NULL;
-                    if (!v) { full = 1; break; }
-                    g_c = v; g_cap = nc;
-                }
-                ctrl *c = &g_c[g_nc++]; memset(c, 0, sizeof *c);
-                c->id = nd[1]; c->c = nd[2]; c->vt = vt; c->flags = *(uint16_t *)(h + 0x18); c->parent = *(uint64_t *)(h + 0x38);
-                isa_types(vt, c->type, sizeof c->type); c->has_rect = rq(vt + 0xb0) == ma(O_UPDATERECT);
-                if (c->has_rect && !rd(nd[2] + 0x88, c->r, sizeof c->r)) c->has_rect = 0;
-                int shown = c->flags >> 2 & 1; uint64_t act = mo(rq(vt + 0x10)); uint32_t f3c8 = 0, f1e8 = 0;
-                c->act = act == O_ACT_NONE ? 0 : act == O_ACT_BUTTON ? (rd(nd[2] + 0x3c8, &f3c8, 4) ? shown && (f3c8 & 0x20) : -1)
-                       : act == O_ACT_EDIT ? (rd(nd[2] + 0x1e8, &f1e8, 4) ? shown && f1e8 : -1) : act == O_ACT_FLAG ? (rd(nd[2] + 0x3c8, &f3c8, 4) ? shown && (f3c8 & 1) : -1) : -1;
-                c->fh = mo(rq(vt + 0x40)) != O_FOCUS_NOP;
-                uint64_t v = mo(vt);
-                c->kind = v == O_VT_LIST ? K_LIST : v == O_VT_CHECK ? K_CHECK : v == O_VT_SELECTOR ? K_SELECTOR : v == O_VT_BUTTON ? K_BUTTON : K_OTHER;
-                c->h118 = c->has_rect ? rq(nd[2] + 0x118) : 0;   // input handler table (0x3b26a0 copies desc+0x560..0x728): +0x20 + 8*button press
+            uint8_t h[0x40];
+            if (nd[2] && rd(nd[2], h, sizeof h) && in_image(*(uint64_t *)h) && *(uint64_t *)(h + 0x30) == nd[1]) {
+                if (g_nc == g_cap && !grow_ctrl(g_nc + 1)) { cut = 1; break; }
+                fill_head(&g_c[g_nc++], nd[1], nd[2], h);
             }
             node = nd[0];
         }
     }
-    if (full) { static int said; if (!said++) LOG("【红】[d3ui] more than %d UI controls: snapshot cut", g_cap); }
-    qsort(g_c, g_nc, sizeof *g_c, ctrl_cmp);
+    hold(0);
+    if (cut) { static int said; if (!said++) LOG("【红】[d3ui] more than %d UI controls: snapshot cut", g_cap); }
+    if (full) qsort(g_c, g_nc, sizeof *g_c, ctrl_cmp);   // the dump lists them by id
+    if (!index_build()) return -1;
+    if (!full) return g_nc;
+    for (int i = 0; i < g_nc; i++) ensure_basic(&g_c[i]);
     // tree position: sibling index in the parent's child vector, layer, depth
     if (!(g_fast & 4)) sib_old();
     else if (!g_fast_verify) sib_bulk();
@@ -395,15 +510,11 @@ static int snapshot_inner(uint64_t mgr) {
         if (nb) { int bad = 0; for (int i = 0; i < g_nc; i++) bad += nb[i] != g_c[i].sib;
                   LOG("[d3ui] verify: bulk sibling index %s (%d of %d controls differ)", bad ? "DIFFERS" : "equal", bad, g_nc); free(nb); }
     }
-    for (int i = 0; i < g_nc; i++) {
-        ctrl *c = &g_c[i]; int rev[MAX_DEPTH], n = 0; uint64_t root = c->id;
-        for (ctrl *x = c; x && n < MAX_DEPTH; x = find(x->parent)) { rev[n++] = x->sib; root = x->id; }
-        c->layer = root == 3 ? 3 : root == 2 ? 2 : root == 1 ? 1 : 0;   // Root.TopLayer / WindowLayer / NormalLayer (main+0xeba350)
-        c->depth = n; c->npath = n; for (int k = 0; k < n; k++) c->path[k] = rev[n - 1 - k];
-    }
+    for (int i = 0; i < g_nc; i++) ensure_path(&g_c[i]);
     return g_nc;
 }
 static int above(const ctrl *a, const ctrl *b) {   // a drawn after b: higher layer, then later sibling along the path, then deeper
+    ensure_path((ctrl *)a); ensure_path((ctrl *)b);
     if (a->layer != b->layer) return a->layer > b->layer;
     for (int k = 0; k < a->npath && k < b->npath; k++) if (a->path[k] != b->path[k]) return a->path[k] > b->path[k];
     return a->npath > b->npath;
@@ -416,9 +527,10 @@ static ctrl *screen_root(ctrl *c) {   // the ancestor whose parent is a layer (R
     for (int n = 0; c && n < MAX_DEPTH; n++, c = find(c->parent)) if (c->parent >= 1 && c->parent <= 3) return c;
     return NULL;
 }
-static int vis(const ctrl *c) { return c && (c->flags & 4); }
+static int vis(const ctrl *c) { if (!c || !(c->flags & 4)) return 0; ensure_rect((ctrl *)c); return 1; }   // shown (and its rect read)
 static int hit(const ctrl *c, float x, float y) { return vis(c) && c->has_rect && x >= c->r[0] && x < c->r[2] && y >= c->r[1] && y < c->r[3]; }
 static uint64_t press_handler(const ctrl *c, int button) {   // the control's own handler for a button press (table +0x118: +0x20 + 8 * button)
+    if (c) ensure_basic((ctrl *)c);
     uint64_t f = c && c->h118 ? rq(c->h118 + 0x20 + 8ull * button) : 0; return in_image(f) ? f : 0;
 }
 
@@ -815,6 +927,8 @@ static int tap_list(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
     // a focused list of ANOTHER screen drawn above this one (a popup over the menu, e.g. ConsolePlayerOptions over the main menu): higher layer,
     // or its screen root (the child of Root.<Layer>) a later sibling. Lists of the same screen never block each other (hero menu: ring + item list).
     ctrl *fl = find(rq(mgr + 0x50)), *fr = fl ? screen_root(fl) : NULL, *lr = screen_root(L);
+    if (fl) ensure_path(fl);
+    ensure_path(L);
     if (fl && fl != L && fl->kind == K_LIST && vis(fl) && fr && lr && fr != lr && (fl->layer > L->layer || (fl->layer == L->layer && above(fr, lr)))) {
         LOG("[d3ui] tap UI %.0f,%.0f -> list %016llx %s under the focused popup list %016llx %s: nothing done", ux, uy, (unsigned long long)L->id, name_of(L->id),
             (unsigned long long)fl->id, name_of(fl->id));
@@ -838,17 +952,43 @@ static int tap_list(uint64_t mgr, float ux, float uy, ctrl **hits, int nh) {
     accept(mgr, idx == sel ? "selected row" : "horizontal list");
     return 1;
 }
+static int ctrlp_cmp(const void *a, const void *b) { uint64_t x = (*(ctrl *const *)a)->id, y = (*(ctrl *const *)b)->id; return x < y ? -1 : x > y; }
+static void do_tap_inner(uint64_t mgr, float fx, float fy);
 static void do_tap(uint64_t mgr, float fx, float fy) {
-    pxmap m; if (!px_map(&m)) { LOG("[d3ui] tap %.3f,%.3f: no window size yet", fx, fy); return; }
-    float px = fx * m.w, py = fy * m.h, ux = (px - m.l) * UI_W / (m.r - m.l), uy = (py - m.t) * UI_H / (m.b - m.t);
-    int n = snapshot(mgr); if (n <= 0) { LOG("[d3ui] tap %.3f,%.3f: no UI", fx, fy); return; }
-    static ctrl **hits; static int hcap; int nh = 0; ctrl *top = NULL;
-    for (int i = 0; i < n; i++) {
+    uint64_t t0 = now_ns(), f0 = g_rd_fast, s0 = g_rd_slow;
+    do_tap_inner(mgr, fx, fy);
+    static unsigned said;
+    if (said++ < 300) LOG("[d3ui] tap took %.2f ms in all (guest reads %llu direct, %llu through the kernel)", (now_ns() - t0) / 1e6,
+                          (unsigned long long)(g_rd_fast - f0), (unsigned long long)(g_rd_slow - s0));
+}
+static int collect_hits(float ux, float uy, ctrl ***out, ctrl **ptop) {   // the shown controls under the point (by id) and the topmost real one
+    static ctrl **hits; static int hcap; int nh = 0; ctrl *top = NULL; unsigned k = 0;
+    hold(1);   // shown controls' rects: reads only
+    for (int i = 0; i < g_nc; i++, hold_tick(&k)) {
         ctrl *c = &g_c[i]; if (!hit(c, ux, uy)) continue;
         if (nh == hcap) { int nc = hcap ? hcap * 2 : 512; ctrl **v = realloc(hits, (size_t)nc * sizeof *v); if (!v) break; hits = v; hcap = nc; }
         hits[nh++] = c;
+    }
+    hold(0);
+    if (nh) qsort(hits, (size_t)nh, sizeof *hits, ctrlp_cmp);   // by id, the order the old (sorted) snapshot gave them
+    for (int i = 0; i < nh; i++) {
+        ctrl *c = hits[i]; ensure_basic(c);
         int full = c->r[2] - c->r[0] >= 900 && c->r[3] - c->r[1] >= 700;   // screen roots / fade layers: never targets, only skipped in the log
         if (!full && (!top || above(c, top))) top = c;
+    }
+    *out = hits; *ptop = top; return nh;
+}
+static void do_tap_inner(uint64_t mgr, float fx, float fy) {
+    pxmap m; if (!px_map(&m)) { LOG("[d3ui] tap %.3f,%.3f: no window size yet", fx, fy); return; }
+    float px = fx * m.w, py = fy * m.h, ux = (px - m.l) * UI_W / (m.r - m.l), uy = (py - m.t) * UI_H / (m.b - m.t);
+    int n = snapshot(mgr, 0); if (n <= 0) { LOG("[d3ui] tap %.3f,%.3f: no UI", fx, fy); return; }
+    ctrl **hits, *top; int nh = collect_hits(ux, uy, &hits, &top);
+    if (g_fast_verify && g_snap_lazy) {   // DM_D3_UI_FAST_VERIFY=1: the same tap on a full snapshot; that one is used
+        uint64_t lt = top ? top->id : 0; int lnh = nh;
+        if (snapshot(mgr, 1) <= 0) return;
+        nh = collect_hits(ux, uy, &hits, &top);
+        LOG("[d3ui] verify: tap from the walk: topmost %016llx, %d controls under the finger; full snapshot: %016llx, %d -> %s", (unsigned long long)lt, lnh,
+            top ? (unsigned long long)top->id : 0ull, nh, lt == (top ? top->id : 0) && lnh == nh ? "equal" : "DIFFERS");
     }
     g_dry = g_tap_mode == 2;
     if (tap_nav(mgr, ux, uy, hits, nh)) return;
@@ -890,9 +1030,11 @@ static list_rect g_lists[MAX_LISTS]; static int g_nlists; static _Atomic unsigne
 static _Atomic uint64_t g_scroll_id; static _Atomic int g_scroll_pend;   // travel in 1/100000 of the picture height
 // The walk over the control map's buckets. Whole (DM_D3_UI_FAST & 2 off): every 10th poll, as before. Spread: a tenth of the buckets
 // per poll, the visible lists (UI units) collected across the polls and published when the walk wraps (the same 10-poll refresh;
-// a rehash of the map - other bucket array or mask - starts the walk over).
-static struct { uint64_t map, buckets; uint32_t mask, next; int n; list_rect ui[MAX_LISTS]; uint64_t nodes; } g_lw;
-static struct { unsigned calls, cycles; uint64_t ns, max_ns, nodes, rd_fast0, rd_slow0; } g_ws;   // per menu session (log line)
+// a rehash of the map - other bucket array or mask - starts the walk over). Each pass also records every control {UIID, control}
+// (header checked as the snapshot does); a pass during which the map's count did not change becomes the tap's control list (g_cs).
+static struct { uint64_t map, buckets; uint32_t mask, next, count0; int n, unstable, nrec, reccap; list_rect ui[MAX_LISTS]; uint64_t nodes; ctrl_rec *recs; } g_lw;
+static struct { unsigned calls, cycles, published; uint64_t ns, max_ns, nodes, rd_fast0, rd_slow0, rd_skip0, rg0[RG_N][2]; } g_ws;   // per menu session (log line)
+static void ws_reset(void) { memset(&g_ws, 0, sizeof g_ws); g_ws.rd_fast0 = g_rd_fast; g_ws.rd_slow0 = g_rd_slow; g_ws.rd_skip0 = g_rd_skip; memcpy(g_ws.rg0, g_rg, sizeof g_rg); }
 static void lists_publish(void) {
     pxmap m; if (!px_map(&m)) return;
     list_rect tmp[MAX_LISTS]; int n = g_lw.n;
@@ -902,38 +1044,67 @@ static void lists_publish(void) {
     memcpy(g_lists, tmp, sizeof tmp[0] * (size_t)n); g_nlists = n;
     atomic_fetch_add_explicit(&g_lists_seq, 1, memory_order_release);
 }
+static void lw_restart(uint64_t map, uint64_t buckets, uint32_t mask, uint32_t count) {
+    g_lw.map = map; g_lw.buckets = buckets; g_lw.mask = mask; g_lw.next = 0; g_lw.n = 0; g_lw.nodes = 0; g_lw.nrec = 0; g_lw.count0 = count; g_lw.unstable = 0;
+}
 static void refresh_lists(uint64_t mgr, unsigned slices) {   // game thread: every visible list class control (vtable only, no full snapshot)
-    uint64_t t0 = now_ns(), map = rq(mgr), buckets; uint32_t mask;
-    if (!map || !rd(map, &mask, 4) || mask > 0xfffff || !(buckets = rq(map + 0x10))) { g_lw.map = 0; return; }
-    if (slices <= 1 || map != g_lw.map || buckets != g_lw.buckets || mask != g_lw.mask) {
-        g_lw.map = map; g_lw.buckets = buckets; g_lw.mask = mask; g_lw.next = 0; g_lw.n = 0; g_lw.nodes = 0; }
+    static uint64_t bb[4096];   // a run of the bucket array
+    uint64_t t0 = now_ns(), map = rq(mgr), buckets; uint32_t hdr[2], mask;
+    if (!map || !rd(map, hdr, 8) || (mask = hdr[0]) > 0xfffff || !(buckets = rq(map + 0x10))) { g_lw.map = 0; return; }
+    if (slices <= 1 || map != g_lw.map || buckets != g_lw.buckets || mask != g_lw.mask) lw_restart(map, buckets, mask, hdr[1]);
+    if (hdr[1] != g_lw.count0) g_lw.unstable = 1;
     uint32_t total = mask + 1, per = slices <= 1 ? total : (total + slices - 1) / slices, end = total - g_lw.next < per ? total : g_lw.next + per;
-    for (uint32_t i = g_lw.next; i < end && g_lw.n < MAX_LISTS; i++) {
-        uint64_t node = rq(buckets + 8ull * i);
-        for (int guard = 0; node && guard < 4096 && g_lw.n < MAX_LISTS; guard++) {
-            uint64_t nd[3]; if (!rd(node, nd, sizeof nd)) break;
-            uint64_t vt; uint16_t fl; float r[4]; g_lw.nodes++;
-            if (nd[2] && rd(nd[2], &vt, 8) && vt == ma(O_VT_LIST) && rd(nd[2] + 0x18, &fl, 2) && (fl & 4) && rd(nd[2] + 0x88, r, sizeof r) && r[2] > r[0] && r[3] > r[1])
-                g_lw.ui[g_lw.n++] = (list_rect){nd[1], r[0], r[1], r[2], r[3]};
-            node = nd[0];
+    unsigned k = 0; uint64_t lvt = ma(O_VT_LIST);
+    hold(1);
+    for (uint32_t i0 = g_lw.next; i0 < end; ) {
+        uint32_t n = end - i0 < 4096 ? end - i0 : 4096; int bulk = rd(buckets + 8ull * i0, bb, 8u * n);
+        for (uint32_t j = 0; j < n; j++) {
+            uint64_t node = bulk ? bb[j] : rq(buckets + 8ull * (i0 + j));
+            for (int guard = 0; node && guard < 4096; guard++, hold_tick(&k)) {
+                uint64_t nd[3]; if (!rd(node, nd, sizeof nd)) break;
+                uint8_t h[0x40]; float r[4]; g_lw.nodes++;
+                if (nd[2] && rd(nd[2], h, sizeof h)) {
+                    uint64_t vt = *(uint64_t *)h; uint16_t fl = *(uint16_t *)(h + 0x18);
+                    if (in_image(vt) && *(uint64_t *)(h + 0x30) == nd[1]) {
+                        if (g_lw.nrec == g_lw.reccap && g_lw.reccap < MAX_CTRL) {
+                            int nc = g_lw.reccap ? g_lw.reccap * 2 : 16384; ctrl_rec *v = realloc(g_lw.recs, (size_t)nc * sizeof *v);
+                            if (v) { g_lw.recs = v; g_lw.reccap = nc; }
+                        }
+                        if (g_lw.nrec < g_lw.reccap) g_lw.recs[g_lw.nrec++] = (ctrl_rec){nd[1], nd[2]}; else g_lw.unstable = 1;
+                    }
+                    if (g_lw.n < MAX_LISTS && vt == lvt && (fl & 4) && rd(nd[2] + 0x88, r, sizeof r) && r[2] > r[0] && r[3] > r[1])
+                        g_lw.ui[g_lw.n++] = (list_rect){nd[1], r[0], r[1], r[2], r[3]};
+                }
+                node = nd[0];
+            }
         }
+        i0 += n;
     }
+    hold(0);
     g_lw.next = end;
-    if (g_lw.next >= total || g_lw.n >= MAX_LISTS) {
+    if (g_lw.next >= total) {
         lists_publish(); g_ws.cycles++; g_ws.nodes += g_lw.nodes;
-        g_lw.next = 0; g_lw.n = 0; g_lw.nodes = 0;
+        if (!g_lw.unstable) {   // the tap's control list: swap the arrays
+            ctrl_rec *t = g_cs.recs; int tc = g_cs.cap;
+            g_cs.recs = g_lw.recs; g_cs.cap = g_lw.reccap; g_cs.n = g_lw.nrec; g_cs.map = map; g_cs.buckets = buckets; g_cs.mask = mask; g_cs.count = g_lw.count0;
+            g_lw.recs = t; g_lw.reccap = tc; g_ws.published++;
+        }
+        lw_restart(map, buckets, mask, hdr[1]);
     }
     uint64_t dt = now_ns() - t0; g_ws.calls++; g_ws.ns += dt; if (dt > g_ws.max_ns) g_ws.max_ns = dt;
 }
 static void walk_stats(const char *why) {   // one line per menu session (and every 600 polls while it stays open)
     static unsigned said;
-    if (g_ws.calls && said++ < 200)
-        LOG("[d3ui] menu walk (%s, DM_D3_UI_FAST=%d): list refresh %u calls, mean %.0f / max %.0f us, %u walks x %.0f nodes; guest reads %llu direct, %llu "
-            "through the kernel", why, g_fast, g_ws.calls, g_ws.ns / 1e3 / g_ws.calls, g_ws.max_ns / 1e3, g_ws.cycles, g_ws.cycles ? (double)g_ws.nodes / g_ws.cycles : 0.0,
-            (unsigned long long)(g_rd_fast - g_ws.rd_fast0), (unsigned long long)(g_rd_slow - g_ws.rd_slow0));
+    if (g_ws.calls && said++ < 200) {
+        char rg[600]; rg_text(rg, sizeof rg, (const uint64_t (*)[2])g_ws.rg0);
+        LOG("[d3ui] menu walk (%s, DM_D3_UI_FAST=%d): list refresh %u calls, mean %.0f / max %.0f us, %u walks x %.0f nodes (%u kept as the tap's control list); guest reads %llu direct, %llu "
+            "through the kernel, %llu uncommitted alias absent%s%s", why, g_fast, g_ws.calls, g_ws.ns / 1e3 / g_ws.calls, g_ws.max_ns / 1e3, g_ws.cycles,
+            g_ws.cycles ? (double)g_ws.nodes / g_ws.cycles : 0.0, g_ws.published, (unsigned long long)(g_rd_fast - g_ws.rd_fast0), (unsigned long long)(g_rd_slow - g_ws.rd_slow0),
+            (unsigned long long)(g_rd_skip - g_ws.rd_skip0), *rg ? "; kernel by region:" : "", rg);
+    }
     if (g_fast_verify && g_rd_vchecks) LOG("[d3ui] verify: %llu direct reads checked against process_vm_readv, %llu differ", (unsigned long long)g_rd_vchecks,
         (unsigned long long)g_rd_vbad);
-    memset(&g_ws, 0, sizeof g_ws); g_ws.rd_fast0 = g_rd_fast; g_ws.rd_slow0 = g_rd_slow;
+    ws_reset();
 }
 int dm_d3_ui_scroll(float x, float y, float dy);
 int dm_d3_ui_scroll(float x, float y, float dy) {
@@ -1086,7 +1257,7 @@ int dm_d3_ui_window_map(float m[6]) {
 // ---- full dump
 static void dump(uint64_t mgr) {
     char p[1200], praw[1200]; snprintf(p, sizeof p, "%s/ui-dump.tsv", g_dir); snprintf(praw, sizeof praw, "%s/ui-dump-raw.tsv", g_dir);
-    int n = snapshot(mgr); pxmap m; int havem = px_map(&m);
+    int n = snapshot(mgr, 1); pxmap m; int havem = px_map(&m);
     uint64_t focus = rq(mgr + 0x50), active = rq(mgr + 0x28), hover = rq(mgr + 0x20), modal = rq(mgr + 0x38);
     FILE *f = fopen(p, "w"), *fr = fopen(praw, "w");
     if (!f) { LOG("【红】[d3ui] cannot write %s: errno %d", p, errno); if (fr) fclose(fr); return; }
@@ -1191,7 +1362,7 @@ void dm_d3_ui_pump(uint64_t *buttons) {
             uint64_t at[2] = {mgr, rq(mgr)}; int res[2];
             for (int k = 0; k < 2; k++) {
                 uint8_t a[64], b[64]; struct iovec l = {b, sizeof b}, r = {(void *)(uintptr_t)at[k], sizeof b};
-                int d = at[k] && dm_guest_alias_read(at[k], a, sizeof a), kr = at[k] && syscall(SYS_process_vm_readv, getpid(), &l, 1UL, &r, 1UL, 0UL) == (ssize_t)sizeof b;
+                int d = at[k] && dm_guest_alias_read(at[k], a, sizeof a) > 0, kr = at[k] && syscall(SYS_process_vm_readv, getpid(), &l, 1UL, &r, 1UL, 0UL) == (ssize_t)sizeof b;
                 res[k] = !d ? -1 : kr && !memcmp(a, b, sizeof a);   // -1 not a committed alias page, 1 equal, 0 differs
             }
             LOG("[d3ui] direct alias reads self-check: UI manager %#llx %s, control map %#llx %s", (unsigned long long)at[0],
@@ -1211,8 +1382,8 @@ void dm_d3_ui_pump(uint64_t *buttons) {
     { void dm_d3_icons_poll(uint64_t mgr, int menu_open); dm_d3_icons_poll(mgr, open); }   // [D3] HUD skill slots for the touch buttons (hle_d3_icons.c)
     static unsigned tick, open_polls; static int was_open; ++tick;
     if (open != was_open) {   // a menu session starts / ends: its walk line
-        if (was_open) walk_stats("menu closed"); else { memset(&g_ws, 0, sizeof g_ws); g_ws.rd_fast0 = g_rd_fast; g_ws.rd_slow0 = g_rd_slow; }
-        was_open = open; open_polls = 0; g_lw.map = 0;
+        if (was_open) walk_stats("menu closed"); else ws_reset();
+        was_open = open; open_polls = 0; g_lw.map = 0; g_cs.n = 0;
     }
     if (open && ++open_polls % 600 == 0) walk_stats("menu open");
     if (g_tap_mode && open) { if (g_fast & 2) refresh_lists(mgr, 10); else if (tick % 10 == 3) refresh_lists(mgr, 1); }
