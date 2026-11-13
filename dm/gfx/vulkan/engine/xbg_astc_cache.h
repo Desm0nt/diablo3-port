@@ -8,7 +8,7 @@
 //
 // File 'D3AC' v1, little-endian: header (64 bytes: magic, version, entries, flags, index offset u64, data offset u64, data bytes u64),
 // the blocks of every entry (level 0 first; a level is tight rows of 16-byte blocks, ceil(w / bw) x ceil(h / bh)), then the index:
-// 48-byte entries sorted by (crc, adler, bytes, format, levels, width, height).
+// 48-byte entries sorted by (crc, adler, bytes, format, width, height, levels) - the tool's key tuple order.
 #pragma once
 #include <stdint.h>
 #include <string.h>
@@ -46,9 +46,9 @@ static inline bool xbg_ac_less(const XbgAcEntry &a, uint32_t crc, uint32_t adler
     if (a.adler != adler) return a.adler < adler;
     if (a.bytes != bytes) return a.bytes < bytes;
     if (a.format != format) return a.format < format;
-    if (a.levels != levels) return a.levels < levels;
     if (a.width != w) return a.width < w;
-    return a.height < h;
+    if (a.height != h) return a.height < h;
+    return a.levels < levels;
 }
 // Index of the entry with this key in the sorted index, or -1.
 static inline int64_t xbg_ac_find(const XbgAcEntry *idx, uint32_t n, uint32_t crc, uint32_t adler, uint32_t bytes, uint16_t format, uint16_t levels, uint16_t w, uint16_t h) {

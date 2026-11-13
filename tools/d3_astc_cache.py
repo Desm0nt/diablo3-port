@@ -9,9 +9,11 @@ blob whose 'NvBH' blocks hold the texture description (format, size, levels, blo
 puts it into its texture memory (block-linear, BC1 / BC2 / BC3). GPUs without BC sampled those only after decoding them to RGBA8
 (4-8x the memory: 1.6 GB after 45 minutes on a Mali phone, issue #20). This tool encodes every BC texture once, on the PC, to ASTC:
 
-  BC2, BC3 (16 bytes / 4x4)          -> ASTC 4x4 (8.0 bpp, as DOOM 2016's overlay; -thorough below 42 dB)
-  BC1      (8 bytes / 4x4, BC1 RGBA) -> ASTC 6x6 (3.56 bpp) when mip 0 keeps >= 42 dB against the decoded BC1, else 5x5
-                                        (5.12 bpp), else 4x4 (-thorough below 42 dB); alpha (punch-through) is encoded as well
+Every texture must keep mip 0 at >= 42 dB PSNR (RGBA) against its decoded BC (owner, 13.11.2026). Per texture the steps below are
+tried in order and the first one that reaches 42 dB is kept; a texture that stays below 42 dB even at 4x4 -thorough is left out
+(the engine decodes its BC as before), listed in quality.tsv as "bc":
+  BC1      (8 bytes / 4x4, BC1 RGBA) -> 6x6 -fast, 5x5 -fast, 4x4 -fast, 4x4 -medium, 4x4 -thorough (alpha encoded as well)
+  BC2, BC3 (16 bytes / 4x4)          -> 4x4 -fast, 4x4 -medium, 4x4 -thorough (DOOM 2016's block size)
 
 D3's BC1 is 3.6 GB of the 5.7 GB of BC storage, so an ASTC block of BC1's own size is what keeps the cache (and the phone's
 memory) near the BC size; the quality rule keeps every texture visually where its BC was. Unlike DOOM's overlay (same block size,
@@ -24,7 +26,7 @@ Output in OUT (by setup: <work>/Diablo3Mobile/astc, i.e. Download/Diablo3Mobile/
   d3-astc.pack      'D3AC' v1: 64-byte header, the ASTC blocks of every texture (level 0 first, each level tight rows of
                     blocks), then the index (48 bytes an entry, sorted by key)
   manifest.json     written last: version, encoder and settings, counts, sizes, source identity
-  quality.tsv       per texture: name, NVN format, size, levels, ASTC block, PSNR of mip 0 against the decoded BC
+  quality.tsv       per texture: name, NVN format, size, levels, ASTC block (or bc), preset, PSNR of mip 0 against the decoded BC
 All-zero ASTC blocks (the error block on Mali, KB TEX-04) never reach the file: such a block becomes the void-extent block of
 transparent black (counted in the manifest; the engine checks again when it uploads).
 
@@ -51,7 +53,9 @@ BC = {0x41: ('bc1', 8, False), 0x42: ('bc1', 8, False), 0x43: ('bc2', 16, False)
       0x45: ('bc1', 8, True), 0x46: ('bc1', 8, True), 0x47: ('bc2', 16, True), 0x48: ('bc3', 16, True)}   # NVN format -> (kind, block bytes, sRGB)
 QUALITY = {'fastest': 0, 'fast': 10, 'medium': 60, 'thorough': 98}
 TARGET_DB = 42.0                               # mip 0 at or above this: keep (DOOM's retry threshold)
-BC1_BLOCKS = ((6, 6), (5, 5), (4, 4))          # tried in this order for BC1; BC2 / BC3 are always 4x4
+STEPS = {'bc1': ((6, 'fast'), (5, 'fast'), (4, 'fast'), (4, 'medium'), (4, 'thorough')),   # block, preset: tried in order
+         'bc2': ((4, 'fast'), (4, 'medium'), (4, 'thorough')), 'bc3': ((4, 'fast'), (4, 'medium'), (4, 'thorough'))}
+PRESET_CODE = {'fast': 0, 'medium': 1, 'thorough': 2}   # in the index entry's flags
 VOID_BLACK = bytes([0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]) + bytes(8)   # ASTC LDR void extent, transparent black
 PACKAGES = ('astc-encoder-py', 'numpy')
 
@@ -222,42 +226,43 @@ def psnr(a, b):
     return 99.0 if mse == 0 else float(10 * np.log10(255.0 ** 2 / mse))
 
 
-def convert(t, quality):
-    """One texture -> (block w, block h, [level bytes], PSNR of mip 0, zero blocks fixed, preset used)."""
+def convert(t):
+    """One texture -> (block w, block h, [level bytes], PSNR of mip 0, zero blocks fixed, preset, steps tried); block 0 and no levels
+    when no step reaches TARGET_DB (the texture stays BC; the PSNR is the best one seen)."""
     kind, bpb, srgb = BC[t['fmt']]
     imgs = []
     for lv in range(t['levels']):
         bx, by, data = deswizzle_level(t, lv, bpb)
         imgs.append((max(1, t['w'] >> lv), max(1, t['h'] >> lv), decode_bc(kind, t['fmt'], data, bx, by)))
     w0, h0, i0 = imgs[0]
-    best = None
-    for bw, bh in (BC1_BLOCKS if kind == 'bc1' else ((4, 4),)):
-        for q in (quality, 'thorough') if (bw, bh) == (4, 4) and QUALITY[quality] < QUALITY['thorough'] else (quality,):
-            enc, _ = encode(i0, w0, h0, srgb, bw, bh, q)
-            db = psnr(i0[:h0, :w0], decode_astc(enc, w0, h0, srgb, bw, bh, q))
-            if best is None or db > best[2]: best = (bw, bh, db, q)
-            if db >= TARGET_DB: break
-        if best[2] >= TARGET_DB: break
-    bw, bh, db, q = best
+    best, tried = -1.0, 0
+    for b, q in STEPS[kind]:
+        tried += 1
+        enc, _ = encode(i0, w0, h0, srgb, b, b, q)
+        db = psnr(i0[:h0, :w0], decode_astc(enc, w0, h0, srgb, b, b, q))
+        best = max(best, db)
+        if db >= TARGET_DB: break
+    else:
+        return 0, 0, [], best, 0, 'bc', tried
     levels, zeros = [], 0
     for w, h, img in imgs:
-        enc, z = encode(img, w, h, srgb, bw, bh, q); levels.append(enc); zeros += z
-    return bw, bh, levels, db, zeros, q
+        enc, z = encode(img, w, h, srgb, b, b, q); levels.append(enc); zeros += z
+    return b, b, levels, db, zeros, q, tried
 
 
 _arc = {}
 
 
 def job(args):
-    path, name, quality = args
+    path, name = args
     from d3cpklib import CPKArchive
     a = _arc.get(path)
     if a is None: a = _arc[path] = CPKArchive.open(path)
     t = parse_tex(a.read(a.get(name)))
     if t is None: raise Fail(f'{name}: not a texture any more')
     k = key_of(t)
-    bw, bh, levels, db, zeros, q = convert(t, quality)
-    return k, bw, bh, levels, db, zeros, q
+    bw, bh, levels, db, zeros, q, tried = convert(t)
+    return k, bw, bh, levels, db, zeros, q, tried
 
 
 # ---------------------------------------------------------------- planning
@@ -325,7 +330,7 @@ def missing_packages():
 
 def identity(arcs, a):
     return dict(format=CACHE_FORMAT, version=CACHE_VERSION, tool_sha256=sha256_file(__file__), encoders=encoder_versions(),
-                settings=dict(formats=sorted(a.formats), quality=a.quality, target_db=TARGET_DB, bc1_blocks=[f'{x}x{y}' for x, y in BC1_BLOCKS], only=a.only, limit=a.limit),
+                settings=dict(formats=sorted(a.formats), target_db=TARGET_DB, steps={k: [f'{b}x{b} {q}' for b, q in v] for k, v in STEPS.items()}, only=a.only, limit=a.limit),
                 sources=[[lab, os.path.getsize(p)] for lab, p in arcs])
 
 
@@ -362,7 +367,7 @@ def build(a, log=lambda s: print(s, flush=True)):
             for ln in lines[1:]:
                 f = ln.split('\t')
                 if len(f) == 13:
-                    k = tuple(int(x) for x in f[:7]); done[k] = tuple(int(x) for x in f[7:12]) + (f[12],); end = max(end, done[k][2] + done[k][3])
+                    k = tuple(int(x) for x in f[:7]); done[k] = tuple(int(x) for x in f[7:12]) + (f[12],); end = max(end, done[k][3] + done[k][4])
     if not done:
         with open(part, 'wb') as f: f.write(bytes(HEADER.size))
         jpath.write_text(jsig + '\n', encoding='utf-8')
@@ -373,39 +378,42 @@ def build(a, log=lambda s: print(s, flush=True)):
     n_ok, zeros, stats = 0, 0, {}
     with open(part, 'ab') as f, open(jpath, 'a', encoding='utf-8') as jf, ProcessPoolExecutor(max_workers=a.jobs) as ex:
         t1 = time.time()
-        for i, (k, bw, bh, levels, db, z, q) in enumerate(ex.map(job, [(p, n, a.quality) for _, p, n in todo], chunksize=4)):
+        for i, (k, bw, bh, levels, db, z, q, tried) in enumerate(ex.map(job, [(p, n) for _, p, n in todo], chunksize=4)):
             data = b''.join(levels); at = f.tell(); f.write(data)
-            done[k] = (bw, bh, int(round(db * 100)), at, len(data), q)
-            jf.write('\t'.join(str(x) for x in k + done[k][:5]) + f'\t{q}\n')
+            done[k] = (bw, bh, int(round(db * 100)), at if bw else 0, len(data), f'{q}/{tried}')
+            jf.write('\t'.join(str(x) for x in k + done[k][:5]) + f'\t{q}/{tried}\n')
             zeros += z; n_ok += 1
             if (i + 1) % 200 == 0 or i + 1 == len(todo):
                 f.flush(); jf.flush()
                 el = time.time() - t1
                 log(f'  {i + 1} / {len(todo)} textures, {f.tell() / 2**30:.2f} GB, {el:.0f} s, about {el / (i + 1) * (len(todo) - i - 1) / 60:.0f} min left')
     names = {k: n for k, _, n in jobs}
-    keys = sorted(k for k in done if k in names)
+    stayed = sorted(k for k in done if k in names and not done[k][0])   # below 42 dB at 4x4 -thorough: left to the BC decoder
+    keys = sorted(k for k in done if k in names and done[k][0])
     with open(part, 'r+b') as f:
         f.seek(0, 2); index_off = f.tell(); data_bytes = index_off - HEADER.size
         for k in keys:
             crc, adl, size, fmt, w, h, lv = k; bw, bh, db, at, n, q = done[k]
-            f.write(ENTRY.pack(crc, adl, size, fmt, lv, w, h, bw, bh, 0, at, n, db))
+            f.write(ENTRY.pack(crc, adl, size, fmt, lv, w, h, bw, bh, PRESET_CODE[q.split('/')[0]], at, n, db))
         f.seek(0); f.write(HEADER.pack(MAGIC, CACHE_VERSION, len(keys), 0, index_off, HEADER.size, data_bytes))
     by_block = {}
     with open(out / 'quality.tsv', 'w', encoding='utf-8', newline='\n') as q:
-        q.write('name\tformat\twidth\theight\tlevels\tblock\tpsnr_db\tpreset\n')
-        for k in keys:
-            bw, bh, db, at, n, pre = done[k]; blk = f'{bw}x{bh}'
-            s = by_block.setdefault(f'{BC[k[3]][0]} {blk}', [0, 0, 99.0]); s[0] += 1; s[1] += n; s[2] = min(s[2], db / 100)
-            q.write(f'{names[k]}\t{k[3]:#x}\t{k[4]}\t{k[5]}\t{k[6]}\t{blk}\t{db / 100:.2f}\t{pre}\n')
+        q.write('name\tformat\twidth\theight\tlevels\tblock\tpreset\tsteps\tpsnr_db\n')
+        retried = 0
+        for k in sorted(keys + stayed):
+            bw, bh, db, at, n, pre = done[k]; blk = f'{bw}x{bh}' if bw else 'bc'; preset, tried = pre.split('/'); retried += int(tried) > 1
+            s = by_block.setdefault(f'{BC[k[3]][0]} {blk} {preset}', [0, 0, 99.0]); s[0] += 1; s[1] += n; s[2] = min(s[2], db / 100)
+            q.write(f'{names[k]}\t{k[3]:#x}\t{k[4]}\t{k[5]}\t{k[6]}\t{blk}\t{preset}\t{tried}\t{db / 100:.2f}\n')
     pack = out / PACK
     if pack.exists(): pack.unlink()
     part.rename(pack)
     jpath.unlink()
     man = dict(ident, complete=True, entries=len(keys), pack_bytes=os.path.getsize(pack), zero_blocks_fixed=zeros, skipped=skipped,
-               by_kind_and_block={k: dict(textures=v[0], bytes=v[1], min_psnr_db=round(v[2], 2)) for k, v in sorted(by_block.items())},
+               stayed_bc=len(stayed), retried=retried,
+               by_kind_block_preset={k: dict(textures=v[0], bytes=v[1], min_psnr_db=round(v[2], 2)) for k, v in sorted(by_block.items())},
                seconds=round(time.time() - t0))
     (out / 'manifest.json').write_text(json.dumps(man, indent=1), encoding='utf-8')
-    log(f'ASTC cache: {len(keys)} textures, {man["pack_bytes"] / 2**30:.2f} GB in {out / PACK}, {man["seconds"]} s')
+    log(f'ASTC cache: {len(keys)} textures ({retried} needed more than the first step, {len(stayed)} stay BC), {man["pack_bytes"] / 2**30:.2f} GB in {out / PACK}, {man["seconds"]} s')
     return 0
 
 
@@ -415,7 +423,6 @@ def main(argv=None):
     ap.add_argument('out')
     ap.add_argument('--aoc', action='append', default=[], help='a language-pack folder of CPK archives (repeatable)')
     ap.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 2) - 1))
-    ap.add_argument('--quality', choices=QUALITY, default='medium')
     ap.add_argument('--formats', default='bc1,bc2,bc3', help='BC kinds to encode (default bc1,bc2,bc3; bc2,bc3 is the small cache)')
     ap.add_argument('--force', action='store_true')
     ap.add_argument('--check', action='store_true')

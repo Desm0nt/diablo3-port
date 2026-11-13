@@ -81,7 +81,7 @@ Forced crash: `kill -SEGV <pid>` while playing → next start: toast + `Download
 | `DM_GFX_PIPE_CACHE_LOAD` | 1 | 0: start from an empty pipeline cache |
 | `DM_GFX_UBO_DYNAMIC` / `DM_GFX_NOOUT_MASK` / `DM_GFX_ZEROCOPY` | per family | Adreno: 1 / 0 / 1 as before |
 | `DM_GFX_BC_DECODE` / `DM_GFX_BC6_E5` / `DM_GFX_BC_PARTIAL` / `DM_GFX_BC_BATCH_MB` | gpu / 1 / 1 / 32 (16 below 7 GB RAM) | BC without device support |
-| `DM_GFX_ASTC_CACHE` / `DM_ASTC_CACHE_PATH` | auto (on without native BC when the device has ASTC LDR) / `astc/d3-astc.pack` | BC textures from the setup-built ASTC cache instead of the RGBA8 decode (issue #20) |
+| `DM_GFX_ASTC_CACHE` / `DM_ASTC_CACHE_PATH` | auto (on without native BC when the device has ASTC LDR) / `astc/d3-astc.pack` | BC textures from the ASTC cache (setup or made on the phone) instead of the RGBA8 decode (issue #20) |
 | `DM_GFX_ARENA_KEEP` | 6 (2 below 7 GB RAM; 1 under pressure) | 32 MB stream / readback arena chunks kept per slot |
 | `DM_MEM_LOW` / `DM_MEM_SIM_MB` / `DM_MEM_PRESSURE_MB` / `DM_MEM_LOG` | auto / — / 768 below 10 GB, else 512 / 60 | RAM tier (1 = tier 2 "6 GB"), pretend RAM size, MemAvailable pressure threshold, `[mem] census` period in s |
 | `DM_DIRTY_BLOCKS` | 1 | 0: plain page scan |

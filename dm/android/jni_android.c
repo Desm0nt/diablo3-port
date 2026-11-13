@@ -739,3 +739,22 @@ JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeLogPath(JNIEnv
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeQuit(JNIEnv *env, jclass cls) { (void)env; (void)cls; LOG("[java] the app ends (pause menu)"); dm_host_shutdown("pause menu: quit"); }
 JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeOpmode(JNIEnv *env, jclass cls) { (void)env; (void)cls; return dm_opmode(); }
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetOpmode(JNIEnv *env, jclass cls, jint m) { (void)env; (void)cls; dm_set_opmode(m ? 1 : 0); }
+
+// [D3] On-phone ASTC texture cache (astc_convert.cpp, D3Textures.java; issue #20): "[astc] ..." lines go to logcat and, once the game
+// has opened its log, into boot.log (stderr).
+#include "astc_convert.h"
+static void astc_log(const char *line) { __android_log_print(ANDROID_LOG_INFO, "dm", "%s", line); fprintf(stderr, "[dm] %s\n", line); }
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcStart(JNIEnv *env, jclass cls, jstring dir, jint threads) {
+    (void)cls; const char *d = (*env)->GetStringUTFChars(env, dir, NULL); astc_conv_set_log(astc_log);
+    int r = astc_conv_start(d, threads); (*env)->ReleaseStringUTFChars(env, dir, d); return r;
+}
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcLimit(JNIEnv *env, jclass cls, jint n) { (void)env; (void)cls; astc_conv_limit(n); }
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcCancel(JNIEnv *env, jclass cls) { (void)env; (void)cls; astc_conv_cancel(); }
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcProgress(JNIEnv *env, jclass cls, jlongArray out) {
+    (void)cls; int64_t v[ASTC_CONV_FIELDS]; astc_conv_progress(v);
+    jsize n = (*env)->GetArrayLength(env, out); if (n > ASTC_CONV_FIELDS) n = ASTC_CONV_FIELDS;
+    jlong w[ASTC_CONV_FIELDS]; for (int i = 0; i < ASTC_CONV_FIELDS; i++) w[i] = (jlong)v[i];
+    (*env)->SetLongArrayRegion(env, out, 0, n, w);
+}
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcBigCores(JNIEnv *env, jclass cls) { (void)env; (void)cls; return astc_conv_big_cores(); }
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcEstimateMinutes(JNIEnv *env, jclass cls) { (void)env; (void)cls; return astc_conv_estimate_minutes(); }

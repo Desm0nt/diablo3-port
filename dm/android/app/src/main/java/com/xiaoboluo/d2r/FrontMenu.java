@@ -26,7 +26,7 @@ import java.util.Map;
 // input handlers. The menu holds the game "as the Switch does": FrontMenu.Host.hold -> nativeHold (the guest clock frozen, guest clock reads wait,
 // graphics and audio suspended, see the port's hle_hold.c / nx2android's hold_sync), no input reaches the game, and on Resume everything goes on
 // without a jump. The rows:
-//   Resume · Game settings… (the port's own gear dialog) · Mods / cheats… (D3, Host.hasMods) · Gamepad… (skin, opacity, size, layout, editor) · Edit layout · Mode (docked / handheld, when
+//   Resume · Game settings… (the port's own gear dialog) · Mods / cheats… (D3, Host.hasMods) · Prepare textures (D3 without BC on the GPU, Host.hasTextures) · Gamepad… (skin, opacity, size, layout, editor) · Edit layout · Mode (docked / handheld, when
 //   the game has one) · Export save · Import save… · Quit
 final class FrontMenu implements PauseMenu.Listener {
     interface Owner { FrontMenu frontMenu(); }
@@ -43,6 +43,9 @@ final class FrontMenu implements PauseMenu.Listener {
         void immersive();
         default boolean hasMods() { return false; }   // [D3] the port has a "Mods / cheats" page (hle_d3_mods.c): its own menu row
         default void mods() { }
+        default boolean hasTextures() { return false; }   // [D3] the GPU has no BC: the on-phone ASTC texture cache (D3Textures) is offered, its own row
+        default String texturesLabel() { return null; }   // the row's text (its state), null = the default text
+        default void textures() { }
     }
     static final int MODE_NONE = 0, MODE_OPMODE = 1, MODE_LIGHT = 2;   // OPMODE: Switch dock / handheld (dm_set_opmode); LIGHT: DOOM's handheld quality preset
     interface Saves { String export(); String[] list(); String requestImport(String name); String where(); }
@@ -58,7 +61,7 @@ final class FrontMenu implements PauseMenu.Listener {
     private final Activity act; private final Host host; private final Pad pad; private final PauseMenu menu;
     private boolean open, dialog;
     private int[] ids = new int[0];
-    static final int R_RESUME = 0, R_SETTINGS = 1, R_PAD = 2, R_EDIT = 3, R_MODE = 4, R_EXPORT = 5, R_IMPORT = 6, R_QUIT = 7, R_MODS = 8;
+    static final int R_RESUME = 0, R_SETTINGS = 1, R_PAD = 2, R_EDIT = 3, R_MODE = 4, R_EXPORT = 5, R_IMPORT = 6, R_QUIT = 7, R_MODS = 8, R_TEX = 9;
 
     FrontMenu(Activity a, Host h, Pad p, FrameLayout frame) {
         act = a; host = h; pad = p;
@@ -69,9 +72,9 @@ final class FrontMenu implements PauseMenu.Listener {
     private String t(String ru, String en) { return Ui.t(act, ru, en); }
 
     private void rebuild() {
-        int[] all = {R_RESUME, R_SETTINGS, R_MODS, R_PAD, R_EDIT, R_MODE, R_EXPORT, R_IMPORT, R_QUIT};
+        int[] all = {R_RESUME, R_SETTINGS, R_MODS, R_TEX, R_PAD, R_EDIT, R_MODE, R_EXPORT, R_IMPORT, R_QUIT};
         int n = 0; int[] use = new int[all.length];
-        for (int r : all) { if (r == R_MODE && host.modeKind() == MODE_NONE) continue; if ((r == R_EXPORT || r == R_IMPORT) && host.saves() == null) continue; if (r == R_EDIT && pad == null) continue; if (r == R_MODS && !host.hasMods()) continue; use[n++] = r; }
+        for (int r : all) { if (r == R_MODE && host.modeKind() == MODE_NONE) continue; if ((r == R_EXPORT || r == R_IMPORT) && host.saves() == null) continue; if (r == R_EDIT && pad == null) continue; if (r == R_MODS && !host.hasMods()) continue; if (r == R_TEX && !host.hasTextures()) continue; use[n++] = r; }
         ids = java.util.Arrays.copyOf(use, n);
         String[] labels = new String[n]; int danger = -1;
         for (int i = 0; i < n; i++) { labels[i] = label(ids[i]); if (ids[i] == R_QUIT) danger = i; }
@@ -82,6 +85,7 @@ final class FrontMenu implements PauseMenu.Listener {
             case R_RESUME: return t("Продолжить", "Resume");
             case R_SETTINGS: return t("Настройки игры…", "Game settings…");
             case R_MODS: return t("Моды / читы…", "Mods / cheats…");
+            case R_TEX: { String s = host.texturesLabel(); return s != null ? s : t("Подготовить текстуры", "Prepare textures"); }
             case R_PAD: return t("Экранный геймпад…", "On-screen gamepad…");
             case R_EDIT: return t("Изменить раскладку", "Edit the layout");
             case R_MODE: { boolean d = host.docked();
@@ -114,6 +118,7 @@ final class FrontMenu implements PauseMenu.Listener {
             case R_RESUME: close(); break;
             case R_SETTINGS: host.gameSettings(); break;
             case R_MODS: host.mods(); break;
+            case R_TEX: close(); host.textures(); break;
             case R_PAD: padSettings(); break;
             case R_EDIT: edit(); break;
             case R_MODE: { boolean to = !host.docked();

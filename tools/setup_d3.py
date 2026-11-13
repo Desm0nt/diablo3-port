@@ -77,7 +77,7 @@ STAGES = [('Finding and checking your game files', 'a few seconds'),
           ('Extracting the game data (RomFS, ~16 GiB)', '15-45 min, longest with NSZ / XCZ'),
           ('Translating the shaders', '2-10 min; the first run also downloads build packages from NuGet'),
           ('Language-pack DLC (optional)', 'a few min per pack'),
-          ('The ASTC texture cache (phones without BC textures: Mali, PowerVR, Xclipse)', '20-60 min, by the number of CPU cores')]
+          ('The ASTC texture cache (phones without BC textures: Mali, PowerVR, Xclipse)', '10-30 min, by the number of CPU cores')]
 
 
 class Fail(Exception):

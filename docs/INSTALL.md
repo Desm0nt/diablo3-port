@@ -130,7 +130,7 @@ The finished folder is **`work/Diablo3Mobile`** inside the setup folder.
   Internal storage/Download/Diablo3Mobile/astc/...        (the ASTC texture cache: phones with Mali, PowerVR or Xclipse)
   ```
 
-  The `astc` folder (~6 GB, made by setup's last step, 20-60 min) lets phones whose GPU has no BC textures (Mali,
+  The `astc` folder (~6 GB, made by setup's last step, 10-30 min, or on the phone itself: pause menu → "Prepare textures") lets phones whose GPU has no BC textures (Mali,
   PowerVR, Samsung Xclipse) keep the textures about as small as on the Switch instead of 4-8x larger: on 6-8 GB phones it
   is what keeps Android from closing the game. Adreno (Snapdragon) phones do not need it. If you already have the game
   folder, `setup.bat astc` / `bash setup.sh astc` builds only this folder.

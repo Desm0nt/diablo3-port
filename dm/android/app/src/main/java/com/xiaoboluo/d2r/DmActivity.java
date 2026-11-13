@@ -57,6 +57,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final boolean DOOM = "doom".equals(BuildConfig.DM_GAME) || ETERNAL || XC2 || D3;
     static final String DATA_DIR = D3 ? "Diablo3Mobile" : XC2 ? "Xenoblade2Mobile" : ETERNAL ? "DOOM Eternal Mobile" : "DOOM Mobile";   // [DOOM] Download/<DATA_DIR>/{romfs,dm,drivers}
     private DoomPadView doomPad;
+    private D3Textures textures; private boolean texturesAsked;   // [D3] the on-phone ASTC texture cache (issue #20)
     private D3PadView d3Pad;   // [D3] its own on-screen controls (touch / gamepad layouts) instead of doomPad
     static native int nativeStart(String filesDir, String extDir, String romfsSrc, String lang);
     static native void nativeSurface(Object surface, int w, int h);
@@ -156,6 +157,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override public void gameSettings() { showDoomSettings(); }
     @Override public boolean hasMods() { return D3; }   // [D3] "Mods / cheats" is a row of the pause menu (owner 11-13), not inside the game settings
     @Override public void mods() { showD3Mods(); }
+    // [D3] the on-phone ASTC texture cache (D3Textures): a pause-menu row on GPUs without BC
+    @Override public boolean hasTextures() { return D3 && textures != null && D3Textures.wanted(this); }
+    @Override public String texturesLabel() { return textures != null ? textures.label() : null; }
+    @Override public void textures() { if (textures != null) textures.fromMenu(); }
     @Override public FrontMenu.Saves saves() { if (saves == null) saves = SaveTransfer.forGame(this, DATA_DIR); return saves; }
     @Override public void quit() {
         android.util.Log.i("dm", "[java] quit from the pause menu");
@@ -1368,6 +1373,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             gameFrame.addView(touchOverlay, new FrameLayout.LayoutParams(-1, -1));
             touchOverlay.requestApplyInsets();
         }
+        if (D3 && textures == null) textures = new D3Textures(this, gameFrame, new D3Textures.Game() {
+            @Override public boolean running() { return started; }
+            @Override public void hold(boolean on) { DmActivity.this.hold(on); }
+            @Override public void log(String line) { crumb(line); } });
+        // [D3] GPUs without BC: offer the ASTC texture cache before the game starts; while it is made (up front only) the game waits
+        if (D3 && !started && textures.holdingStart()) return;
+        if (D3 && !started && !texturesAsked) { texturesAsked = true; if (textures.askAtStart(this::startHost)) return; }
         if (!view.getHolder().getSurface().isValid() || view.getWidth() <= 0 || view.getHeight() <= 0) return;
         File ext = getExternalFilesDir(null);
         if (ext == null) { showStartError(getString(R.string.dmAndroidStorage)); return; }
