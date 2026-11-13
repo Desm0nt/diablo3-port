@@ -5,6 +5,7 @@
 // Not cut: the getters of Friend / Profile / FriendPresence and the constructors of Friend / Profile / UserPresence (they only read and write the game's own objects and do not go through the service).
 // Return convention: Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
 #include "hle.h"
+#include <string.h>
 
 // 永不触发的通知事件（GetSystemEvent 类返回指针；首次在客体线程上绑定）
 // Notification event that never fires (GetSystemEvent-style calls return a pointer; bound on the guest thread on first use)
@@ -29,8 +30,27 @@ HLE_FORCE("_ZN2nn7friends16UpdateFriendInfoEPNS0_6FriendERKNS_7account3UidEPKNS3
           Result, h_fr_UpdateFriendInfo, void *f, const void *uid, const void *ids, int n) { (void)f; (void)uid; (void)ids; (void)n; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends14AddPlayHistoryERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameES6_", "游玩记录不登记（剪）",
           Result, h_fr_AddPlayHistory, const void *k, const void *a, const void *b) { (void)k; (void)a; (void)b; return RES_FAIL; }
-HLE_FORCE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb", "游玩记录键不可用（剪）",
-          Result, h_fr_GetPHKey, void *k, const void *uid, int local) { (void)k; (void)uid; (void)local; return RES_FAIL; }
+#ifdef DM_GAME_D3
+// [D3] [TL2] Local play: the play history registration key is made by the friends service from the user id alone, with no network (a
+// console in local wireless mode has one), and Pia needs it for every local player before it builds its mesh (TL2 main 0x1bf33b0,
+// CreateMeshJob::SetupLocalPlayerInfo: a failure = 0x10c08 -> the new local game is destroyed two frames after its network came up,
+// phone test 13.11). Once local play is on (hle_ldn.c) the key is an opaque 0x40-byte block derived from the uid (byte 0 = 1 version,
+// byte 1 = the "local" flag, +0x10 the uid); AddPlayHistory stays cut, so it is never registered anywhere.
+int dm_ldn_lan_on(void);
+#endif
+HLE_FORCE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb", "游玩记录键：本地游戏时由 uid 生成，否则不可用（剪）",
+          Result, h_fr_GetPHKey, void *k, const void *uid, int local) {
+#ifdef DM_GAME_D3
+    if (dm_ldn_lan_on() && k && uid) {
+        uint8_t *o = k; memset(o, 0, 0x40); o[0] = 1; o[1] = (uint8_t)(local & 1); memcpy(o + 0x10, uid, 16);
+        uint64_t h = 0xcbf29ce484222325ull; for (int i = 0; i < 0x20; i++) { h ^= o[i]; h *= 0x100000001b3ull; }
+        memcpy(o + 0x20, &h, 8); h ^= 0x9e3779b97f4a7c15ull; h *= 0x100000001b3ull; memcpy(o + 0x28, &h, 8);
+        static int n; if (n++ < 4) LOG("[ldn] friends::GetPlayHistoryRegistrationKey: local play key for the local user (offline, never registered)");
+        return RES_OK;
+    }
+#endif
+    (void)k; (void)uid; (void)local; return RES_FAIL;
+}
 // 通知队列
 // Notification queue
 HLE_FORCE("_ZN2nn7friends17NotificationQueueC1Ev", "通知队列不建会话（剪）", void, h_fr_NqCtor, void *self) { (void)self; }
