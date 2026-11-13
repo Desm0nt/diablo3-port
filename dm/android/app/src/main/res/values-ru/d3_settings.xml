@@ -35,8 +35,15 @@
     <string name="d3_driver_active">Сейчас используется: %1$s</string>
     <string name="d3_driver_active_fallback">Сейчас используется: системный (%1$s не запустился)</string>
     <string name="d3_driver_note">Пакеты драйверов (adrenotools: meta.json + .so или .zip) кладите в Download/Diablo3Mobile/drivers/.</string>
+    <string name="d3_driver_delete">Удалить драйвер…</string>
+    <string name="d3_driver_delete_confirm">Удалить %1$s? Его пакет в Download/Diablo3Mobile/drivers/ тоже удалится.</string>
+    <string name="d3_driver_delete_yes">Удалить</string>
+    <string name="d3_driver_deleted">Удалён: %1$s</string>
+    <string name="d3_driver_delete_failed">Не удалось удалить %1$s</string>
     <string name="d3_rumble">Вибрация</string>
     <string name="d3_fps_counter">Счётчик FPS и времени кадра</string>
+    <string name="d3_logs">Записывать логи</string>
+    <string name="d3_logs_note">Логи пишутся в Download/Diablo3Mobile/logs (boot.log, logcat.txt, по несколько МБ). Выкл: туда ничего не пишется; если игра вылетит, отчёт о сбое (crash.txt) всё равно сохранится.</string>
     <string name="d3_deadzone">Экранные стики: компенсация мёртвой зоны игры</string>
     <string name="d3_dz_none">Нет</string>
     <string name="d3_dz_small">Малая</string>

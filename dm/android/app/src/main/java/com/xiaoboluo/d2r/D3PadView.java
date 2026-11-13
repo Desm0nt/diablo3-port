@@ -49,7 +49,8 @@ import java.util.Map;
 // "fx,fy[,scale]" (anchor as fractions of the view; 2 fields = older builds, scale 1). Separate ("d3_split"): every control on its own,
 // "d3_btn_<layout>_<name>" = "dx;dy;scale;hidden" (dx / dy fractions of the view inside its group, scale x the group's). Hide / Show:
 // the chosen button (Separate) or its group (Grouped) is neither drawn nor hit in play; the editor draws it dimmed and struck through
-// so it can be shown again (⚙ and the sticks never hide). Nothing is written before Save; Cancel / Back drops the changes; "Reset
+// so it can be shown again (the sticks never hide; ⚙ may since GitHub issue #10: Back / the system's edge swipe opens the same pause menu,
+// FrontMenu.back, and with a real controller in use ⚙ is shown anyway). Nothing is written before Save; Cancel / Back drops the changes; "Reset
 // layout" in the pause menu clears everything at once. The ⚙ button keeps its own look
 // ("gear_mode" / "gear_alpha", as in DoomPadView). With a real controller in use only ⚙ is shown and nothing is sent.
 // Output: the native controller channel of the pad (DmActivity.nativePadKey / nativePadAxes, device PAD_DEVICE), keycodes as
@@ -242,7 +243,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         iconGate(); invalidate();
     }
 
-    // group anchors "fx,fy[,scale]" and every control's "dx;dy;scale;hidden" (⚙ and the sticks never hidden)
+    // group anchors "fx,fy[,scale]" and every control's "dx;dy;scale;hidden" (the sticks never hidden)
     private void loadPlaces(SharedPreferences p) {
         pos.clear();
         for (Ctl k : all()) {
@@ -273,7 +274,8 @@ public class D3PadView extends View implements FrontMenu.Pad {
     }
     static final float EDIT_SCALE_MIN = 0.5f, EDIT_SCALE_MAX = 2.5f;   // DOOM's / TL2's editor limits
     private static float clampS(float v) { return Math.max(EDIT_SCALE_MIN, Math.min(EDIT_SCALE_MAX, v)); }
-    private static boolean canHide(Ctl k) { return k instanceof Btn && ((Btn) k).key != SETTINGS; }
+    // ⚙ too (issue #10): the pause menu also opens by Back (the key, the system's edge swipe: FrontMenu.back), and shown() keeps it with a controller
+    private static boolean canHide(Ctl k) { return k instanceof Btn; }
 
     // ---------------- skill icons (hle_d3_icons.c) ----------------
     private static int codeOf(int key) {
@@ -593,7 +595,8 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private void edToggleHide() {
         if (!canHideSel()) return;
         boolean hide = !selHidden();
-        for (Ctl k : all()) if (inSel(k) && canHide(k)) k.hidden = hide;
+        boolean gear = false; for (Ctl k : all()) if (inSel(k) && canHide(k)) { k.hidden = hide; gear |= hide && ((Btn) k).key == SETTINGS; }
+        if (gear) android.widget.Toast.makeText(getContext(), edRu ? "Без ⚙ меню открывается жестом «Назад» (свайп от края экрана)" : "Without ⚙ the menu opens with the Back gesture (a swipe from the screen edge)", android.widget.Toast.LENGTH_LONG).show();
     }
     private RectF edButton(int i) {   // the toolbar (DOOM's / TL2's look), centred a little above the middle
         float W = getWidth(), H = getHeight(), gap = H * 0.02f, bw = Math.min(H * 0.17f, (W - 32 * dp - (ED_BUTTONS - 1) * gap) / ED_BUTTONS), bh = H * 0.085f;
@@ -842,7 +845,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
     }
     private void drawBtn(Canvas c, Btn b) {
         boolean gear = b.key == SETTINGS, on = b.pointer >= 0 || (b.key == MENU_TOGGLE && menuMode);
-        float k = gear ? (gearMode == GEAR_FADED && !editMode ? gearAlpha / 100f : 1f) : k(b);
+        float k = gear ? (editMode ? (b.hidden ? 0.4f : 1f) : gearMode == GEAR_FADED ? gearAlpha / 100f : 1f) : k(b);   // a hidden ⚙ dimmed in the editor as the rest
         float x = cx(b), y = cy(b), r = rad(b);
         if (editMode && b.hidden) { drawBtnBody(c, b, x, y, r, k, on); strike(c, x, y, r); return; }
         drawBtnBody(c, b, x, y, r, k, on);
@@ -883,12 +886,15 @@ public class D3PadView extends View implements FrontMenu.Pad {
         fill.setColor(0xa0000000); c.drawCircle(bx, by - bs * 0.35f, bs * 0.85f, fill);
         c.drawText(b.label, bx, by, text);
     }
-    // [front] a button in the skin: by its label's name; the d-pad's four buttons are drawn as the skin's one d-pad, by the up button, at the group's centre
+    // [front] a button in the skin: by its label's name; the d-pad's four buttons are drawn as the skin's one d-pad, by the up button, at the group's centre,
+    // unless its arrows are apart (dpadApart): then each arrow is the skin's own arrow sprite at its own place and size (GitHub issue #17)
     private boolean drawSkinned(Canvas c, Btn b, float x, float y, float r, float k, boolean on) {
         PadSkin s = skin(); if (!s.on()) return false;
         float sa = (b.key == SETTINGS ? 1 : s.packAlpha()) * k;
-        if (b.key == K_UP || b.key == K_DOWN || b.key == K_LEFT || b.key == K_RIGHT) {
+        if (dpadKey(b.key)) {
             if (!s.has("dpad")) return false;
+            // the box the whole d-pad would have for this arrow's default offset, so an arrow apart keeps the size it has in the whole d-pad
+            if (dpadApart(b)) return s.drawDpadPart(c, dpadDir(b.key), x, y, (float) Math.hypot(b.ox, b.oy) * u() * gs(b) * b.ps + r, on, sa, getHeight());
             if (b.key != K_UP) return true;
             int bits = 0; float gap = 0;
             for (Btn d : btns) if (d.group.equals(b.group)) { gap = Math.max(gap, (float) Math.hypot(cx(d) - ax(d), cy(d) - ay(d)));
@@ -898,6 +904,15 @@ public class D3PadView extends View implements FrontMenu.Pad {
         String n = skinName(b); if (n == null) return false;
         float w = n.equals("l") || n.equals("r") || n.equals("zl") || n.equals("zr") || n.equals("menu") ? r * 1.6f : r;
         return s.draw(c, n, x, y, w, r, on, 0, 0, 0, sa, getHeight());
+    }
+    private static boolean dpadKey(int key) { return key == K_UP || key == K_DOWN || key == K_LEFT || key == K_RIGHT; }
+    private static int dpadDir(int key) { return key == K_RIGHT ? 0 : key == K_LEFT ? 1 : key == K_DOWN ? 2 : 3; }   // PadTheme.DPAD_PARTS
+    // The d-pad's arrows are drawn one by one (issue #17: in Separate mode the skin's one d-pad image did not follow a moved / resized / hidden arrow):
+    // in the editor's Separate mode, and whenever an arrow of the group has its own place, size or is hidden (then the rest is drawn, the hidden one not)
+    private boolean dpadApart(Btn b) {
+        if (editMode && split) return true;
+        for (Btn d : btns) if (d.group.equals(b.group) && dpadKey(d.key) && (d.dx != 0 || d.dy != 0 || d.ps != 1 || d.hidden)) return true;
+        return false;
     }
     private void drawEditor(Canvas c) {   // DOOM's / TL2's toolbar look, the chosen control (or its group) framed
         boolean sh = selHidden(), ch = canHideSel();
