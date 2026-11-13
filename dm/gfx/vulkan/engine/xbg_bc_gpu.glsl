@@ -17,7 +17,7 @@
 // interpolants): they are the integer arithmetic of xbg_texture.c color()/channel() and bcdec's float SNORM palette.
 //
 // The includer defines XBG_FMT (NVN format 0x41..0x50) and XBG_OPT (bit 0: BC4/BC5 unsigned to 8-bit channels, the CPU's
-// xbg_bc_8bit_channels; bit 1: unsigned BC6H to E5B9G9R9, xbg_bc6_e5; bit 2: UNORM BC1 to R5G6B5 / A1R5G5B5, xbg_bc1_16, issue #20).
+// xbg_bc_8bit_channels; bit 1: unsigned BC6H to E5B9G9R9, xbg_bc6_e5).
 #ifndef XBG_BC_GPU_GLSL
 #define XBG_BC_GPU_GLSL
 
@@ -1187,20 +1187,10 @@ uint bc_snorm16(uint lo, uint hi, int i)
     return uint(int(s + (s < 0.0f ? -0.5f : 0.5f))) & 0xffffu;
 }
 
-// [nonadreno] xbg_bc1_16 (XBG_OPT bit 2, issue #20): an RGBA8 BC1 pixel as VK R5G6B5 (0x41) or A1R5G5B5 (0x42), the CPU's rounding
-// (xbg_texture.c xbg_decode_block).
-uint bc_pack16(uint c, bool opaque)
-{
-    uint r = c & 0xffu, g = (c >> 8) & 0xffu, b = (c >> 16) & 0xffu;
-    if (opaque) return ((r * 31u + 127u) / 255u) << 11 | ((g * 63u + 127u) / 255u) << 5 | (b * 31u + 127u) / 255u;
-    return ((c >> 24) >= 128u ? 0x8000u : 0u) | ((r * 31u + 127u) / 255u) << 10 | ((g * 31u + 127u) / 255u) << 5 | (b * 31u + 127u) / 255u;
-}
-
 // One decoded pixel (i = 4 * y + x) of the block p (16 bytes; 8-byte formats use p.x, p.y), little-endian as the CPU writes it.
 uvec2 xbg_bc_pixel(uvec4 p, int i)
 {
     uint f = (XBG_FMT >= 0x45u && XBG_FMT <= 0x48u) ? XBG_FMT - 4u : XBG_FMT;   // sRGB BC1-BC3: the same bytes
-    if ((XBG_OPT & 4u) != 0u && (XBG_FMT == 0x41u || XBG_FMT == 0x42u)) return uvec2(bc_pack16(bc_color(p.x, p.y, i, false, f == 0x41u), f == 0x41u), 0u);
     if (f == 0x41u || f == 0x42u) return uvec2(bc_color(p.x, p.y, i, false, f == 0x41u), 0u);
     if (f == 0x43u)
         return uvec2((bc_color(p.z, p.w, i, true, false) & 0xffffffu) | ((((p[(4 * i) >> 5] >> uint((4 * i) & 31)) & 15u) * 17u) << 24), 0u);

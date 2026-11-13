@@ -4,7 +4,7 @@
 #   tools\.runtime\python   a private Python when none is installed: python.org's official NuGet package ("python" on
 #                           nuget.org, a complete Python without installer or registry entries)
 # Packages from PyPI: cryptography, zstandard, lz4, capstone<6 (the patcher is checked with capstone 5), unicorn<3 (the patch
-# equivalence check dm/verify/equiv.py).
+# equivalence check dm/verify/equiv.py), astc-encoder-py and numpy (the ASTC texture cache, tools/d3_astc_cache.py).
 # Every download is asked first (D3_SETUP_YES=1 answers yes). A second run reuses what is there and needs no network.
 #   -Mode install   (default) make sure a ready Python exists; exit code 0 when tools\.runtime has one
 #   -Mode check     only report, change nothing
@@ -19,9 +19,9 @@ $Private = Join-Path $Runtime 'python'
 $PrivatePy = Join-Path $Private 'python.exe'
 $PyVersion = '3.12.10'
 $NuGetUrl = "https://api.nuget.org/v3-flatcontainer/python/$PyVersion/python.$PyVersion.nupkg"
-$Packages = @('cryptography', 'zstandard', 'lz4', 'capstone<6', 'unicorn<3')
+$Packages = @('cryptography', 'zstandard', 'lz4', 'capstone<6', 'unicorn<3', 'astc-encoder-py==0.1.12', 'numpy<2.4')
 $NeedVersion = 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'
-$NeedAll = 'import sys; assert sys.version_info >= (3, 10); import cryptography, zstandard, lz4, capstone, unicorn'
+$NeedAll = 'import sys; assert sys.version_info >= (3, 10); import cryptography, zstandard, lz4, capstone, unicorn, astc_encoder, numpy'
 $Yes = $env:D3_SETUP_YES -eq '1'
 
 function Say($text) { Write-Host "== $text" }

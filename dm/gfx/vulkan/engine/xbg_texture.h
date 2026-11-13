@@ -12,7 +12,7 @@ enum xbg_pixels { XBG_RGBA8_UNORM=1, XBG_RGBA8_SRGB=2,
                   XBG_R16_UNORM=3, XBG_RG16_UNORM=4,
                   XBG_R16_SNORM=5, XBG_RG16_SNORM=6, XBG_RGBA16_SFLOAT=7,
                   XBG_R8_UNORM=8, XBG_R8_SNORM=9, XBG_RG8_UNORM=10, XBG_RG8_SNORM=11,
-                  XBG_RGB9E5_UFLOAT=12, XBG_RGB565_UNORM=13, XBG_RGBA5551_UNORM=14 };
+                  XBG_RGB9E5_UFLOAT=12 };
 /* 设备不支持 16 位单/双通道格式的线性过滤时置 1（Mali 的 R16G16_UNORM 就是这种）：
  * BC4/BC5 改为解码成 8 位 R8/RG8，牺牲通道精度换取可线性过滤。
  * Set when the device cannot linearly filter 16-bit single/dual channel formats (Mali's R16G16_UNORM):
@@ -24,15 +24,6 @@ extern int xbg_bc_8bit_channels;
  * caches on Mali (128^2 x5760 cube array with 7 levels, 8192x4096) take ~1.4 GB decoded, half of that packed. Signed BC6H (0x4f) stays
  * RGBA16F. Set by the engine before its first decoded image (DM_GFX_BC6_E5, default 1). */
 extern int xbg_bc6_e5;
-/* [nonadreno] 置 1 时 BC1（0x41 / 0x42，UNORM）解码成 16 位 R5G6B5 / A1R5G5B5（每像素 2 字节，原 RGBA8 4 字节）：BC1 端点本就是 565，
- * 只有 1/3、2/3 插值色被舍到 5/6 位（每通道至多差 4/255）。D3 在 Mali 上解码后的贴图约 1.6 GB，BC1 约占六成。sRGB BC1（0x45/0x46）仍为
- * RGBA8（没有 16 位 sRGB 格式）。由引擎在建第一张解码图前设定（DM_GFX_BC1_16，issue #20）。只供 NVN 引擎用：旧 D2R 贴图路径
- * （xbg_texture_parse 的 map()）不看它。 | When 1, BC1 (0x41 / 0x42, UNORM) decodes to 16-bit R5G6B5 / A1R5G5B5 (2 bytes a pixel instead
- * of RGBA8's 4): BC1 endpoints are 565 already, only the 1/3 and 2/3 interpolants are rounded to 5/6 bits (at most 4/255 a channel). D3's
- * decoded textures on Mali are ~1.6 GB, BC1 about 60% of that. sRGB BC1 (0x45/0x46) stays RGBA8 (no 16-bit sRGB format). Set by the engine
- * before its first decoded image (DM_GFX_BC1_16, issue #20). NVN engine only: the old D2R texture path (map() of xbg_texture_parse)
- * ignores it. */
-extern int xbg_bc1_16;
 /* Shared-exponent packing of three non-negative binary16 values (GL_EXT_texture_shared_exponent rounding, integer exact; the GPU
  * decoder xbg_bc_gpu.glsl uses the same arithmetic). */
 uint32_t xbg_e5b9g9r9_from_half(uint32_t r,uint32_t g,uint32_t b);

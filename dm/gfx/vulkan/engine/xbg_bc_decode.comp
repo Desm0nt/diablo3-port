@@ -2,14 +2,14 @@
 #extension GL_GOOGLE_include_directive : require
 // [nonadreno] GPU BC decode (DM_GFX_BC_DECODE=gpu, issue #6): one invocation decodes one 4x4 BC block of a batch into the
 // output storage buffer, in the pixel layout the CPU decoder produces (rows padded to whole blocks); vkCmdCopyBufferToImage
-// then moves it into the decoded image (RGBA8 / R16 / RG16 / R8 / RG8 / RGBA16F / E5B9G9R9 / R5G6B5 / A1R5G5B5; sRGB is only the image format).
+// then moves it into the decoded image (RGBA8 / R16 / RG16 / R8 / RG8 / RGBA16F / E5B9G9R9; sRGB is only the image format).
 // A batch (xbg_bc_gpu.h XbgBcGpuBatch) is many regions: block rectangles of one subresource (whole levels, row bands of big
 // levels, or the dirty GOB blocks of a partial upload). Input words: 8 per region, then the raw blocks.
 // Decoders: xbg_bc_gpu.glsl (BC6H/BC7 ported from Granite, MIT; see that file). Regenerate xbg_bc_decode_spv.h after editing
 // this file or xbg_bc_gpu.glsl (the command is at the top of that header).
 layout(local_size_x = 64) in;
 layout(constant_id = 0) const uint XBG_FMT = 0x41u;   // NVN format 0x41..0x50
-layout(constant_id = 1) const uint XBG_OPT = 0u;      // bit 0: BC4/BC5 to 8-bit channels; bit 1: unsigned BC6H to E5B9G9R9; bit 2: BC1 to 16-bit
+layout(constant_id = 1) const uint XBG_OPT = 0u;      // bit 0: BC4/BC5 to 8-bit channels; bit 1: unsigned BC6H to E5B9G9R9
 layout(std430, set = 0, binding = 0) readonly buffer Src { uint words[]; } src;
 layout(std430, set = 0, binding = 1) writeonly buffer Dst { uint words[]; } dst;
 // regions: region count; blocks: blocks in the batch; bpp: output bytes per pixel (1, 2, 4, 8); block_words: 2 (8-byte) or 4

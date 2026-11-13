@@ -27,6 +27,8 @@ extern "C" int xbg_completion_wait_selftest(char *report,size_t bytes);
 #include "xbg_adreno_policy.h"
 #include "xbg_bc_policy.h"
 #include "xbg_astc_overlay.h"
+#include "xbg_astc_cache.h"
+#include <zlib.h>
 #include "xbg_writeback_policy.h"
 #include "xbg_clear_spv.h"
 #include "xbg_bright_spv.h"
@@ -99,6 +101,7 @@ __attribute__((weak)) float dm_bright_k(void);
 #include <memory>
 #include <mutex>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <string>
 #include <vector>
 #include <chrono>
@@ -307,6 +310,7 @@ bool native_bc=false;uint64_t native_bc_images=0,decoded_bc_images=0;int64_t ima
 int bc_mode=-1;int64_t decoded_bytes_live=0,decoded_native_live=0;
 // [nonadreno] issue #20: decoded BC bytes by source family (0 BC1, 1 BC2/BC3, 2 the rest) for the [mem] census line (namespace memstat)
 int64_t decoded_group_live[3]={};
+int64_t astc_cache_bytes_live=0;   // [nonadreno] issue #20: images created from the ASTC texture cache (namespace astccache)
 inline int decoded_group(uint32_t f){f=f>=0x45 && f<=0x48?f-4:f;return f==0x41 || f==0x42?0:f==0x43 || f==0x44?1:2;}
 // [nonadreno] ASTC / ETC2 / EAC overlay (variant A, xbg_astc_overlay.h): the BC formats whose file blocks the overlay replaced, from
 // DM_GFX_ASTC_FORMATS (set by the boot choice in vulkan_present.cpp only when the overlay is mounted; read at engine init). Their
@@ -486,7 +490,7 @@ VkFormat vertex_format_fallback(VkFormat f,uint32_t loc,uint32_t offset,uint32_t
     static std::set<int> told;if(told.insert(int(f)).second)xbg_logf("NVN vertex format %u has no VERTEX_BUFFER support: read as %u (location=%u offset=%u stride=%u; the 4th channel is not 1)",unsigned(f),unsigned(w),loc,offset,stride);
     return w;}
 // [nonadreno] issue #20: device RAM tiers, arena budget under memory pressure and the once-a-minute [mem] census line (defined after bcgpu)
-namespace memstat{extern uint32_t sec;long ram_mb();int ram_tier();size_t arena_keep();void tick();void note_created(uint64_t serial);}
+namespace memstat{long ram_mb();int ram_tier();size_t arena_keep();void tick();}
 struct ArenaChunk{VkBuffer buffer{};VkDeviceMemory memory{};uint8_t *mapped{};VkDeviceSize size=0,used=0;bool coherent=true;};
 constexpr VkBufferUsageFlags arena_usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT|VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT|VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 constexpr VkDeviceSize arena_chunk_bytes=32ull*1024*1024;
@@ -1719,8 +1723,6 @@ VkFormat decoded_format(uint32_t pixels) {
     case XBG_R8_UNORM:return VK_FORMAT_R8_UNORM;
     case XBG_RG8_UNORM:return VK_FORMAT_R8G8_UNORM;
     case XBG_RGB9E5_UFLOAT:return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;   // [nonadreno] unsigned BC6H with xbg_bc6_e5 (DM_GFX_BC6_E5)
-    case XBG_RGB565_UNORM:return VK_FORMAT_R5G6B5_UNORM_PACK16;       // [nonadreno] UNORM BC1 with xbg_bc1_16 (DM_GFX_BC1_16, issue #20)
-    case XBG_RGBA5551_UNORM:return VK_FORMAT_A1R5G5B5_UNORM_PACK16;
     default:xbg_fatalf("Invalid decoded BC pixel format %u",pixels);
     }
 }
@@ -1764,13 +1766,13 @@ struct Image {
     // slot_serial at the last get_image of this image: equal to the current value means a command of this submission already used it
     // (gfx-upload-prologue decides by it whether an upload may go ahead of the submission).
     uint64_t slot_use=0;
-    uint32_t use_tick=0;   // [nonadreno] issue #20: memstat::sec at the last get_image (idle decoded BC images are evicted, memstat::evict_idle)
+    int pack=-1;int64_t pack_bytes=0;VkFormat pack_unorm{},pack_srgb{};   // [nonadreno] issue #20: entry of the ASTC texture cache it was made from (-1: none)
     uint64_t dirty_stamp=0,dirty_seen=0;   // tex_dirty: the tracker stamp of the checked content (0: not tracked yet) and the tracker generation last checked
 #ifdef DM_GAME_ETERNAL
     uint64_t sparse_gen=0,sparse_stamp=0;bool sparse=false;   // [ETERNAL] storage in a virtual pool: mapping generation and dirty stamp of the checked content (sparse_check)
 #endif
     std::map<std::array<uint32_t,8>,VkImageView> views;std::vector<std::vector<uint64_t>> fb_keys; // fb_keys: persistent framebuffers using these views
-    ~Image(){image_bytes_live-=mem_bytes;bc_image_bytes_live-=bc_bytes;astc_ov_bytes_live-=subst_bytes;bc_data_bytes_live-=bc_data;decoded_bytes_live-=dec_bytes;decoded_native_live-=dec_native;decoded_group_live[decoded_group(source.d.format)]-=dec_bytes;forget_framebuffers(*this);for(auto &v:views)vkDestroyImageView(cfg.device,v.second,nullptr);if(image)vkDestroyImage(cfg.device,image,nullptr);if(memory)vkFreeMemory(cfg.device,memory,nullptr);}
+    ~Image(){image_bytes_live-=mem_bytes;bc_image_bytes_live-=bc_bytes;astc_ov_bytes_live-=subst_bytes;bc_data_bytes_live-=bc_data;decoded_bytes_live-=dec_bytes;decoded_native_live-=dec_native;decoded_group_live[decoded_group(source.d.format)]-=dec_bytes;astc_cache_bytes_live-=pack_bytes;forget_framebuffers(*this);for(auto &v:views)vkDestroyImageView(cfg.device,v.second,nullptr);if(image)vkDestroyImage(cfg.device,image,nullptr);if(memory)vkFreeMemory(cfg.device,memory,nullptr);}
     void transition(VkCommandBuffer cmd,VkImageLayout next){
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.oldLayout=layout;b.newLayout=next;b.image=image;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
         b.subresourceRange={aspects,0,levels,0,layers};b.srcAccessMask=layout==VK_IMAGE_LAYOUT_UNDEFINED?0:VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT;b.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
@@ -1781,10 +1783,12 @@ struct Image {
         if(decoded){
             need(xbg_bc_view_compatible(source.d.format,v->format),"BC texture view must retain compression and signedness");
             xbg_bc_format info;need(xbg_bc_format_info(v->format,&info)==0,"Invalid BC view format");
-            // [nonadreno] DM_GFX_BC1_16: a 16-bit BC1 image has no sRGB partner of its size (sRGB BC1 stays RGBA8): such a view is logged and
-            // viewed as the image's own format (gamma off at worst, never a size-mismatched view)
-            if(info.bytes_per_pixel!=bpp){static unsigned told=0;if(told++<8)xbg_logf("NVN BC1 16-bit: view fmt=%#x of serial=%llu fmt=%#x has no 16-bit format, viewed as vk=%d (DM_GFX_BC1_16=0 restores RGBA8)",v->format,(unsigned long long)source.serial,source.d.format,int(fmt));return fmt;}
             return decoded_format(info.pixels);
+        }
+        if(pack>=0){   // [nonadreno] ASTC texture cache: the UNORM / sRGB partner of the entry's block format; anything else is logged, own format
+            if(xbg_bc_view_compatible(source.d.format,v->format))return xbg_ac_srgb(v->format)?pack_srgb:pack_unorm;
+            static unsigned told=0;if(told++<8)xbg_logf("NVN astc cache: view fmt=%#x of serial=%llu fmt=%#x has no ASTC partner, viewed as vk=%d",v->format,(unsigned long long)source.serial,source.d.format,int(fmt));
+            return fmt;
         }
         if(subst){   // [nonadreno] ASTC overlay: a view keeps the substitute class (UNORM <-> sRGB of the same substitute); anything else is
                      // logged and viewed as the image's own format (wrong-looking at worst, never fatal: the blocks are not BC any more)
@@ -2339,14 +2343,6 @@ void bc_decode_init(){
     VkFormatProperties q{};vkGetPhysicalDeviceFormatProperties(cfg.physical,VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,&q);
     const VkFormatFeatureFlags need_e5=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     xbg_bc6_e5=want_e5 && (q.optimalTilingFeatures&need_e5)==need_e5;
-    // [nonadreno] issue #20 (Samsung A34, Mali-G68, 5.4 GB: LOW_MEMORY kills at rss 2.4 GB with 1.6 GB of decoded BC images, ~60% BC1):
-    // UNORM BC1 decodes to R5G6B5 / A1R5G5B5, half the bytes. DM_GFX_BC1_16=auto (default): on below 10 GB of RAM (memstat::ram_tier
-    // >= 1; DM_MEM_LOW=1 forces it, e.g. on a big phone with DM_GFX_SIM_GPU=mali), 1 always, 0 never. Both formats are mandatory with
-    // linear filtering in Vulkan; a device without them keeps RGBA8.
-    {const char *e1=getenv("DM_GFX_BC1_16");const int want=e1 && *e1 && strcmp(e1,"auto")?atoi(e1)!=0:memstat::ram_tier()>=1;
-     VkFormatProperties a{},b{};vkGetPhysicalDeviceFormatProperties(cfg.physical,VK_FORMAT_R5G6B5_UNORM_PACK16,&a);vkGetPhysicalDeviceFormatProperties(cfg.physical,VK_FORMAT_A1R5G5B5_UNORM_PACK16,&b);
-     xbg_bc1_16=want && (a.optimalTilingFeatures&need_e5)==need_e5 && (b.optimalTilingFeatures&need_e5)==need_e5;
-     xbg_logf("NVN BC decode bc1_16=%d (DM_GFX_BC1_16=%s, ram %ld MB tier %d; R5G6B5 features %#x A1R5G5B5 %#x)",xbg_bc1_16,e1?e1:"auto",memstat::ram_mb(),memstat::ram_tier(),unsigned(a.optimalTilingFeatures),unsigned(b.optimalTilingFeatures));}
     if(bc_mode==2 && !bcgpu::prepare()){bc_mode=1;xbg_logf("NVN BC decode: GPU decoder unavailable, decoding on the CPU");}
     xbg_logf("NVN BC decode device=\"%s\" native_bc=%d bc=%u -> decoder=%s bc6=%s (E5B9G9R9 features %#x) bc4/5_8bit=%d partial=%d batch=%zuMB",
         properties.deviceName,int(native_bc),unsigned(cfg.enabled_core.textureCompressionBC),bc_mode==2?"gpu":"cpu",xbg_bc6_e5?"e5b9g9r9":"rgba16f",unsigned(q.optimalTilingFeatures),
@@ -2407,7 +2403,7 @@ struct BcUpload {
     BcUpload(Image &i,const tex_t *tex,bool prologue):im(i),t(tex),pro(prologue),fmt(tex->d.format),cap(bc_batch_bytes()){
         int w=1,h=1;const int b=nvn_fmt_bpb(fmt,&w,&h);bw=uint32_t(std::max(w,1));bh=uint32_t(std::max(h,1));
         if(!im.decoded){block_bytes=bpp=im.bpp;return;}
-        need(b==8 || b==16,"BC block size");block_bytes=uint32_t(b);bpp=im.bpp;opt=(xbg_bc_8bit_channels && (fmt==0x49 || fmt==0x4b)?1u:0u)|(xbg_bc6_e5 && fmt==0x50?2u:0u)|(xbg_bc1_16 && (fmt==0x41 || fmt==0x42)?4u:0u);   // only where it changes the output: one pipeline per format
+        need(b==8 || b==16,"BC block size");block_bytes=uint32_t(b);bpp=im.bpp;opt=(xbg_bc_8bit_channels && (fmt==0x49 || fmt==0x4b)?1u:0u)|(xbg_bc6_e5 && fmt==0x50?2u:0u);   // only where it changes the output: one pipeline per format
         mode=bc_mode==2?2:1;
         if(mode==2){pipe=bcgpu::pipeline(fmt,opt);if(!pipe){mode=1;static bool told=false;if(!told){told=true;xbg_logf("NVN BC decode: no GPU pipeline for fmt=%#x opt=%u, decoding on the CPU",fmt,opt);}}}
     }
@@ -2490,7 +2486,7 @@ int partial_tex=-1;uint64_t partial_blocks=0,partial_bytes=0,partial_uploads=0;
 bool partial_eligible(const Image &im,const tex_t *t){
     if(partial_tex<0){const char *e=getenv("DM_GFX_PARTIAL_TEX");partial_tex=e?atoi(e)!=0:1;}
     return partial_tex && tex_dirty && nvn_dirty_tracked && nvn_dirty_protect && nvn_dirty_now && nvn_dirty_since && t->mem && t->L.size>=(4u<<20)
-        && (t->d.target!=2 || im.layers==1) && (!im.decoded || bc_partial_on()) && im.aspects==VK_IMAGE_ASPECT_COLOR_BIT && !(t->d.flags&0x10) && im.samples==VK_SAMPLE_COUNT_1_BIT
+        && (t->d.target!=2 || im.layers==1) && (!im.decoded || bc_partial_on()) && im.pack<0 && im.aspects==VK_IMAGE_ASPECT_COLOR_BIT && !(t->d.flags&0x10) && im.samples==VK_SAMPLE_COUNT_1_BIT
         && nvn_dirty_tracked(t->mem,t->L.size);
 }
 unsigned partial_why(const Image &im,const tex_t *t){return (t->L.size<(4u<<20))|0<<1|(t->d.target==2 && im.layers!=1)<<2|(im.decoded && !bc_partial_on())<<3|(im.aspects!=VK_IMAGE_ASPECT_COLOR_BIT)<<4|((t->d.flags&0x10)!=0)<<5|(im.samples!=VK_SAMPLE_COUNT_1_BIT)<<6|(!(nvn_dirty_tracked && nvn_dirty_tracked(t->mem,t->L.size)))<<7;}
@@ -2545,12 +2541,102 @@ bool partial_upload(Image &im,const tex_t *t,uint64_t since,uint64_t stamp=0){
     }
     return true;
 }
+// [nonadreno] issue #20: the ASTC texture cache (xbg_astc_cache.h; built by setup, tools/d3_astc_cache.py). Without BC on the device a
+// texture of the cache is created in its ASTC format and uploaded from the pack instead of being decoded to RGBA8: memory about the
+// size of BC (6 GB phones were killed with 1.6 GB of decoded textures) and no decode work. Looked up once per image, when it is created,
+// by the storage the game wrote (the pack's key); a miss or a texture the game changes later takes the BC decoder as before.
+//   DM_GFX_ASTC_CACHE: auto (default) = on where the engine decodes BC (no native BC: Mali, PowerVR, Xclipse, DM_GFX_SIM_GPU) and the
+//     device samples ASTC LDR; 1 = also next to native BC (tests on Adreno); 0 = off. DM_ASTC_CACHE_PATH: another pack file.
+//   Default pack: <data folder>/astc/d3-astc.pack (Download/Diablo3Mobile/astc), next to dm/shaders.
+// Log: "NVN astc cache: ..." once (used or why not), then hits / misses at 64, 128, 256 ... lookups, and in the [mem] census line.
+namespace astccache {
+int state=-1;int fd=-1;std::string path;std::vector<XbgAcEntry> idx;std::unordered_set<uint64_t> shapes,refused;bool block_ok[3]={};
+uint64_t hits=0,miss_shape=0,miss_hash=0,miss_block=0,lost=0,upgraded=0,uploads=0,upload_bytes=0,zero_fixed=0,read_fails=0,hash_ns=0;
+std::string data_root(){std::string d=cfg.shader_directory?cfg.shader_directory:"";for(int i=0;i<2;i++){size_t c=d.find_last_of('/');d=c==std::string::npos?std::string("."):d.substr(0,c);}return d;}
+void init(){
+    state=0;const char *m=getenv("DM_GFX_ASTC_CACHE");const int mode=m && *m && strcmp(m,"auto")?atoi(m):-1;
+    const char *why=nullptr;
+    if(mode==0)why="DM_GFX_ASTC_CACHE=0";
+    else if(!cfg.enabled_core.textureCompressionASTC_LDR)why="the device has no ASTC LDR";
+    else if(native_bc && mode<0)why="the device samples BC (DM_GFX_ASTC_CACHE=1 uses the cache anyway)";
+    const char *pe=getenv("DM_ASTC_CACHE_PATH");path=pe && *pe?pe:data_root()+"/astc/d3-astc.pack";
+    if(!why){
+        fd=open(path.c_str(),O_RDONLY|O_CLOEXEC);XbgAcHeader h{};struct stat st{};
+        if(fd<0)why="no astc/d3-astc.pack (run setup, copy its astc folder next to romfs)";
+        else if(fstat(fd,&st) || pread(fd,&h,sizeof h,0)!=ssize_t(sizeof h) || xbg_ac_header_check(h,uint64_t(st.st_size),&why)){if(!why)why="unreadable";}
+        else{idx.resize(h.entries);const size_t n=sizeof(XbgAcEntry)*h.entries;
+            if(pread(fd,idx.data(),n,off_t(h.index_off))!=ssize_t(n))why="index unreadable";
+            else{for(auto &e:idx)if(!xbg_ac_entry_ok(e,h)){why="corrupt index entry";break;}}
+            if(!why){
+                const uint8_t sizes[3]={4,5,6};const VkFormatFeatureFlags need_f=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+                for(int k=0;k<3;k++){VkFormatProperties a{},b{};vkGetPhysicalDeviceFormatProperties(cfg.physical,xbg_ac_format(sizes[k],sizes[k],0x44),&a);vkGetPhysicalDeviceFormatProperties(cfg.physical,xbg_ac_format(sizes[k],sizes[k],0x48),&b);
+                    block_ok[k]=(a.optimalTilingFeatures&need_f)==need_f && (b.optimalTilingFeatures&need_f)==need_f;}
+                for(auto &e:idx)shapes.insert(xbg_ac_shape(e.bytes,e.format,e.levels,e.width,e.height));
+                state=1;
+                xbg_logf("NVN astc cache: using %s: %u textures, %.2f GB of ASTC (blocks 4x4=%d 5x5=%d 6x6=%d on this device; DM_GFX_ASTC_CACHE=%s)",
+                    path.c_str(),h.entries,h.data_bytes/1073741824.0,int(block_ok[0]),int(block_ok[1]),int(block_ok[2]),m?m:"auto");}}
+    }
+    if(state!=1){if(fd>=0)close(fd);fd=-1;idx.clear();xbg_logf("NVN astc cache: not used (%s; %s); BC textures are decoded",why?why:"?",path.c_str());}
+}
+void note(){
+    const uint64_t n=hits+miss_shape+miss_hash+miss_block;if(n<64 || (n&(n-1)))return;
+    xbg_logf("NVN astc cache: lookups %llu: hits %llu, misses %llu (not in the cache %llu, other bytes %llu, block size not on this device %llu), changed later %llu, filled later %llu; uploads %llu (%.1f MB read, zero blocks fixed %llu, read errors %llu), hashing %.1f ms, live %.1f MB",
+        (unsigned long long)n,(unsigned long long)hits,(unsigned long long)(miss_shape+miss_hash+miss_block),(unsigned long long)miss_shape,(unsigned long long)miss_hash,(unsigned long long)miss_block,(unsigned long long)lost,(unsigned long long)upgraded,
+        (unsigned long long)uploads,upload_bytes/1048576.0,(unsigned long long)zero_fixed,(unsigned long long)read_fails,hash_ns/1e6,astc_cache_bytes_live/1048576.0);
+}
+bool key(const tex_t *t,uint32_t *crc,uint32_t *adler){
+    const uint64_t t0=timing_clock();const uint8_t *m=reinterpret_cast<const uint8_t*>(t->mem);uLong c=crc32(0L,Z_NULL,0),a=adler32(0L,Z_NULL,0);
+    for(uint64_t o=0;o<t->L.size;){const uInt n=uInt(std::min<uint64_t>(t->L.size-o,1u<<30));c=crc32(c,m+o,n);a=adler32(a,m+o,n);o+=n;}
+    hash_ns+=timing_clock()-t0;*crc=uint32_t(c);*adler=uint32_t(a);return true;}
+// The entry for this texture, or -1 (then the usual BC path). Only 2D single-sample BC1-BC3 textures with storage.
+int lookup(const tex_t *t,VkSampleCountFlagBits samples){
+    if(state<0)init();
+    if(state!=1 || samples!=VK_SAMPLE_COUNT_1_BIT || t->d.format<0x41 || t->d.format>0x48 || t->d.target!=1 || !t->mem || t->L.layers!=1 || t->L.size>UINT32_MAX || refused.count(t->serial))return -1;
+    const uint16_t lv=uint16_t(t->d.levels?t->d.levels:1);
+    if(!shapes.count(xbg_ac_shape(uint32_t(t->L.size),uint16_t(t->d.format),lv,uint16_t(t->d.width),uint16_t(t->d.height)))){++miss_shape;
+        {static unsigned n=0;if(n++<12)xbg_logf("NVN astc cache: miss (no texture of this shape) serial=%llu fmt=%#x %ux%u levels=%u storage=%llu pkg_block_h=%d",(unsigned long long)t->serial,t->d.format,t->d.width,t->d.height,unsigned(lv),(unsigned long long)t->L.size,t->d.pkg_block_h);}
+        note();return -1;}
+    uint32_t c,a;key(t,&c,&a);
+    const int64_t i=xbg_ac_find(idx.data(),uint32_t(idx.size()),c,a,uint32_t(t->L.size),uint16_t(t->d.format),lv,uint16_t(t->d.width),uint16_t(t->d.height));
+    if(i<0){++miss_hash;{static unsigned n=0;if(n++<12)xbg_logf("NVN astc cache: miss (other bytes) serial=%llu fmt=%#x %ux%u levels=%u storage=%llu crc=%08x adler=%08x",(unsigned long long)t->serial,t->d.format,t->d.width,t->d.height,unsigned(lv),(unsigned long long)t->L.size,c,a);}
+        note();return -1;}
+    const XbgAcEntry &e=idx[size_t(i)];if(!block_ok[e.bw-4]){++miss_block;note();return -1;}
+    ++hits;note();return int(i);
+}
+const XbgAcEntry &entry(int i){return idx[size_t(i)];}
+// lookup() without counting a miss: a decoded image whose storage the game completed later
+bool would_hit(const tex_t *t){
+    const uint16_t lv=uint16_t(t->d.levels?t->d.levels:1);
+    if(t->d.format<0x41 || t->d.format>0x48 || t->d.target!=1 || !t->mem || t->L.layers!=1 || t->L.size>UINT32_MAX)return false;
+    if(!shapes.count(xbg_ac_shape(uint32_t(t->L.size),uint16_t(t->d.format),lv,uint16_t(t->d.width),uint16_t(t->d.height))))return false;
+    uint32_t c,a;key(t,&c,&a);const int64_t i=xbg_ac_find(idx.data(),uint32_t(idx.size()),c,a,uint32_t(t->L.size),uint16_t(t->d.format),lv,uint16_t(t->d.width),uint16_t(t->d.height));
+    return i>=0 && block_ok[idx[size_t(i)].bw-4];}
+// The guest storage still holds the bytes of entry i.
+bool same(int i,const tex_t *t){const XbgAcEntry &e=idx[size_t(i)];uint32_t c,a;key(t,&c,&a);return c==e.crc && a==e.adler && t->L.size==e.bytes;}
+// Read the entry's blocks into a stream buffer and copy them into the image (the prologue when `pro`). Returns the staging bytes.
+size_t upload(Image &im,const tex_t *t,bool pro){
+    const XbgAcEntry &e=idx[size_t(im.pack)];Buffer staging=stream_buffer(e.data_bytes,nullptr,0,false);
+    uint8_t *dst=static_cast<uint8_t*>(staging.mapped);uint64_t got=0;
+    while(got<e.data_bytes){const ssize_t r=pread(fd,dst+got,size_t(e.data_bytes-got),off_t(e.data_off+got));if(r<=0)break;got+=uint64_t(r);}
+    if(got<e.data_bytes){memset(dst+got,0,size_t(e.data_bytes-got));++read_fails;static unsigned n=0;if(n++<8)xbg_logf("NVN astc cache: read of serial=%llu failed at %llu of %u bytes (errno %d): the rest is transparent black",(unsigned long long)t->serial,(unsigned long long)got,e.data_bytes,errno);}
+    zero_fixed+=xbg_ac_sanitize(dst,e.data_bytes);staging.flush();
+    std::vector<VkBufferImageCopy> copies;uint64_t off=0;
+    for(uint32_t l=0;l<im.levels && l<e.levels;l++){VkBufferImageCopy c{};c.bufferOffset=staging.offset+off;c.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,l,0,1};
+        c.imageExtent={std::max(1u,im.width>>l),std::max(1u,im.height>>l),1};copies.push_back(c);off+=xbg_ac_level_bytes(e,l);}
+    if(pro){Slot &s=recording_slot();s.pro_images.push_back({im.image,im.layout,im.aspects,im.levels,im.layers,staging.buffer,copies});im.layout=VK_IMAGE_LAYOUT_GENERAL;++uploads_prologue;}
+    else{++uploads_inpass;if(open_pass.cmd)++uploads_broke_pass;Commands c;im.transition(c.command,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdCopyBufferToImage(c.command,staging.buffer,im.image,im.layout,uint32_t(copies.size()),copies.data());im.transition(c.command,VK_IMAGE_LAYOUT_GENERAL);c.finish();}
+    ++uploads;upload_bytes+=e.data_bytes;
+    {static unsigned n=0;if(n++<8)xbg_logf("NVN astc cache: upload serial=%llu fmt=%#x %ux%u levels=%u -> ASTC %ux%u %u bytes (mip 0 %.1f dB) prologue=%d",(unsigned long long)t->serial,t->d.format,im.width,im.height,im.levels,e.bw,e.bh,e.data_bytes,e.psnr_x100/100.0,int(pro));}
+    return e.data_bytes;
+}
+}
 inline Image &get_image(const tex_t *t,bool upload){
     if(read_preflight)return get_image_read(t,upload);
     if(img_fast && t && t->serial && t->magic==MAGIC('T','E','X',0) && !provenance_file){
         const ImgFront &front=img_front[(t->serial*0x9E3779B97F4A7C15ull)>>54];
         if(front.epoch==images_epoch && front.serial==t->serial){Image &im=*front.im;
-            if(!upload || (im.checked_submission==stats.submissions && (im.uploaded || im.gpu_written))){im.slot_use=slot_serial;im.use_tick=memstat::sec;return im;}}}
+            if(!upload || (im.checked_submission==stats.submissions && (im.uploaded || im.gpu_written))){im.slot_use=slot_serial;return im;}}}
     return get_image_slow(t,upload);
 }
 Image &get_image_slow(const tex_t *t,bool upload){CPU_SCOPE(Image);
@@ -2595,10 +2681,12 @@ Image &get_image_slow(const tex_t *t,bool upload){CPU_SCOPE(Image);
         // 否则带线性过滤的采样器会拿不到可过滤格式。 | When the device cannot linearly filter R16G16_UNORM (Mali-G925: no FILTER_LINEAR),
         // BC4/BC5 decode to 8-bit channels so linear-filtered samplers stay valid.
         {static int bc8=-1;if(bc8<0){VkFormatProperties q;vkGetPhysicalDeviceFormatProperties(cfg.physical,VK_FORMAT_R16G16_UNORM,&q);bc8=!(q.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);if(bc8)xbg_logf("NVN caps bc 8bit: R16G16_UNORM optimalFeatures=%#x lacks SAMPLED_IMAGE_FILTER_LINEAR",q.optimalTilingFeatures);}if(bc8)xbg_bc_8bit_channels=1;}
-        const BcStore store=bc_store(t,p->samples);p->decoded=store==BC_DECODED;p->subst=store==BC_SUBST;   // [nonadreno] issue #6: the one decision point
+        const int pack=astccache::lookup(t,p->samples);   // [nonadreno] issue #20: the ASTC texture cache has this texture's blocks
+        const BcStore store=pack>=0?BC_NOT:bc_store(t,p->samples);p->decoded=store==BC_DECODED;p->subst=store==BC_SUBST;   // [nonadreno] issue #6: the one decision point
         xbg_bc_format info{};if(store!=BC_NOT && store!=BC_SUBST){xbg_bc_format_info(t->d.format,&info);++(p->decoded?decoded_bc_images:native_bc_images);}   // after bc_store: DM_GFX_BC6_E5 is set
         if(p->decoded){p->bpp=info.bytes_per_pixel;p->fmt=decoded_format(info.pixels);need(p->samples==VK_SAMPLE_COUNT_1_BIT,"BC texture cannot be multisampled");}
         else if(p->subst){const char *kept=nullptr;p->fmt=astc_ov_format(t,t->L.layers,&kept);p->bpp=t->L.bpb;}   // [nonadreno] ASTC overlay: same block size, blocks as they are
+        else if(pack>=0){const XbgAcEntry &e=astccache::entry(pack);p->pack=pack;p->pack_unorm=xbg_ac_format(e.bw,e.bh,0x44);p->pack_srgb=xbg_ac_format(e.bw,e.bh,0x48);p->fmt=xbg_ac_format(e.bw,e.bh,t->d.format);p->bpp=16;}
         else {p->fmt=format(t->d.format);p->bpp=t->L.bpb;if(t->d.format==0x32 && depth16_as_d24)p->fmt=VK_FORMAT_X8_D24_UNORM_PACK32;}
         VkFormatProperties fp;vkGetPhysicalDeviceFormatProperties(cfg.physical,p->fmt,&fp);
         VkImageUsageFlags usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -2628,10 +2716,11 @@ Image &get_image_slow(const tex_t *t,bool upload){CPU_SCOPE(Image);
         VK(vkCreateImage(cfg.device,&ci,nullptr,&p->image));p->create=ci;VkMemoryRequirements r;vkGetImageMemoryRequirements(cfg.device,p->image,&r);
         p->mem_bytes=int64_t(r.size);image_bytes_live+=p->mem_bytes;if(xbg_bc_format_info(t->d.format,&info)==0){p->bc_bytes=p->mem_bytes;p->bc_data=int64_t(t->L.size);bc_image_bytes_live+=p->bc_bytes;bc_data_bytes_live+=p->bc_data;}
         if(p->decoded){p->dec_bytes=p->mem_bytes;p->dec_native=int64_t(t->L.size);decoded_bytes_live+=p->dec_bytes;decoded_native_live+=p->dec_native;decoded_group_live[decoded_group(t->d.format)]+=p->dec_bytes;bc_vram_note(*p,t);}
+        if(p->pack>=0){p->pack_bytes=p->mem_bytes;astc_cache_bytes_live+=p->pack_bytes;}
         if(p->subst){p->subst_bytes=p->mem_bytes;astc_ov_bytes_live+=p->subst_bytes;astc_ov_note(t,p->layers,nullptr,p->fmt);}   // [nonadreno] ASTC overlay
         else if(astc_ov_mask && store!=BC_NOT){const char *kept=nullptr;astc_ov_format(t,t->L.layers,&kept);if(kept)astc_ov_note(t,p->layers,kept,VK_FORMAT_UNDEFINED);}
         VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.allocationSize=r.size;ai.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);VK(vkAllocateMemory(cfg.device,&ai,nullptr,&p->memory));VK(vkBindImageMemory(cfg.device,p->image,p->memory,0));
-        it=images.emplace(t->serial,std::move(p)).first;image_index_dirty=true;++memo_check_gen;++memo_bump[4];note_created(t->serial);if(it->second->decoded)memstat::note_created(t->serial);provenance_image("CREATE",t,*it->second);
+        it=images.emplace(t->serial,std::move(p)).first;image_index_dirty=true;++memo_check_gen;++memo_bump[4];note_created(t->serial);provenance_image("CREATE",t,*it->second);
     }
     hit=it->second.get();front.serial=t->serial;front.epoch=images_epoch;front.im=hit;}
     Image &im=*hit;
@@ -2701,8 +2790,28 @@ Image &get_image_slow(const tex_t *t,bool upload){CPU_SCOPE(Image);
         // [nonadreno] (from the DOOM 2016 port, fc66617, its issue #6) decoded BC textures (devices without BC) and colour textures whose
         // single staging buffer would pass the 256 MB arena bound (that aborted) upload in batches through BcUpload; all others keep the
         // single buffer below (Adreno as before).
-        const bool banded=im.aspects==VK_IMAGE_ASPECT_COLOR_BIT && !(t->d.flags&0x10) && (im.decoded || upload_staging_bytes(im,t)>256ull*1024*1024);
-        if(banded){const bool pro=upload_prologue && im.slot_use!=slot_serial && !ab_off("uppro");if(pro)++uploads_prologue;else{++uploads_inpass;if(open_pass.cmd)++uploads_broke_pass;}
+        // [nonadreno] issue #20: an image made from the ASTC texture cache uploads the cached blocks. When the game changed its storage
+        // since (a re-upload whose bytes are not the entry's any more) the image is dropped as nvnTextureFinalize drops one and made
+        // again for this serial without the cache, i.e. on the BC decoder.
+        if(im.pack>=0 && reupload && !astccache::same(im.pack,t)){
+            astccache::refused.insert(t->serial);++astccache::lost;
+            {static unsigned n=0;if(n++<16)xbg_logf("NVN astc cache: serial=%llu fmt=%#x %ux%u changed by the game: made again on the BC decoder",(unsigned long long)t->serial,t->d.format,t->d.width,t->d.height);}
+            for(auto i=images.begin();i!=images.end();)if(i->second.get()==&im){note_erased(i->first);retire_object(i->second);i=images.erase(i);}else ++i;
+            image_index_dirty=true;++images_epoch;++memo_check_gen;++memo_bump[2];
+            return get_image_slow(t,upload);
+        }
+        // A texture the game filled after the image was made (its storage was not complete at the lookup) is looked up again when it
+        // is uploaded again; a hit makes the image anew from the cache.
+        if(im.decoded && reupload && astccache::state==1 && !astccache::refused.count(t->serial) && astccache::would_hit(t)){
+            ++astccache::upgraded;
+            for(auto i=images.begin();i!=images.end();)if(i->second.get()==&im){note_erased(i->first);retire_object(i->second);i=images.erase(i);}else ++i;
+            image_index_dirty=true;++images_epoch;++memo_check_gen;++memo_bump[2];
+            return get_image_slow(t,upload);
+        }
+        const bool packed=im.pack>=0;
+        const bool banded=!packed && im.aspects==VK_IMAGE_ASPECT_COLOR_BIT && !(t->d.flags&0x10) && (im.decoded || upload_staging_bytes(im,t)>256ull*1024*1024);
+        if(packed)up_bytes=astccache::upload(im,t,upload_prologue && im.slot_use!=slot_serial && !ab_off("uppro"));
+        else if(banded){const bool pro=upload_prologue && im.slot_use!=slot_serial && !ab_off("uppro");if(pro)++uploads_prologue;else{++uploads_inpass;if(open_pass.cmd)++uploads_broke_pass;}
             up_bytes=upload_banded(im,t,pro);
         }else{
         for(uint32_t layer=0;layer<im.layers;layer++)for(uint32_t level=0;level<im.levels;level++){
@@ -2741,9 +2850,9 @@ Image &get_image_slow(const tex_t *t,bool upload){CPU_SCOPE(Image);
         }   // [nonadreno] !banded
         im.uploaded=true;provenance_write(im,__LINE__);hash_site=3;im.cpu_hash=hash_memory(t->mem,t->L.size);hash_site=0;im.checked_submission=stats.submissions;
         if(partial_eligible(im,t) && !ab_off("texdirty")){nvn_dirty_protect(t->mem,t->L.size);im.dirty_stamp=im.dirty_seen=nvn_dirty_now();im.stable_checks=4;}
-        if(reupload)++hud::reuploads;else ++hud::uploads;hud::upload_bytes+=banded?up_bytes:linear.size();hud::upload_ns+=timing_clock()-up_t0;
+        if(reupload)++hud::reuploads;else ++hud::uploads;hud::upload_bytes+=banded || packed?up_bytes:linear.size();hud::upload_ns+=timing_clock()-up_t0;
     }
-    provenance_image(upload?"GET_UPLOAD":"GET",t,im);im.slot_use=slot_serial;im.use_tick=memstat::sec;return im;
+    provenance_image(upload?"GET_UPLOAD":"GET",t,im);im.slot_use=slot_serial;return im;
 }
 // read_preflight: main's order (cc91eb1). Copy the descriptor, resolve CPU reads of its storage, then look the image up.
 Image &get_image_read(const tex_t *t,bool upload){
@@ -5830,37 +5939,6 @@ extern "C" int64_t dm_alias_mapped_bytes(void) __attribute__((weak));
 extern "C" size_t dm_guest_heap_bytes(void) __attribute__((weak));
 namespace memstat {
 long total_mb=-1,avail_mb=-1;int tier=-1;bool pressure=false;long pressure_mb=-1;size_t keep=0;uint64_t start=0,last_sample=0,last_line=0,line_every=0;
-uint32_t sec=0;   // seconds since the first tick (Image::use_tick)
-// Idle eviction of decoded BC images (DM_GFX_TEX_EVICT): D3 keeps nearly every texture it loaded (issue #20 log: 2681 made, 721
-// finalized in play, 1842 only at exit),
-// decoded on Mali to 1.6 GB of device memory. A decoded image is a pure function of guest memory (its guest copy stays the game's, CPU
-// writes reach it there, partial uploads track them), so one not used for DM_GFX_TEX_IDLE_S (90) seconds can be dropped as
-// nvnTextureFinalize drops one (xbg_legacy_tex_release_now: retired with the recording slot) and is decoded again from the guest copy on
-// its next use. Only above the budget DM_GFX_TEX_BUDGET_MB of decoded bytes (auto: tier 2 512, tier 1 1024; 0 = off), oldest first down
-// to 90 % of it; under memory pressure the budget halves and the idle time drops to a third. Never: GPU-written images (render / copy
-// targets, the guest copy is stale), not yet uploaded ones, ones shared by an alias serial. Logged per round with the re-decodes of
-// evicted serials (churn: raise the budget or the idle time).
-long budget_mb=-1;uint32_t idle_s=90;uint64_t evicted=0,evicted_bytes=0,recreated=0;std::unordered_set<uint64_t> gone;
-void note_created(uint64_t serial){if(!gone.empty() && gone.erase(serial))++recreated;}
-void evict_idle(){
-    if(budget_mb<0){const char *e=getenv("DM_GFX_TEX_EVICT"),*b=getenv("DM_GFX_TEX_BUDGET_MB"),*i=getenv("DM_GFX_TEX_IDLE_S");
-        const bool on=e && *e && strcmp(e,"auto")?atoi(e)!=0:tier>=1;budget_mb=!on?0:b?atol(b):tier>=2?512:1024;if(i && atol(i)>0)idle_s=uint32_t(atol(i));
-        xbg_logf("[mem] decoded BC eviction %s (DM_GFX_TEX_EVICT=%s): budget %ld MB, idle %u s",budget_mb>0?"on":"off",e?e:"auto",budget_mb,idle_s);}
-    if(budget_mb<=0)return;
-    const int64_t budget=(pressure?budget_mb/2:budget_mb)<<20;if(decoded_bytes_live<=budget)return;
-    const uint32_t idle=pressure?std::max(1u,idle_s/3):idle_s;
-    std::vector<std::pair<uint32_t,uint64_t>> cand;
-    for(auto &e:images){const Image &im=*e.second;if(im.decoded && !im.gpu_written && im.uploaded && e.second.use_count()==1 && sec-im.use_tick>=idle)cand.push_back({im.use_tick,e.first});}
-    if(cand.empty())return;
-    std::sort(cand.begin(),cand.end());
-    const int64_t target=budget-budget/10,before=decoded_bytes_live;unsigned n=0;int64_t freed=0;
-    for(auto &c:cand){if(decoded_bytes_live-freed<=target)break;auto it=images.find(c.second);if(it==images.end())continue;
-        freed+=it->second->dec_bytes;note_erased(it->first);retire_object(it->second);images.erase(it);gone.insert(c.second);++n;}
-    if(!n)return;
-    image_index_dirty=true;++images_epoch;++memo_check_gen;memo_bump[2]+=n;evicted+=n;evicted_bytes+=uint64_t(freed);
-    xbg_logf("[mem] evicted %u idle decoded BC images (%.0f MB, idle >= %u s): decoded %.0f -> %.0f MB of budget %ld MB%s; total evicted %llu (%.0f MB), re-decoded later %llu",
-        n,freed/1048576.0,idle,before/1048576.0,(before-freed)/1048576.0,(long)(budget>>20),pressure?" (pressure)":"",(unsigned long long)evicted,evicted_bytes/1048576.0,(unsigned long long)recreated);
-}
 long meminfo(const char *key){FILE *f=fopen("/proc/meminfo","r");if(!f)return -1;char ln[160];long v=-1;const size_t n=strlen(key);
     while(fgets(ln,sizeof ln,f))if(!strncmp(ln,key,n) && ln[n]==':'){v=atol(ln+n+1)/1024;break;}fclose(f);return v;}
 long ram_mb(){if(total_mb<0){const char *e=getenv("DM_MEM_SIM_MB");total_mb=e && atol(e)>0?atol(e):meminfo("MemTotal");if(total_mb<0)total_mb=0;}return total_mb;}
@@ -5880,12 +5958,11 @@ void status(long out[5]){   // VmRSS RssAnon RssFile RssShmem VmSwap, MB
     FILE *f=fopen("/proc/self/status","r");if(!f)return;char ln[160];
     while(fgets(ln,sizeof ln,f))for(int i=0;i<5;i++){const size_t n=strlen(keys[i]);if(!strncmp(ln,keys[i],n) && ln[n]==':')out[i]=atol(ln+n+1)/1024;}fclose(f);}
 void tick(){
-    const uint64_t now=timing_clock();if(tier<0)ram_tier();if(!start)start=now;sec=uint32_t((now-start)/1000000000ull);
+    const uint64_t now=timing_clock();if(tier<0)ram_tier();if(!start)start=now;
     if(now-last_sample<5000000000ull && last_sample)return;last_sample=now;
     avail_mb=meminfo("MemAvailable");
     const bool was=pressure;pressure=pressure_mb>0 && avail_mb>=0 && avail_mb<(was?pressure_mb+256:pressure_mb);   // 256 MB hysteresis
     if(was!=pressure)xbg_logf("[mem] pressure %s: MemAvailable %ld MB (threshold %ld MB): arenas keep %zu chunks",pressure?"on":"off",avail_mb,pressure_mb,arena_keep());
-    if(decoded_bc_images)evict_idle();
     if(!line_every || (last_line && now-last_line<line_every))return;
     if(!last_line){last_line=now;return;}   // the first line a minute in
     last_line=now;
@@ -5893,11 +5970,11 @@ void tick(){
     const double M=1048576.0;const double guest=dm_alias_mapped_bytes?double(dm_alias_mapped_bytes()):0,heap=dm_guest_heap_bytes?double(dm_guest_heap_bytes()):0;
     const double gpu_private=double(image_bytes_live)+double(bcgpu::in_bytes+bcgpu::out_bytes);
     xbg_logf("[mem] census at %llu s: rss %ld MB (anon %ld file %ld shmem %ld swap %ld) avail %ld of %ld MB tier %d pressure %d | guest committed %.0f MB heap %.0f MB | "
-             "vk images %.0f MB (decoded bc %.0f MB: bc1 %.0f bc2/3 %.0f other %.0f, as native bc %.0f MB; bc1_16=%d bc6_e5=%d; astc %.0f MB) | "
-             "arenas stream %.0f MB in %u chunks, readback %.0f MB in %u, vcache %.0f MB, static %.0f MB, bc scratch %.0f MB | images+scratch outside rss on Mali %.0f MB | evicted %llu (%.0f MB), re-decoded %llu",
+             "vk images %.0f MB (decoded bc %.0f MB: bc1 %.0f bc2/3 %.0f other %.0f, as native bc %.0f MB; bc6_e5=%d; astc overlay %.0f MB; astc cache %.0f MB, %llu hits %llu misses) | "
+             "arenas stream %.0f MB in %u chunks, readback %.0f MB in %u, vcache %.0f MB, static %.0f MB, bc scratch %.0f MB | images+scratch outside rss on Mali %.0f MB",
         (unsigned long long)((now-start)/1000000000ull),st[0],st[1],st[2],st[3],st[4],avail_mb,ram_mb(),tier,int(pressure),guest/M,heap/M,
-        image_bytes_live/M,decoded_bytes_live/M,decoded_group_live[0]/M,decoded_group_live[1]/M,decoded_group_live[2]/M,decoded_native_live/M,xbg_bc1_16,xbg_bc6_e5,astc_ov_bytes_live/M,
-        stream/M,sn,readback/M,rn,arena_bytes(vcache::arena,nullptr)/M,arena_bytes(static_arena,nullptr)/M,double(bcgpu::in_bytes+bcgpu::out_bytes)/M,gpu_private/M,(unsigned long long)evicted,evicted_bytes/1048576.0,(unsigned long long)recreated);
+        image_bytes_live/M,decoded_bytes_live/M,decoded_group_live[0]/M,decoded_group_live[1]/M,decoded_group_live[2]/M,decoded_native_live/M,xbg_bc6_e5,astc_ov_bytes_live/M,astc_cache_bytes_live/M,(unsigned long long)astccache::hits,(unsigned long long)(astccache::miss_shape+astccache::miss_hash),
+        stream/M,sn,readback/M,rn,arena_bytes(vcache::arena,nullptr)/M,arena_bytes(static_arena,nullptr)/M,double(bcgpu::in_bytes+bcgpu::out_bytes)/M,gpu_private/M);
 }
 }
 namespace bright {
@@ -6140,7 +6217,7 @@ void copy_texture_buffer(const p_copy_b2t &request,bool to_buffer){preflight_cpu
     }
     Image &im=get_image(p.tex,to_buffer);
     if(p.has_view && p.view.set_format)(void)im.view_format(&p.view);
-    if(im.samples!=VK_SAMPLE_COUNT_1_BIT || (im.decoded&&to_buffer))   // 原生BC在下方独立读回 | Native BC reads back in its own branch below
+    if(im.samples!=VK_SAMPLE_COUNT_1_BIT || ((im.decoded || im.pack>=0)&&to_buffer))   // 原生BC在下方独立读回 | Native BC reads back in its own branch below
         xbg_fatalf("NVN %s format=%#x samples=%u region=%d,%d,%d:%dx%dx%d needs %s",to_buffer?"CopyTextureToBuffer":"CopyBufferToTexture",p.tex->d.format,uint32_t(im.samples),p.r.xoffset,p.r.yoffset,p.r.zoffset,p.r.width,p.r.height,p.r.depth,im.decoded?"compressed readback encoding":"depth/stencil or multisample packing");
     need((p.flags&~NVN_COPY_FLAGS_ENGINE_2D_BIT)==0,"Buffer/texture copy flags not implemented");
     uint32_t level=p.has_view&&p.view.set_levels?p.view.base_level:0,layer=p.has_view&&p.view.set_layers?p.view.min_layer:0;region_check(im,level,layer,p.r);need(p.src,"Null buffer image copy address");
@@ -6170,6 +6247,15 @@ void copy_texture_buffer(const p_copy_b2t &request,bool to_buffer){preflight_cpu
             need(xbg_depth_merge(p.tex->d.format,p.r.width,p.r.height,p.r.depth,reinterpret_cast<void*>(p.src),bytes,row,image,dp,pixels*f.depth_bytes,sp,pixels*f.stencil_bytes)==0,"Packed NVN depth readback merge failed");
         }else im.gpu_written=true,provenance_write(im,__LINE__);
         xbg_logf("NVN depth %s serial=%llu format=%#x level=%u layer=%u region=%dx%dx%d planes=%zu",to_buffer?"readback":"upload",(unsigned long long)p.tex->serial,p.tex->d.format,level,layer,p.r.width,p.r.height,p.r.depth,copies.size());return;
+    }
+    if(im.pack>=0){   // [nonadreno] issue #20: BC blocks into a texture made from the ASTC cache: into guest memory, then re-uploaded (the cache
+                      // no longer has those bytes, so the image is made again on the BC decoder); not seen in D3
+        size_t row,image,source_bytes;int bw,bh,bpb=nvn_fmt_bpb(p.tex->d.format,&bw,&bh);
+        if(nvn_copy_pitch(p.r.width,p.r.height,p.r.depth,bw,bh,bpb,state.copy_stride,state.copy_image_stride,&row,&image,&source_bytes) && !(p.tex->d.flags&0x10)){
+            invalidate_cpu_range(uint64_t(uintptr_t(p.tex->mem)),p.tex->L.size);
+            if(guest_texture_write(p.tex,level,layer,p.r,reinterpret_cast<const uint8_t*>(p.src),row,image)){im.uploaded=false;im.checked_submission=UINT64_MAX;return;}}
+        static unsigned n=0;if(n++<8)xbg_logf("NVN astc cache: CopyBufferToTexture into serial=%llu fmt=%#x could not reach guest memory: skipped",(unsigned long long)p.tex->serial,p.tex->d.format);
+        return;
     }
     if(!im.decoded && p.tex->d.format>=0x41 && p.tex->d.format<=0x50){ // 原生BC保持块编码 | Native BC retains block encoding
         int bw,bh,bpb=nvn_fmt_bpb(p.tex->d.format,&bw,&bh);need(bw==4 && bh==4 && !(p.r.xoffset%4) && !(p.r.yoffset%4),"BC copy origin must be block aligned");
@@ -6253,6 +6339,10 @@ void copy_texture_buffer(const p_copy_b2t &request,bool to_buffer){preflight_cpu
 void copy_texture(const p_copy_t2t &p){preflight_cpu_reads();Image &s=get_image(p.src,true),&d=get_image(p.dst,false);{static unsigned n=0;if(n++<60)xbg_logf("NVN COPYT2T src=%llu fmt=%#x %ux%ux%u L%u lv%u -> dst=%llu fmt=%#x %ux%u L%u lv%u decoded=%d/%d region=%d,%d,%d %dx%dx%d -> %d,%d,%d sv=%d/%u/%u dv=%d/%u/%u",(unsigned long long)p.src->serial,p.src->d.format,s.width,s.height,s.depth,s.layers,s.levels,(unsigned long long)p.dst->serial,p.dst->d.format,d.width,d.height,d.layers,d.levels,int(s.decoded),int(d.decoded),p.sr.xoffset,p.sr.yoffset,p.sr.zoffset,p.sr.width,p.sr.height,p.sr.depth,p.dr.xoffset,p.dr.yoffset,p.dr.zoffset,int(p.has_sv),p.has_sv?p.sv.base_level:0,p.has_sv?p.sv.min_layer:0,int(p.has_dv),p.has_dv?p.dv.base_level:0,p.has_dv?p.dv.min_layer:0);}
     if(p.has_sv && p.sv.set_format)(void)s.view_format(&p.sv);
     if(p.has_dv && p.dv.set_format)(void)d.view_format(&p.dv);
+    if(s.pack>=0 || d.pack>=0){   // [nonadreno] issue #20: ASTC-cache blocks and BC blocks (or another block size) do not mix; not seen in D3
+        static unsigned n=0;if(n++<16)xbg_logf("NVN astc cache: copy skipped src=%llu fmt=%#x pack=%d -> dst=%llu fmt=%#x pack=%d",(unsigned long long)p.src->serial,p.src->d.format,s.pack,(unsigned long long)p.dst->serial,p.dst->d.format,d.pack);
+        return;
+    }
     // [nonadreno] ASTC overlay: a copy between a substituted texture (overlay blocks) and a BC texture that is not substituted (real BC
     // blocks: a VT cache) cannot be done block for block; it is skipped and logged (wrong-looking at worst, never fatal). Not seen in
     // DOOM: the atlases and the probe array are filled by CPU writes of file blocks, the VT caches by the game's transcoder.

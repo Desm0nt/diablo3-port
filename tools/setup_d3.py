@@ -5,18 +5,22 @@
       Looks for the base game, the update v1441792, optional language-pack DLC and prod.keys in put-game-files-here/ (next to
       the setup scripts) and in the current directory, under any file names, and prepares everything.
   setup FILE_OR_FOLDER... [--work DIR] [--push [SERIAL]] [--dry-run] [--yes] [--keep-nsp] [--skip-shaders] [--skip-verify]
-        [--steps exefs,patch,verify,romfs,shaders,dlc]
+        [--steps exefs,patch,verify,romfs,shaders,dlc,astc] [--no-astc]
       The same with explicit files (or folders to search), in any order. Packages: NSP, NSZ, XCI, XCZ, also split dumps
       (a folder of 00, 01, ... parts, or name.xc0 / name.ns0 with .xc1 ... next to it); one package may hold several titles.
       Base, update and DLC are told apart by the title id in their content meta (CNMT), not by the name.
       Then: ExeFS of the update -> offline patch (dm/tools/patch_nso.py, DM_TARGET=android) -> per-site equivalence check of the
       patch (dm/verify/equiv.py) -> RomFS (base + BKTR update) -> shader extraction from the CPK archives and offline translation
-      to Vulkan (the steps of tools/d3_shaders_vk.sh) -> language-pack DLC RomFS -> the phone folder
-      <work>/Diablo3Mobile/{romfs, aoc/<index>, dm/out, dm/shaders}. Every step is skipped when its output is already complete;
+      to Vulkan (the steps of tools/d3_shaders_vk.sh) -> language-pack DLC RomFS -> the ASTC texture cache for phones without BC
+      textures (tools/d3_astc_cache.py; Mali / PowerVR / Xclipse: about the BC memory instead of 4-8x; --no-astc leaves it out, an
+      Adreno phone does not need it) -> the phone folder <work>/Diablo3Mobile/{romfs, aoc/<index>, dm/out, dm/shaders, astc}. Every step is skipped when its output is already complete;
       delete an output to redo its step. --dry-run identifies the inputs, checks the tools and the free space and prints the
       plan. --yes answers yes to every question (download .NET, copy to the phone).
   setup check [FILE_OR_FOLDER...] [--work DIR]
       Report the tools, the game files found, what has been prepared and the next step. Changes nothing.
+  setup astc [--work DIR] [--jobs N]
+      Only the ASTC texture cache (<work>/Diablo3Mobile/astc), from a game folder setup prepared before (romfs and aoc there):
+      for players who already have the folder. Copy the new astc folder to Download/Diablo3Mobile/astc on the phone.
   setup push [SERIAL] [--work DIR]
       Copy <work>/Diablo3Mobile to /sdcard/Download/Diablo3Mobile on the phone over adb (only missing / size-mismatched files,
       so an interrupted push resumes) and grant org.diablo3.port "All files access". SERIAL may be left out when exactly one
@@ -51,11 +55,13 @@ PHONE_DIR = f'/sdcard/Download/{DATA_NAME}'
 APK_HINT = 'the APK from this repository\'s Releases page, or build it yourself: build.bat (README.md, "Building")'
 MODULE_FILES = [f'{m}.{e}' for m in ('main', 'sdk') for e in ('patched.bin', 'fixups.tsv', 'gates.tsv')]
 PY_PACKAGES = (('cryptography', 'decrypting your packages'), ('zstandard', 'NSZ / XCZ input'), ('lz4', 'NSO modules'),
-               ('capstone', 'the offline patcher'), ('unicorn', 'the patch equivalence check'))
-PIP_LINE = 'cryptography zstandard lz4 "capstone<6" "unicorn<3"'
+               ('capstone', 'the offline patcher'), ('unicorn', 'the patch equivalence check'),
+               ('astc_encoder', 'the ASTC texture cache'), ('numpy', 'the ASTC texture cache'))
+PIP_LINE = 'cryptography zstandard lz4 "capstone<6" "unicorn<3" -r tools/requirements-astc.txt'
 PKG_RE = re.compile(r'\.(nsp|nsz|xci|xcz|xc0|ns0)$', re.I)
 META_TYPES = {0x80: 'base game', 0x81: 'update', 0x82: 'DLC', 0x83: 'delta update'}
 ROMFS_BYTES = 17 << 30          # the merged RomFS is ~16 GiB (37 CPK archives)
+ASTC_BYTES = 6 << 30            # the ASTC texture cache (tools/d3_astc_cache.py), measured 13.11.2026 with the Russian pack
 VERIFY_JOB_BYTES = 512 << 20    # peak memory of one dm/verify/equiv.py process (main ~0.21 GB, sdk ~0.14 GB, measured 11.11.2026)
 SMALL_BYTES = 1 << 30           # ExeFS, patched modules, extracted .shd, shader jobs, translator build, bundles (~0.5 GB)
 WIN = os.name == 'nt'
@@ -70,7 +76,8 @@ STAGES = [('Finding and checking your game files', 'a few seconds'),
           ('Checking the patch (per-site equivalence)', '1-5 min'),
           ('Extracting the game data (RomFS, ~16 GiB)', '15-45 min, longest with NSZ / XCZ'),
           ('Translating the shaders', '2-10 min; the first run also downloads build packages from NuGet'),
-          ('Language-pack DLC (optional)', 'a few min per pack')]
+          ('Language-pack DLC (optional)', 'a few min per pack'),
+          ('The ASTC texture cache (phones without BC textures: Mali, PowerVR, Xclipse)', '20-60 min, by the number of CPU cores')]
 
 
 class Fail(Exception):
@@ -159,7 +166,7 @@ class Layout:
     def __init__(self, work):
         self.work = Path(work).resolve()
         self.phone = self.work / DATA_NAME
-        self.romfs, self.aoc = self.phone / 'romfs', self.phone / 'aoc'
+        self.romfs, self.aoc, self.astc = self.phone / 'romfs', self.phone / 'aoc', self.phone / 'astc'
         self.out, self.shaders = self.phone / 'dm' / 'out', self.phone / 'dm' / 'shaders'
         self.exefs, self.nsp = self.work / 'exefs-update', self.work / 'nsp'
         self.shd, self.jobs = self.work / 'cpk-shaders', self.work / 'shaders-jobs'
@@ -206,6 +213,13 @@ class Layout:
 
     def complete(self):
         return self.out_ok() and self.romfs_ok() and self.shaders_ok()
+
+    def astc_ok(self):
+        """The ASTC texture cache is complete (tools/d3_astc_cache.py writes manifest.json last)."""
+        try: m = json.loads((self.astc / 'manifest.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError): return False
+        p = self.astc / 'd3-astc.pack'
+        return m.get('complete') is True and p.is_file() and p.stat().st_size == m.get('pack_bytes')
 
 
 def build_id(nso):
@@ -709,6 +723,17 @@ def step_dlc(L, dlc, keys, keep_nsp):
     cleanup_nsp(L, keep_nsp)
 
 
+def step_astc(L, jobs=None):
+    """The ASTC texture cache: every BC texture the game can load (RomFS merged view + language packs) encoded once to ASTC.
+    tools/d3_astc_cache.py skips the work when its manifest matches, resumes an interrupted run, and writes manifest.json last."""
+    if not L.romfs_ok(): raise Fail(f'no prepared RomFS in {L.romfs}: run the full setup first')
+    cmd = [sys.executable, TOOLS / 'd3_astc_cache.py', L.romfs, L.astc]
+    for i in sorted(L.aoc_done()): cmd += ['--aoc', L.aoc / str(i)]
+    if jobs: cmd += ['--jobs', str(jobs)]
+    print(f'  encoding the textures to ASTC into {L.astc} (about {gb(ASTC_BYTES)}; only phones without BC textures use it)', flush=True)
+    run(cmd, env=dict(os.environ, PYTHONUTF8='1'))
+
+
 def run(cmd, env=None, why=None):
     cmd = [str(c) for c in cmd]
     r = subprocess.run(cmd, env=env)
@@ -767,7 +792,7 @@ def push(L, serial):
     adb = [adb, '-s', serial]
     if subprocess.run(adb + ['get-state'], capture_output=True, text=True).stdout.strip() != 'device':
         raise Fail(f'adb device {serial} not reachable')
-    dirs_to_push = [L.out, L.shaders] + [L.aoc / str(i) for i in sorted(L.aoc_done())] + [L.romfs]
+    dirs_to_push = [L.out, L.shaders] + [L.aoc / str(i) for i in sorted(L.aoc_done())] + [L.romfs] + ([L.astc] if L.astc_ok() else [])
     for local in dirs_to_push:
         rel = local.relative_to(L.phone).as_posix()
         remote = f'{PHONE_DIR}/{rel}'
@@ -813,6 +838,7 @@ def next_steps(L, offer_push, yes):
 What to do next:
   1. Copy the whole "{DATA_NAME}" folder into the phone's Download folder (internal storage), so that the phone has
        Download/{DATA_NAME}/romfs   Download/{DATA_NAME}/dm/out   Download/{DATA_NAME}/dm/shaders   (and Download/{DATA_NAME}/aoc/<index>)
+       Download/{DATA_NAME}/astc    the ASTC texture cache: needed on Mali / PowerVR / Xclipse phones (less memory), not on Adreno
      (USB cable + file manager is fine; the phone needs ~{gb(size + GB)} free). Or over adb (USB debugging):
        setup push [serial]          (copies only what is missing; resumes after an interruption)
      or by hand:''')
@@ -873,6 +899,7 @@ def check(L, files):
     item(L.shaders_ok(), f'dm/shaders: {L.shader_count()} SPIR-V bundles', RUN_SETUP)
     done = L.aoc_done()
     print(f"  ..  aoc: {', '.join(f'{i} ({n} files)' for i, n in sorted(done.items())) or 'no language pack extracted (optional)'}")
+    print(f"  {'OK ' if L.astc_ok() else '.. '} astc: {'ASTC texture cache ready' if L.astc_ok() else 'no ASTC texture cache (Mali / PowerVR / Xclipse phones need it: setup astc)'}")
     if L.nsp.is_dir(): print(f'  ..  temporary NSPs in {L.nsp} (removed after the RomFS / DLC steps)')
     if nxt:
         say(f'Next: {nxt[0]}')
@@ -885,6 +912,7 @@ def check(L, files):
 def prepare(a, L):
     steps = set(a.steps.split(','))
     if getattr(a, 'no_dlc', False): steps.discard('dlc')
+    if getattr(a, 'no_astc', False): steps.discard('astc')
     shaders_needed = 'shaders' in steps and not a.skip_shaders and not L.shaders_ok()
     miss = missing_packages()
     if sys.version_info < (3, 10) or miss:
@@ -914,6 +942,7 @@ def prepare(a, L):
         need += max(0, ROMFS_BYTES - folder_bytes(L.romfs))   # a partial RomFS is deleted first
         for role, t in (('base', base), ('update', upd)):
             if t.compressed and not (L.nsp / f'{role}.nsp').is_file(): need += t.program_size
+    if 'astc' in steps and not L.astc_ok(): need += ASTC_BYTES
     if 'dlc' in steps:
         done = L.aoc_done()
         for t in dlc:
@@ -935,7 +964,8 @@ def prepare(a, L):
             ('patch check', not verify or L.verify_ok()),
             ('RomFS' + (' (compressed input is expanded first)' if base.compressed or upd.compressed else ''),
              L.romfs_ok() or 'romfs' not in steps), ('shaders', not shaders_needed),
-            (f'DLC ({len(dlc)})', 'dlc' not in steps or all(t.aoc_index in L.aoc_done() for t in dlc))]
+            (f'DLC ({len(dlc)})', 'dlc' not in steps or all(t.aoc_index in L.aoc_done() for t in dlc)),
+            ('ASTC texture cache', 'astc' not in steps or L.astc_ok())]
     print('  plan: ' + ', '.join(f"{n} {'(done/skipped)' if d else ''}".strip() for n, d in plan))
     if a.dry_run:
         say('dry run: inputs, tools and space checked; nothing was written'); return 0
@@ -965,6 +995,14 @@ def prepare(a, L):
                   f'Details: {LOG_NAME}; --no-dlc skips this step.')
         print(f'  done in {took(t0)}')
     else: print('  skipped (--no-dlc)' if getattr(a, 'no_dlc', False) else '  skipped (--steps)')
+    t0 = stage(9)
+    if 'astc' in steps and L.romfs_ok():
+        try: step_astc(L); print(f'  done in {took(t0)}')
+        except (Exception, Fail) as e:           # the cache is an optimisation: never lose the finished game folder over it
+            import traceback; traceback.print_exc(file=sys.stdout)
+            print(f'  !! the ASTC texture cache failed ({type(e).__name__}: {e}); the game folder works without it (phones without BC '
+                  f'then decode the textures: more memory). Details: {LOG_NAME}; run "setup astc" to retry, --no-astc skips it.')
+    else: print('  skipped (--no-astc)' if getattr(a, 'no_astc', False) else '  skipped (--steps)')
     if not L.complete():
         say(f'finished the requested steps; the folder is not complete yet: {L.phone}'); return 0
     if a.push:
@@ -978,15 +1016,21 @@ def main(argv=None):
     default_work = os.environ.get('DM_D3_WORK') or ROOT / 'work'
     if argv and argv[0] in ('-h', '--help', 'help'):
         print(__doc__); return 0
-    if argv and argv[0] in ('check', 'push'):
+    if argv and argv[0] in ('check', 'push', 'astc'):
         ap = argparse.ArgumentParser(prog=f'setup {argv[0]}')
         if argv[0] == 'push': ap.add_argument('serial', nargs='?')
-        else: ap.add_argument('files', nargs='*')
+        elif argv[0] == 'check': ap.add_argument('files', nargs='*')
+        else: ap.add_argument('--jobs', type=int, default=None)
         ap.add_argument('--work', default=default_work)
         ap.add_argument('--yes', '-y', action='store_true')
         a = ap.parse_args(argv[1:])
         L = Layout(a.work)
         if argv[0] == 'check': return check(L, a.files)
+        if argv[0] == 'astc':
+            start_log(Path(a.work)); miss = [m for m in missing_packages() if m in ('astc_encoder', 'numpy')]
+            if miss: raise Fail(f'missing Python packages: {", ".join(miss)}; start setup through setup.bat / ./setup.sh (they install them)')
+            t0 = stage(9); step_astc(L, a.jobs); print(f'  done in {took(t0)}')
+            print(f'\nCopy {L.astc} to Download/{DATA_NAME}/astc on the phone (or: setup push).'); return 0
         push(L, a.serial); return 0
     ap = argparse.ArgumentParser(prog='setup', description='Prepare Diablo III Mobile game files from your own dumps.')
     ap.add_argument('files', nargs='*', help=f'base game, update v{UPDATE_VERSION}, optional language-pack DLC and prod.keys in any '
@@ -999,7 +1043,8 @@ def main(argv=None):
     ap.add_argument('--skip-shaders', action='store_true')
     ap.add_argument('--skip-verify', action='store_true', help='do not run the patch equivalence check (dm/verify/equiv.py)')
     ap.add_argument('--no-dlc', action='store_true', help='ignore all DLC (language and item packs): the game runs in English')
-    ap.add_argument('--steps', default='exefs,patch,verify,romfs,shaders,dlc', help='comma list of steps to run (default: all)')
+    ap.add_argument('--no-astc', action='store_true', help='leave out the ASTC texture cache (Adreno phones do not need it)')
+    ap.add_argument('--steps', default='exefs,patch,verify,romfs,shaders,dlc,astc', help='comma list of steps to run (default: all)')
     a = ap.parse_args(argv)
     L = Layout(a.work)
     start_log(Path(a.work))
