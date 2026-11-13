@@ -127,6 +127,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             finish(); return;
         }
         current = new WeakReference<>(this);
+        if (D3) updates = new UpdateNotice(new Updates());   // [D3] from DOOM 2.41: started at the first frames (onFrameStats "first frames presented")
         if (DOOM) checkLastRun();   // [DOOM] crash report of the last run, before anything of this one is written
         displays = getSystemService(DisplayManager.class);
         if (displays != null) displays.registerDisplayListener(this, null);
@@ -157,6 +158,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override public boolean hasMods() { return D3; }   // [D3] "Mods / cheats" is a row of the pause menu (owner 11-13), not inside the game settings
     @Override public void mods() { showD3Mods(); }
     @Override public FrontMenu.Saves saves() { if (saves == null) saves = SaveTransfer.forGame(this, DATA_DIR); return saves; }
+    @Override public boolean updates() { return updates != null; }   // [D3] the pause menu's "Check for updates"
+    @Override public void checkUpdates() { if (updates != null) updates.checkNow(); }
     @Override public void quit() {
         android.util.Log.i("dm", "[java] quit from the pause menu");
         if (DOOM) CrashLog.sessionEnd(this);   // [DOOM] a clean end: no crash report at the next start
@@ -188,6 +191,44 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
 
     // ---- [D3] (from the DOOM 2016 port, its BUGS_AND_FIXES 2.22) crash logs and breadcrumbs (CrashLog.java)
     // A "[java] ..." line in boot.log (and logcat); kept until the native log exists (nativeStart opens it).
+    // ---- [D3] "a new version is out" (UpdateNotice.java from DOOM 2016 2.41 / frontend-common): GitHub's releases/latest of Desm0nt/diablo3-port,
+    // once per start after the first frames, a one-time dialog with the release notes; "Check for updates" in the pause menu asks now. No
+    // game-files check (requiredGameFiles 0). Switches: DM_UPDATE_CHECK=0 / always, DM_UPDATE_AS=<version>; prefs "front" upd_*.
+    private UpdateNotice updates;
+    static final String UPDATE_REPO = "Desm0nt/diablo3-port";
+    private static final String[] UPD_KEYS = {"upd_heading", "upd_version_line", "upd_check_now", "upd_check_start", "upd_checking", "upd_title", "upd_message",
+        "upd_whats_new", "upd_open", "upd_close", "upd_latest", "upd_failed", "upd_err_offline", "upd_err_limit", "gf_title", "gf_message", "gf_howto", "gf_note",
+        "gf_guide", "gf_line_ok", "gf_line_nostamp", "gf_line_old", "gf_line_none"};
+    private static final int[] UPD_IDS = {R.string.upd_heading, R.string.upd_version_line, R.string.upd_check_now, R.string.upd_check_start, R.string.upd_checking,
+        R.string.upd_title, R.string.upd_message, R.string.upd_whats_new, R.string.upd_open, R.string.upd_close, R.string.upd_latest, R.string.upd_failed,
+        R.string.upd_err_offline, R.string.upd_err_limit, R.string.gf_title, R.string.gf_message, R.string.gf_howto, R.string.gf_note, R.string.gf_guide,
+        R.string.gf_line_ok, R.string.gf_line_nostamp, R.string.gf_line_old, R.string.gf_line_none};
+    private final class Updates implements UpdateNotice.Host {
+        @Override public Activity activity() { return DmActivity.this; }
+        @Override public String appName() { return "Diablo III Mobile"; }
+        @Override public String repoSlug() { return UPDATE_REPO; }
+        @Override public String currentVersion() { return BuildConfig.VERSION_NAME; }
+        @Override public int requiredGameFiles() { return 0; }
+        @Override public File gameFilesStamp() { return null; }
+        @Override public int gameFilesBaseline() { return 0; }
+        @Override public String gameFilesFeatures(int have, int need) { return ""; }
+        @Override public SharedPreferences prefs() { return getSharedPreferences(Ui.PREFS, MODE_PRIVATE); }
+        @Override public String text(String key, Object... args) {
+            for (int i = 0; i < UPD_KEYS.length; i++) if (UPD_KEYS[i].equals(key)) return args.length == 0 ? getString(UPD_IDS[i]) : getString(UPD_IDS[i], args);
+            return key;
+        }
+        @Override public void crumb(String line) { DmActivity.this.crumb(line); }
+        @Override public void immersive() { immersiveBars(); }
+        @Override public boolean canShowNotice() {
+            return resumed && started && !isFinishing() && hasWindowFocus() && inputDialog == null
+                && (front == null || !front.isOpen()) && (d3Pad == null || !d3Pad.editing());
+        }
+        @Override public boolean holdGame(boolean on) {
+            if (on) { if (front != null && front.isOpen()) return false; if (d3Pad != null) d3Pad.releaseAll(); }
+            hold(on); return true;
+        }
+    }
+
     void crumb(String s) {
         if (nativeLogReady) { try { nativeLog(s); return; } catch (Throwable t) { /* an older library */ } }
         android.util.Log.i("dm", "[java] " + s);
@@ -903,7 +944,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             try { nativeFrameStats(guardStats); } catch (Throwable t) { guardStats[0] = 0; }
             if (guardStats[0] > 0 && !driverGuardDone) { driverGuard().delete(); driverGuardDone = true; android.util.Log.i("dm", "driver guard: first frames presented, guard cleared"); }
             if (guardStats[0] > 0 && !firstFrameDone) { firstFrameDone = true;
-                crumb(String.format(Locale.ROOT, "first frames presented %.1f s after the game started (%.0f fps, frame %.1f ms)", (android.os.SystemClock.uptimeMillis() - gameStartedAt) / 1000.0, guardStats[0], guardStats[1])); }
+                crumb(String.format(Locale.ROOT, "first frames presented %.1f s after the game started (%.0f fps, frame %.1f ms)", (android.os.SystemClock.uptimeMillis() - gameStartedAt) / 1000.0, guardStats[0], guardStats[1]));
+                if (updates != null) updates.start(); }   // [D3] the "a new version is out" check (once per start, after the first frames)
         }
         if (!(driverGuardDone && driverStatusDone && firstFrameDone)) view.postDelayed(this, 1000);
     } };
@@ -1614,7 +1656,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override protected void onStop() { if (started) { nativeFocus(1); if (DOOM && bootFailure == 0) CrashLog.session(this, "bg"); }
         if (DOOM && libraryLoaded) { android.content.Context app = getApplicationContext(); new Thread(() -> CrashLog.mirrorBootLogs(app), "dm-logcopy").start(); }   // [DOOM] boot.log next to crash.txt
         com.xiaoboluo.d2r.widget.HeroWidgetProvider.requestUpdate(this); super.onStop(); }
-    @Override protected void onDestroy() { if (DOOM && isFinishing()) { crumb("activity finishing"); CrashLog.sessionEnd(this); } if (displays != null) displays.unregisterDisplayListener(this); if (inputs != null) inputs.unregisterInputDeviceListener(this); if (inputDialog != null) inputDialog.dismiss(); if (current.get() == this) current.clear(); super.onDestroy(); }
+    @Override protected void onDestroy() { if (updates != null) updates.dismiss(); if (DOOM && isFinishing()) { crumb("activity finishing"); CrashLog.sessionEnd(this); } if (displays != null) displays.unregisterDisplayListener(this); if (inputs != null) inputs.unregisterInputDeviceListener(this); if (inputDialog != null) inputDialog.dismiss(); if (current.get() == this) current.clear(); super.onDestroy(); }
     @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) immersiveBars(); else releaseTouches(); }
 
     @Override public void surfaceCreated(SurfaceHolder h) {}
