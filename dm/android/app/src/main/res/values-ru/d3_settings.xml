@@ -87,13 +87,9 @@
     <!-- Моды / читы (DmActivity.showD3Mods, hle_d3_mods.c) -->
     <string name="d3_mods_open">Моды / читы…</string>
     <string name="d3_mods_title">Моды / читы</string>
-    <string name="d3_mods_note">Всё здесь по умолчанию выключено и включается со следующего запуска. Идеи из d3hack от god-jester (мод для Switch, GPL-2.0), переделаны для этого порта. Сделайте копию сохранений перед пробой: сезонные герои и предметы, полученные читами, остаются в них.</string>
     <string name="d3_season">Офлайн-сезон</string>
     <string name="d3_season_n">Сезон %1$d</string>
     <string name="d3_season_note">Можно создавать сезонных героев («Создать сезонного героя» в главном меню) и играть ими офлайн с путешествием сезона. Сезонный герой привязан к номеру своего сезона: если выключить сезон или выбрать другой номер, игра считает его героем закончившегося сезона.</string>
-    <string name="d3_theme">Тема сезона (бафф сообщества)</string>
-    <string name="d3_theme_auto">Тема выбранного сезона</string>
-    <string name="d3_theme_note">Действует на всех героев, сезонных и обычных.</string>
     <string name="d3_buff_goblins">Двойные гоблины-кладовщики (сезон 14)</string>
     <string name="d3_buff_bags">Двойные тайники за поручения (сезон 15)</string>
     <string name="d3_buff_grandeur">Кольцо королевского величия даром (сезон 16)</string>
@@ -124,4 +120,18 @@
     <string name="d3_cheat_orbs">Больше сфер прогресса великого портала от элиты</string>
     <string name="d3_cheat_legendary">Можно надеть несколько одинаковых легендарок</string>
     <string name="d3_cheats_note">Если сборка игры не та, мод сам выключается (красная строка в логе), игра идёт как обычно.</string>
+    <string name="d3_mods_note">Всё здесь по умолчанию выключено и включается со следующего запуска. Частично перенесено из d3hack от god-jester (мод для Switch, GPL-2.0). Сделайте копию сохранений перед пробой: сезонные герои и предметы, полученные читами, остаются в них.</string>
+    <string name="d3_buffs">Баффы сезонов (сколько угодно сразу)</string>
+    <string name="d3_buffs_theme">Отметить тему выбранного сезона</string>
+    <string name="d3_buffs_note">Тема каждого сезона — отдельный переключатель в игре, поэтому можно включить несколько вместе. Действуют на всех героев, сезонных и обычных.</string>
+    <string name="d3_buff_anniversary">Юбилейное событие (по d3hack: праздничные подарки и т.п.)</string>
+    <string name="d3_buff_eggworld">Мир-пасхалка (по d3hack: флаг коровьего уровня)</string>
+    <string name="d3_cheat_god">Режим бога (неуязвимость, иммунитеты, вещи не ломаются, проход сквозь монстров, бесконечный ресурс)</string>
+    <string name="d3_cheat_dbgflags">Отладочные флаги d3hack: каждый удар критический / добивающий / сокрушающий, древние всегда выпадают и всегда первозданные, отладочные данные в подсказках предметов</string>
+    <string name="d3_cheat_equipany">Надеть что угодно в любую ячейку</string>
+    <string name="d3_loot">Легендарная добыча</string>
+    <string name="d3_loot_ancient">Все легендарки древние</string>
+    <string name="d3_loot_primal">Все легендарки первозданные</string>
+    <string name="d3_speed">Скорость бега</string>
+    <string name="d3_atkspeed">Скорость атаки</string>
 </resources>

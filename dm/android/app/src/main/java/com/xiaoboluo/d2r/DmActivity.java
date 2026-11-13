@@ -427,13 +427,18 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 if (startedAspect == 2) Os.setenv("DM_D3_WIDE", "1", true); else Os.unsetenv("DM_D3_WIDE");
                 // Widescreen only: loading screens' 16:9 art presented alone, stretched to the screen (hle_d3.c ls_present_crop)
                 Os.setenv("DM_D3_WIDE_STRETCH_LOADING", p.getBoolean("d3_stretch_loading", true) ? "1" : "0", true);
-                // Mods / cheats (hle_d3_mods.c; all off by default, gear "Mods / cheats", showD3Mods): offline season, season theme, cheats
+                // Mods / cheats (hle_d3_mods.c, GPL-2.0, from d3hack; all off by default, gear "Mods / cheats", showD3Mods): offline season,
+                // season buffs (any number at once), cheats, speed multipliers
                 int season = p.getInt("d3_season", 0);
                 if (season > 0) Os.setenv("DM_D3_SEASON", String.valueOf(season), true); else Os.unsetenv("DM_D3_SEASON");
-                String theme = p.getString("d3_theme", "");
-                if (!theme.isEmpty()) Os.setenv("DM_D3_THEME", theme, true); else Os.unsetenv("DM_D3_THEME");
+                String buffs = p.getString("d3_buffs", "");
+                if (!buffs.isEmpty()) Os.setenv("DM_D3_BUFFS", buffs, true); else Os.unsetenv("DM_D3_BUFFS");
                 String cheats = p.getString("d3_cheats", "");
                 if (!cheats.isEmpty()) Os.setenv("DM_D3_CHEATS", cheats, true); else Os.unsetenv("DM_D3_CHEATS");
+                String speed = p.getString("d3_speed", "1");
+                if (!"1".equals(speed)) Os.setenv("DM_D3_SPEED", speed, true); else Os.unsetenv("DM_D3_SPEED");
+                String atk = p.getString("d3_atkspeed", "1");
+                if (!"1".equals(atk)) Os.setenv("DM_D3_ATKSPEED", atk, true); else Os.unsetenv("DM_D3_ATKSPEED");
             } else {
             if (p.getBoolean("drs", false)) Os.setenv("DM_DOOM_DRS", "1", true); else Os.unsetenv("DM_DOOM_DRS");
             int res = p.getInt("res", 0);
@@ -1042,57 +1047,93 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             editB.setOnClickListener(v -> { save.run(); dlg.dismiss(); if (d3Pad != null) d3Pad.startEdit(); });   // drag controls on the pad; "Done" there ends it
         });
     }
-    // [D3] "Mods / cheats" (hle_d3_mods.c; facts from d3hack by god-jester, GPL-2.0, see docs/THIRD_PARTY.md). Saved in "doom_graphics":
-    // d3_season (0 = off, else the season number) -> DM_D3_SEASON, d3_theme ("" off, "auto" = the season's own theme, or one buff key)
-    // -> DM_D3_THEME, d3_cheats (comma separated keys) -> DM_D3_CHEATS; all apply on the next launch (applyDoomSettings).
+    // [D3] "Mods / cheats" (hle_d3_mods.c, GPL-2.0, partly ported from d3hack by god-jester, see docs/THIRD_PARTY.md). Saved in "doom_graphics":
+    // d3_season (0 = off, else the season number) -> DM_D3_SEASON; d3_buffs (comma separated buff keys, any number) -> DM_D3_BUFFS;
+    // d3_cheats (comma separated keys) -> DM_D3_CHEATS; d3_speed / d3_atkspeed ("1" = off) -> DM_D3_SPEED / DM_D3_ATKSPEED. All apply on the
+    // next launch (applyDoomSettings). Three groups: Season, Season buffs (checkboxes), Cheats.
     static final int D3_SEASON_FIRST = 14, D3_SEASON_LAST = 37;   // the seasons with a known theme (hle_d3_mods.c k_themes)
     static final String[] D3_BUFF_KEYS = {"goblins", "bags", "grandeur", "nightmares", "triune", "pandemonium", "kanai", "tempests", "clones", "cube4",
-        "ethereal", "shards", "swarm", "sanctified", "alchemy", "nesting", "keystones", "bloodshards"};   // hle_d3_mods.c k_buffs keys
+        "ethereal", "shards", "swarm", "sanctified", "alchemy", "nesting", "keystones", "bloodshards", "anniversary", "eggworld"};   // hle_d3_mods.c k_buffs keys
     static final int[] D3_BUFF_LABELS = {R.string.d3_buff_goblins, R.string.d3_buff_bags, R.string.d3_buff_grandeur, R.string.d3_buff_nightmares,
         R.string.d3_buff_triune, R.string.d3_buff_pandemonium, R.string.d3_buff_kanai, R.string.d3_buff_tempests, R.string.d3_buff_clones,
         R.string.d3_buff_cube4, R.string.d3_buff_ethereal, R.string.d3_buff_shards, R.string.d3_buff_swarm, R.string.d3_buff_sanctified,
-        R.string.d3_buff_alchemy, R.string.d3_buff_nesting, R.string.d3_buff_keystones, R.string.d3_buff_bloodshards};
-    static final String[] D3_CHEAT_KEYS = {"difficulty", "portal", "cooldowns", "craft", "cube", "gem100", "gemfast", "resource", "orbs", "legendary"};   // k_cheats
-    static final int[] D3_CHEAT_LABELS = {R.string.d3_cheat_difficulty, R.string.d3_cheat_portal, R.string.d3_cheat_cooldowns, R.string.d3_cheat_craft,
-        R.string.d3_cheat_cube, R.string.d3_cheat_gem100, R.string.d3_cheat_gemfast, R.string.d3_cheat_resource, R.string.d3_cheat_orbs, R.string.d3_cheat_legendary};
+        R.string.d3_buff_alchemy, R.string.d3_buff_nesting, R.string.d3_buff_keystones, R.string.d3_buff_bloodshards, R.string.d3_buff_anniversary,
+        R.string.d3_buff_eggworld};
+    // season -> its theme buffs (hle_d3_mods.c k_themes), for "Tick the chosen season's theme"
+    static final String[] D3_THEMES = {"14 goblins", "15 bags", "16 grandeur", "17 nightmares", "18 triune", "19 pandemonium", "20 kanai", "21 tempests",
+        "22 clones cube4", "24 ethereal", "25 shards", "26 swarm", "27 sanctified", "28 alchemy", "29 nesting", "30 shards", "31 kanai", "32 ethereal",
+        "33 clones cube4", "34 sanctified", "35 pandemonium", "36 shards", "37 kanai"};
+    static final String[] D3_CHEAT_KEYS = {"god", "dbgflags", "difficulty", "portal", "cooldowns", "resource", "craft", "cube", "gem100", "gemfast",
+        "orbs", "legendary", "equipany"};   // hle_d3_mods.c k_sites features and hooks
+    static final int[] D3_CHEAT_LABELS = {R.string.d3_cheat_god, R.string.d3_cheat_dbgflags, R.string.d3_cheat_difficulty, R.string.d3_cheat_portal,
+        R.string.d3_cheat_cooldowns, R.string.d3_cheat_resource, R.string.d3_cheat_craft, R.string.d3_cheat_cube, R.string.d3_cheat_gem100,
+        R.string.d3_cheat_gemfast, R.string.d3_cheat_orbs, R.string.d3_cheat_legendary, R.string.d3_cheat_equipany};
+    static final String[] D3_LOOT_KEYS = {"", "ancient", "primal"};   // also in d3_cheats (hooks LootRollForAncientLegendary)
+    static final String[] D3_MULTS = {"1", "1.25", "1.5", "2", "3"};
+    private android.widget.Spinner d3Spinner(LinearLayout box, String[] items, int at) {
+        android.widget.Spinner sp = new android.widget.Spinner(this);
+        sp.setAdapter(new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, items));
+        sp.setSelection(Math.max(0, Math.min(items.length - 1, at))); box.addView(sp); return sp;
+    }
+    private static String[] multLabels(android.content.Context ui) {
+        String[] l = new String[D3_MULTS.length]; l[0] = ui.getString(R.string.d3_off);
+        for (int i = 1; i < l.length; i++) l[i] = "×" + D3_MULTS[i];
+        return l;
+    }
     void showD3Mods() {
         runOnUiThread(() -> {
             android.content.Context ui = d3Ui();
             SharedPreferences p = doomPrefs();
             LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(48, 24, 48, 0);
             note(box, ui.getString(R.string.d3_mods_note));
+            // Season: the number seasonal heroes are created for
             heading(box, when(ui, R.string.d3_season, false));
             String[] seasons = new String[D3_SEASON_LAST - D3_SEASON_FIRST + 2]; seasons[0] = ui.getString(R.string.d3_off);
             for (int i = 1; i < seasons.length; i++) seasons[i] = ui.getString(R.string.d3_season_n, D3_SEASON_FIRST + i - 1);
             int sWas = p.getInt("d3_season", 0);
-            android.widget.Spinner seasonS = new android.widget.Spinner(this);
-            seasonS.setAdapter(new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, seasons));
-            seasonS.setSelection(sWas >= D3_SEASON_FIRST && sWas <= D3_SEASON_LAST ? sWas - D3_SEASON_FIRST + 1 : 0); box.addView(seasonS);
+            android.widget.Spinner seasonS = d3Spinner(box, seasons, sWas >= D3_SEASON_FIRST && sWas <= D3_SEASON_LAST ? sWas - D3_SEASON_FIRST + 1 : 0);
             note(box, ui.getString(R.string.d3_season_note));
-            heading(box, when(ui, R.string.d3_theme, false));
-            String[] themes = new String[D3_BUFF_KEYS.length + 2]; themes[0] = ui.getString(R.string.d3_off); themes[1] = ui.getString(R.string.d3_theme_auto);
-            for (int i = 0; i < D3_BUFF_KEYS.length; i++) themes[i + 2] = ui.getString(D3_BUFF_LABELS[i]);
-            String tWas = p.getString("d3_theme", ""); int tAt = "auto".equals(tWas) ? 1 : 0;
-            for (int i = 0; i < D3_BUFF_KEYS.length; i++) if (D3_BUFF_KEYS[i].equals(tWas)) tAt = i + 2;
-            android.widget.Spinner themeS = new android.widget.Spinner(this);
-            themeS.setAdapter(new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, themes));
-            themeS.setSelection(tAt); box.addView(themeS);
-            note(box, ui.getString(R.string.d3_theme_note));
+            // Season buffs: every season's theme on its own, any number at once
+            heading(box, when(ui, R.string.d3_buffs, false));
+            java.util.List<String> bWas = java.util.Arrays.asList(p.getString("d3_buffs", "").split(","));
+            CheckBox[] buffC = new CheckBox[D3_BUFF_KEYS.length];
+            for (int i = 0; i < D3_BUFF_KEYS.length; i++) {
+                buffC[i] = new CheckBox(this); buffC[i].setText(ui.getString(D3_BUFF_LABELS[i])); buffC[i].setChecked(bWas.contains(D3_BUFF_KEYS[i])); box.addView(buffC[i]);
+            }
+            android.widget.Button themeB = new android.widget.Button(this); themeB.setText(ui.getString(R.string.d3_buffs_theme)); box.addView(themeB);
+            themeB.setOnClickListener(v -> {
+                int s = seasonS.getSelectedItemPosition(); if (s == 0) return;
+                String n = String.valueOf(D3_SEASON_FIRST + s - 1);
+                for (String t : D3_THEMES) { String[] f = t.split(" "); if (!f[0].equals(n)) continue;
+                    for (int k = 1; k < f.length; k++) for (int i = 0; i < D3_BUFF_KEYS.length; i++) if (D3_BUFF_KEYS[i].equals(f[k])) buffC[i].setChecked(true); }
+            });
+            note(box, ui.getString(R.string.d3_buffs_note));
+            // Cheats
             heading(box, when(ui, R.string.d3_cheats, false));
             java.util.List<String> cWas = java.util.Arrays.asList(p.getString("d3_cheats", "").split(","));
             CheckBox[] cheatC = new CheckBox[D3_CHEAT_KEYS.length];
             for (int i = 0; i < D3_CHEAT_KEYS.length; i++) {
                 cheatC[i] = new CheckBox(this); cheatC[i].setText(ui.getString(D3_CHEAT_LABELS[i])); cheatC[i].setChecked(cWas.contains(D3_CHEAT_KEYS[i])); box.addView(cheatC[i]);
             }
+            TextView lootT = new TextView(this); lootT.setText(ui.getString(R.string.d3_loot)); lootT.setPadding(0, 16, 0, 0); box.addView(lootT);
+            int lootAt = cWas.contains("primal") ? 2 : cWas.contains("ancient") ? 1 : 0;
+            android.widget.Spinner lootS = d3Spinner(box, new String[] {ui.getString(R.string.d3_off), ui.getString(R.string.d3_loot_ancient), ui.getString(R.string.d3_loot_primal)}, lootAt);
+            TextView moveT = new TextView(this); moveT.setText(ui.getString(R.string.d3_speed)); moveT.setPadding(0, 16, 0, 0); box.addView(moveT);
+            android.widget.Spinner moveS = d3Spinner(box, multLabels(ui), java.util.Arrays.asList(D3_MULTS).indexOf(p.getString("d3_speed", "1")));
+            TextView atkT = new TextView(this); atkT.setText(ui.getString(R.string.d3_atkspeed)); atkT.setPadding(0, 16, 0, 0); box.addView(atkT);
+            android.widget.Spinner atkS = d3Spinner(box, multLabels(ui), java.util.Arrays.asList(D3_MULTS).indexOf(p.getString("d3_atkspeed", "1")));
             note(box, ui.getString(R.string.d3_cheats_note));
             android.widget.ScrollView scroll = new android.widget.ScrollView(this); scroll.addView(box);
             new AlertDialog.Builder(this).setTitle(ui.getString(R.string.d3_mods_title)).setView(scroll)
                 .setPositiveButton(ui.getString(R.string.d3_save), (d, w) -> {
-                    int s = seasonS.getSelectedItemPosition(), t = themeS.getSelectedItemPosition();
-                    StringBuilder c = new StringBuilder();
+                    int s = seasonS.getSelectedItemPosition();
+                    StringBuilder b = new StringBuilder(), c = new StringBuilder();
+                    for (int i = 0; i < D3_BUFF_KEYS.length; i++) if (buffC[i].isChecked()) b.append(b.length() > 0 ? "," : "").append(D3_BUFF_KEYS[i]);
                     for (int i = 0; i < D3_CHEAT_KEYS.length; i++) if (cheatC[i].isChecked()) c.append(c.length() > 0 ? "," : "").append(D3_CHEAT_KEYS[i]);
-                    p.edit().putInt("d3_season", s > 0 ? D3_SEASON_FIRST + s - 1 : 0).putString("d3_theme", t == 0 ? "" : t == 1 ? "auto" : D3_BUFF_KEYS[t - 2])
-                        .putString("d3_cheats", c.toString()).apply();
+                    String loot = D3_LOOT_KEYS[lootS.getSelectedItemPosition()];
+                    if (!loot.isEmpty()) c.append(c.length() > 0 ? "," : "").append(loot);
+                    p.edit().putInt("d3_season", s > 0 ? D3_SEASON_FIRST + s - 1 : 0).putString("d3_buffs", b.toString()).putString("d3_cheats", c.toString())
+                        .putString("d3_speed", D3_MULTS[moveS.getSelectedItemPosition()]).putString("d3_atkspeed", D3_MULTS[atkS.getSelectedItemPosition()]).apply();
                 })
                 .setNegativeButton(ui.getString(R.string.d3_cancel), null).show();
         });

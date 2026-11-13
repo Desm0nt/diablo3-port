@@ -89,13 +89,9 @@
     <!-- Mods / cheats (DmActivity.showD3Mods, hle_d3_mods.c) -->
     <string name="d3_mods_open">Mods / cheats…</string>
     <string name="d3_mods_title">Mods / cheats</string>
-    <string name="d3_mods_note">Everything here is off by default and applies on next launch. Ideas from d3hack by god-jester (Switch mod, GPL-2.0), redone for this port. Back up your saves before trying: seasonal heroes and cheated items stay in them.</string>
     <string name="d3_season">Offline season</string>
     <string name="d3_season_n">Season %1$d</string>
     <string name="d3_season_note">Lets you create seasonal heroes (Create Seasonal Hero in the main menu) and play them offline with the season journey. A seasonal hero belongs to its season number: switch the season off or to another number and the game treats that hero as from an ended season.</string>
-    <string name="d3_theme">Season theme (community buff)</string>
-    <string name="d3_theme_auto">The theme of the chosen season</string>
-    <string name="d3_theme_note">Applies to every hero, seasonal or not.</string>
     <string name="d3_buff_goblins">Double treasure goblins (Season 14)</string>
     <string name="d3_buff_bags">Double bounty caches (Season 15)</string>
     <string name="d3_buff_grandeur">Ring of Royal Grandeur for free (Season 16)</string>
@@ -126,4 +122,18 @@
     <string name="d3_cheat_orbs">More greater rift progress orbs from elites</string>
     <string name="d3_cheat_legendary">Equip more than one copy of a legendary</string>
     <string name="d3_cheats_note">If the game build does not match, a mod switches itself off (red line in the log) and the game runs as usual.</string>
+    <string name="d3_mods_note">Everything here is off by default and applies on next launch. Partly ported from d3hack by god-jester (Switch mod, GPL-2.0). Back up your saves before trying: seasonal heroes and cheated items stay in them.</string>
+    <string name="d3_buffs">Season buffs (any number at once)</string>
+    <string name="d3_buffs_theme">Tick the chosen season\'s theme</string>
+    <string name="d3_buffs_note">Each season\'s theme is a separate switch in the game, so several can be on together. They apply to every hero, seasonal or not.</string>
+    <string name="d3_buff_anniversary">Anniversary event (d3hack: holiday gifts and the like)</string>
+    <string name="d3_buff_eggworld">Easter-egg world (d3hack: the cow level flag)</string>
+    <string name="d3_cheat_god">God mode (invulnerable, immune, items never break, walk through monsters, unlimited resource)</string>
+    <string name="d3_cheat_dbgflags">d3hack debug flags: every hit a critical / overkill / crushing blow, ancient rolls always succeed and roll primal, item debug info in tooltips</string>
+    <string name="d3_cheat_equipany">Equip anything in any slot</string>
+    <string name="d3_loot">Legendary drops</string>
+    <string name="d3_loot_ancient">Every legendary ancient</string>
+    <string name="d3_loot_primal">Every legendary primal</string>
+    <string name="d3_speed">Movement speed</string>
+    <string name="d3_atkspeed">Attack speed</string>
 </resources>
