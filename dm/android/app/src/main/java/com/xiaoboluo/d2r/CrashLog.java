@@ -49,11 +49,22 @@ final class CrashLog {
     }
     static File report(Context c) { return new File(dir(c), "crash.txt"); }
 
+    // ---- [D3] gear "Write logs" (doom_graphics "d3_logs", default on; GitHub issue #19: boot.log / logcat.txt and their .prev copies, ~9 MB each, in
+    // Download/<data folder>/logs). Off: no live logcat, boot.log stays in the private runtime dir (DM_LOG_PUBLIC=0 -> jni_android.c log_init, overwritten
+    // each launch, not mirrored) and the copies already in logs/ are removed at the start. crash.txt is still written on a crash: it costs nothing until
+    // one happens and carries that private boot.log's head and tail and the logcat lines of the process (read once, not captured all the time).
+    static boolean logsOn(Context c) { return c.getSharedPreferences("doom_graphics", Context.MODE_PRIVATE).getBoolean("d3_logs", true); }
+    static void dropLogs(Context c) {
+        File d = dir(c);
+        for (String n : new String[] {"boot.log", "boot.prev.log", "logcat.txt", "logcat.prev.txt", "logcat.txt.1"}) { File f = new File(d, n); if (f.isFile() && f.delete()) android.util.Log.i("dm", "logs off: " + n + " removed"); }
+    }
+
     // ---- the native logs next to the crash reports (GitHub issue #3: Android/data is out of a file manager's reach on Android 11+):
     // boot.log and boot.prev.log of <files or external files>/dm are copied to dir() as they are, overwriting the copies; a log above
     // MIRROR_MAX keeps its head and its last MIRROR_MAX bytes. Called when the app goes to the background and before it quits.
     static final long MIRROR_MAX = 8L << 20;
     static void mirrorBootLogs(Context c) {
+        if (!logsOn(c)) return;   // [D3] logs off: boot.log stays private
         File log = bootLog(c), d = dir(c);
         if (sameFile(log.getParentFile(), d)) return;   // [D3] the native side already writes boot.log into logs/ (jni_android.c)
         copyLog(log, new File(d, "boot.log"));
