@@ -237,3 +237,28 @@ GVAL с Mali-G57 (0.2.3-debug, уровень снова чёрный под HUD
 по умолчанию включено не на Adreno; на Adreno выключено (там всё как было). Проверки:
 `tests/vertex_retype_test.cpp` (синтетический модуль; с аргументами переписывает файлы SPIR-V), все 544 вершинных
 шейдера D3 переписаны в uint и в sint и прошли `spirv-val --target-env vulkan1.1`.
+
+## Моды / читы (офлайн-сезоны, баффы сезонов, читы) — 13.11.2026
+
+Запросы игроков #5 и #8. Основа — d3hack (god-jester, мод exlaunch для Switch, билд **2.7.6**.90885, GPL-2.0): его код перенесён в
+`dm/host/hle_d3_mods.c` (этот файл GPL-2.0, см. `docs/THIRD_PARTY.md`, README «License»).
+У нас 2.7.7: данные/bss/GOT на тех же адресах, код сдвинут кусками — 0 (до ~0x2a0000), +0x10 (~0x33–0x36xxxx), +0x70 (~0x40–0x49xxxx),
++0x100 (с ~0x4ca000 до конца text). Каждый сайт найден по коду (опора: исходные инструкции из комментариев d3hack, совпадение
+целей переходов, значения констант, число вызовов функции) и проверяется пословно; XVar — по слоту GOT, vtable класса
+(`*(GOT 0x115a388/0x115a398)+0x10`) и имени (`+8`, его копирует регистрация 0xa26b30); id атрибутов — по таблице, которую игра строит
+(id × 0x40). Несовпадение = функция выключена, красная строка `[d3mods]`.
+Хук: первые 4 инструкции функции → `ldr x16,#8; br x16; .quad <хост>`, оригинал (4 инструкции, не PC-relative — проверяется) идёт из
+трамплина (страница mmap, RX) с прыжком на +16. Гость вызывает C хоста напрямую, как любой HLE.
+
+| Группа в ⚙ → «Моды / читы…» (со следующего запуска) | Переменная | Что делает |
+|---|---|---|
+| Сезон: выкл / 14…37 | `DM_D3_SEASON=<n>` | XVar `Season.Num`=n, `State`=1, `OverrideEnabled`=1 (сеттеры игры 0xa273c0 / 0xa26fc0, флаги 3, в первом опросе npad, перепроверка раз в ~5 с); `IsSeasonsInitialized` 0x5ff00 → 1; `IsSignedInOnline` 0x56b10 → 1 (иначе создание сезонного героя 0x351160 = «SeasonNotAvailableOnline»); колбэк подтверждения сезона 0x351cc0 → «да»; `ValidateHeroForPartyMember` 0x1bf5f0 → 0; пункт «Подключиться к серверам Diablo» 0x61620 скрыт; season_created героя без данных (0x1bd140) = n |
+| Баффы сезонов: 20 флажков, сколько угодно сразу (+ кнопка «отметить тему выбранного сезона») | `DM_D3_BUFFS=<ключи>` | XVar `CommunityEvent*` (0x18ff848, 0x18fffc8…0x1900b48) — каждый бафф свой булев XVar, игра проверяет их по отдельности (дескрипторы 0x4a6404…), так что несколько сразу возможны (сезон 22 и сам включал два); `CommunityEventEnabled`=1, `SeasonOnly`=0, окно баффа (0x1771758 / 0x1771760) = [1, max], если не задано; ещё `AnniversaryEnabled` 0x18ffa70 и `EasterEggWorldEnabled` 0x18ffb28 (+ u32 0x1771820). Ставятся только выбранные. Офлайн их никто не перезаписывает: простой лобби 0x60704 пересчитывает событие только когда известно время сервера |
+| Читы-патчи | `DM_D3_CHEATS` | `difficulty` 0x5282b0 → 1; `portal` 0x9e3350; `cooldowns` 0x7397d0 / 0x7f8a60 / 0x9bc63c / 0x9bc928; `craft` 0x20636c, 0x40fa20, 0x1dcfa4, 0x236d20..30; `cube` 0x8875d0 → ret; `gem100` 0x6a265c; `gemfast` 0x349ba8; `resource` 0x47ad7c; `orbs` 0x844ce4; `legendary` 0x4fbae4 |
+| Читы-хуки | `DM_D3_CHEATS`, `DM_D3_SPEED`, `DM_D3_ATKSPEED` | `god` / `dbgflags`: хук sInitializeWorld 0x8128a0, после него на локальном сервере (ServerIsLocal 0x4c7e80 && !GameIsStartUp 0x4c7df0) EnableGod (ActorFlagSet 0x86f940 бит 0/1/4, ACD_AttributesSetInt 0x46fc00: God, Invulnerable, иммунитеты; `god` включает и `resource`) и FlagsAreFun (AppGlobals 0x1905610 +0x40/+0x44/+0x48); `equipany` — ACDInventoryItemAllowedInSlot 0x489280 → 0; `ancient` / `primal` — замена LootRollForAncientLegendary 0x88dee0 (eAncientRank +0xd8 = 1 / 2, флаги +0x64 / +0x68 = 0; поля ilvl / torment / gift из AugmentSpecifier не трогаем — их «выключенные» значения затирали бы то, что выставила игра); скорость бега — CPlayerGetMoveSpeedForStickInput 0xc8000 × k; скорость атаки — PowerGetFormulaValueAtLevel 0x6cc700, power 0x50860 × k (как в d3hack) |
+
+Не перенесено: подмена файлов издателя (Config / Seasons / Blacklist — офлайн их колбэки не вызываются), испытания (challenge
+rifts — нужны дампы протобуфов с серверов), «гейт» 0x4cadb8 в GameCommonData::Initialize (у d3hack он включается только когда бит 18
+и так стоит — пустая операция), дюп предметов / unlock-all и хуки атрибутов из `hooks/lobby.hpp` (у d3hack только под debug.enable_crashes),
+сайты с неуверенным соответствием 2.7.6 → 2.7.7 (drop anything, any gem any slot, auto pickup, guaranteed legendaries, gem lvl150),
+ImGui-оверлей, resolution hack (свой `DM_D3_WIDE`). На телефоне ещё **не проверено**.
