@@ -35,8 +35,14 @@ HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "离线：请求不在等待�
     return 0;
 #endif
 }
-HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "离线：网络恒不可用", int, h_nifm_Available, void) { return 0; }
-HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "离线：报失败，不弹系统联网界面", Result, h_nifm_HandleErr, void) { return RES_FAIL; }
+#ifdef DM_GAME_D3
+int dm_net_trace(void); void dm_net_trace_line(const char *what, long r, int err, const void *ra);
+#define NIFM_TR(what, r) do { if (dm_net_trace()) dm_net_trace_line(what, (long)(r), 0, __builtin_return_address(0)); } while (0)
+#else
+#define NIFM_TR(what, r) do {} while (0)
+#endif
+HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "离线：网络恒不可用", int, h_nifm_Available, void) { NIFM_TR("nifm::IsNetworkAvailable", 0); return 0; }
+HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "离线：报失败，不弹系统联网界面", Result, h_nifm_HandleErr, void) { NIFM_TR("nifm::HandleNetworkRequestErrorResult", RES_FAIL); return RES_FAIL; }
 HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "离线：无 IP", Result, h_nifm_GetIp, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "离线：无代理设置", Result, h_nifm_GetProxy, void *p) { (void)p; return RES_FAIL; }
 HLE_FORCE("nnsslInitialize", "连 ssl 服务；网络库全局初始化依赖它成功，离线不建会话（剪）", Result, h_ssl_Initialize, void) { return RES_OK; }

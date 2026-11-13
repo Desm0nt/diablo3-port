@@ -92,7 +92,47 @@ int dm_net_trace(void) {
     if (t < 0) { const char *a = getenv("DM_NET_TRACE"), *b = getenv("DM_LDN_TRACE"); t = (a && *a == '1') || (b && *b == '1'); }
     return t;
 }
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <unistd.h>
+static int tr_read(uint64_t a, void *o, size_t n) {   // a bad pointer gives EFAULT, never a fault
+    if (a < 0x10000 || a >= (1ull << 48)) return 0;
+    struct iovec l = {o, n}, r = {(void *)(uintptr_t)a, n};
+    return syscall(SYS_process_vm_readv, getpid(), &l, 1UL, &r, 1UL, 0UL) == (ssize_t)n;
+}
+// The frame-pointer chain from here into the game (its own frame records): who asked for a close / DestroyNetwork
+static void tr_backtrace(const char *why) {
+    char line[700]; int off = 0; uint64_t fp = (uint64_t)(uintptr_t)__builtin_frame_address(0);
+    for (int i = 0; i < 16 && off < (int)sizeof line - 40; i++) {
+        uint64_t rec[2]; if (!tr_read(fp, rec, sizeof rec)) break;
+        module_t *m = module_of((const void *)(uintptr_t)rec[1]);
+        if (m) off += snprintf(line + off, sizeof line - (size_t)off, "%s+%#lx ", m->name, (unsigned long)((const uint8_t *)(uintptr_t)rec[1] - m->base));
+        if (rec[0] <= fp) break;
+        fp = rec[0];
+    }
+    line[off] = 0; LOG("[trace] %s: game backtrace %s", why, line);
+}
+#ifdef DM_GAME_TL2
+// [TL2] Pia's session object (nn::pia::session::Session, pointer at main+0x92c74e0 - GOT main+0x23a35e8): +0xd4 / +0xd8 its states,
+// +0xdc the Result it keeps, +0x158 the reason; LdnBackgroundProcessJob::WaitCreateNetworkEvent (main 0x1bd2990) fails on them (main
+// 0x1c7ca30: 5 / 7 / 8 -> 0xc406 / 0xc420 / 0xc421). Logged whenever they change while tracing.
+static void tr_pia_session(void) {
+    static module_t *mm; static uint32_t last[4]; static int have;
+    if (!mm) for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) mm = &g_mod[i];
+    if (!mm) return;
+    uint64_t so = 0; uint32_t v[4];
+    if (!tr_read((uint64_t)(uintptr_t)(mm->base + 0x92c74e0), &so, 8) || !so) return;
+    if (!tr_read(so + 0xd4, v, 12) || !tr_read(so + 0x158, &v[3], 4)) return;
+    if (have && !memcmp(v, last, sizeof v)) return;
+    have = 1; memcpy(last, v, sizeof v);
+    LOG("[trace] pia session %#llx: +0xd4 %u +0xd8 %u +0xdc result %#x +0x158 %u", (unsigned long long)so, v[0], v[1], v[2], v[3]);
+}
+#endif
 void dm_net_trace_line(const char *what, long r, int err, const void *ra) {
+#ifdef DM_GAME_TL2
+    tr_pia_session();
+#endif
+    if (!strncmp(what, "close(", 6) || !strcmp(what, "ldn_destroy_network") || !strcmp(what, "ldn_disconnect")) tr_backtrace(what);
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static char last[200]; static unsigned rep; static unsigned lines;
     char cur[200]; module_t *m = module_of(ra);
     snprintf(cur, sizeof cur, "%s -> %ld (%#lx)%s%s <- %s+%#lx", what, r, (unsigned long)r, err ? " errno " : "", err ? strerror(err) : "",
