@@ -14,13 +14,19 @@
 // so the games' sockets talk over the real network.
 //
 // Switches (boot; development only - players use the gear's "Local network play" option, which writes DM_LDN):
-//   DM_LDN=1 (default)  local play over the LAN; nothing opens until the game asks for an access point or a station
+//   DM_LDN=1 (default)  local play over the LAN; nothing opens until the game initializes ldn (D3: only with the "local" network option)
 //   DM_LDN=0            off: the old answers (Initialize fails, state none) - the game says local play is unavailable
 //   DM_LDN_IP=a.b.c.d[/bits]  this node's address (default: the Wi-Fi / hotspot interface); an address the phone does not own is used
 //                       only in NetworkInfo and GetIpv4Address (a NAT setup; the game's binds to it go to "any")
 //   DM_LDN_PEERS=a.b.c.d,...  extra unicast scan targets (networks that drop broadcasts, a VPN such as Tailscale between two phones)
 //   DM_LDN_PORT=11452   discovery / membership port (ldn_mitm's)       DM_LDN_SCAN_MS=600   how long a scan waits for answers
 // Log lines: "[ldn] ..." (hle_ldn_core.c) and "[net] lan: ..." (hle_net.c).
+// How D3 uses it (phone test 13.11): the network option "Local" (ConsoleNetworkOptions row 1, "Console:PartyLocalCommunicationNX64") is
+// the party type 1; a new game starts as an offline party (type 0, HUD "offline", main 0x805d0), and choosing "Local" in the in-game
+// network options (0x226030 -> 0x80ef0 -> 0x8e290 -> 0x7bd20 level 1 -> 0x7ea40 session) makes it local. Every local party then hosts
+// its own network (party tick 0x8f540 -> 0x857b0: state Initialized -> CreateNetwork) and, while alone, scans for the others when its
+// party list asks (0x857b0 -> 0x2171c0 / 0x357440 -> 0x81670); joining one (0x1bc080 -> 0x821c0 -> 0x818d0) closes the access point and
+// connects as a station.
 // Copyright (c) 2026 Desm0nt. MIT License (the repository's LICENSE).
 #ifdef DM_GAME_D3
 #include "hle.h"
@@ -100,6 +106,10 @@ LDNF("_ZN2nn3ldn10InitializeEv", h_ldn_Init, Result, void) {
         else { LOG("ldn::Initialize: no Wi-Fi / hotspot / LAN interface with an IPv4 address: local wireless unavailable (as with the radio off)"); r = LDN_R_DEVICE_NOT_AVAILABLE; }
     }
     pthread_mutex_unlock(&g_mu);
+    // The game's own sockets follow Horizon from here, not only from OpenAccessPoint: D3's local session creates its UDP transport socket
+    // right after Initialize (main 0xc031b0 -> 0xc08040: Socket(2, 2, 0), Fcntl(F_SETFL, flags | 0x800)), and the offline FreeBSD
+    // translation read 0x800 as "blocking" (phone test 13.11: the socket at boot came out blocking)
+    if (!r) lan_opened();
     return r;
 }
 LDNF("_ZN2nn3ldn8FinalizeEv", h_ldn_Fini, void, void) {

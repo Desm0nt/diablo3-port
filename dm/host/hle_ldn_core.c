@@ -458,6 +458,7 @@ uint32_t ldn_scan(ldn_ctx *c, ldn_network *out, int *count, int max, const ldn_s
         uint8_t in[PKT_MAX]; ssize_t r = recv(fd, in, sizeof in, 0); if (r <= 0) continue;
         ldn_network n; unsigned type; if (ldn_pkt_decode(in, (size_t)r, &type, &n, sizeof n) != (int)sizeof n || type != LDN_PKT_SCAN_RESP) continue;
         answers++;
+        if (!memcmp(n.bssid, c->mac, 6)) continue;   // this phone's own network (D3 hosts while it scans; a console never lists itself)
         int dup = 0; for (int i = 0; i < ngot; i++) if (!memcmp(got[i].bssid, n.bssid, 6) && !memcmp(got[i].id.session, n.id.session, 16)) { got[i] = n; dup = 1; }
         if (!dup && ngot < 16) got[ngot++] = n;
     }
