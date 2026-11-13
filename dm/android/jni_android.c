@@ -212,9 +212,11 @@ static void log_cpu(void) {
 static void log_init(void) {
     static int initialized; if (initialized) return; initialized = 1;
     // [D3] boot.log goes straight into Download/<data folder>/logs (next to crash.txt and logcat.txt, reachable with a file manager on
-    // Android 11+, and on disk line by line even when the system kills the app), else into the runtime dir as before
+    // Android 11+, and on disk line by line even when the system kills the app), else into the runtime dir as before.
+    // DM_LOG_PUBLIC=0 (gear "Write logs" off, GitHub issue #19: ~9 MB files in Download): the private runtime dir, where crash reports still read it
     char dir[1100]; snprintf(dir, sizeof dir, "%s/logs", g_src);
-    { struct stat st; if (!g_src[0] || ((stat(dir, &st) || !S_ISDIR(st.st_mode)) && mkdir(dir, 0775)) || access(dir, W_OK)) snprintf(dir, sizeof dir, "%s", g_runtime); }
+    const char *pub = getenv("DM_LOG_PUBLIC");
+    { struct stat st; if (!g_src[0] || (pub && *pub == '0') || ((stat(dir, &st) || !S_ISDIR(st.st_mode)) && mkdir(dir, 0775)) || access(dir, W_OK)) snprintf(dir, sizeof dir, "%s", g_runtime); }
     char prev[1220]; snprintf(g_log_path, sizeof g_log_path, "%s/boot.log", dir); snprintf(prev, sizeof prev, "%s/boot.prev.log", dir);
     if (rename(g_log_path, prev) && errno != ENOENT) unlink(g_log_path);   // [DOOM] one previous run kept; never append forever
     g_logf = fopen(g_log_path, "w"); g_log_fd = g_logf ? fileno(g_logf) : -1;
@@ -737,3 +739,22 @@ JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeLogPath(JNIEnv
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeQuit(JNIEnv *env, jclass cls) { (void)env; (void)cls; LOG("[java] the app ends (pause menu)"); dm_host_shutdown("pause menu: quit"); }
 JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeOpmode(JNIEnv *env, jclass cls) { (void)env; (void)cls; return dm_opmode(); }
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetOpmode(JNIEnv *env, jclass cls, jint m) { (void)env; (void)cls; dm_set_opmode(m ? 1 : 0); }
+
+// [D3] On-phone ASTC texture cache (astc_convert.cpp, D3Textures.java; issue #20): "[astc] ..." lines go to logcat and, once the game
+// has opened its log, into boot.log (stderr).
+#include "astc_convert.h"
+static void astc_log(const char *line) { __android_log_print(ANDROID_LOG_INFO, "dm", "%s", line); }   // one sink: the wrapped __android_log_print also reaches boot.log (stderr as well wrote every line twice)
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcStart(JNIEnv *env, jclass cls, jstring dir, jint threads) {
+    (void)cls; const char *d = (*env)->GetStringUTFChars(env, dir, NULL); astc_conv_set_log(astc_log);
+    int r = astc_conv_start(d, threads); (*env)->ReleaseStringUTFChars(env, dir, d); return r;
+}
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcLimit(JNIEnv *env, jclass cls, jint n) { (void)env; (void)cls; astc_conv_limit(n); }
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcCancel(JNIEnv *env, jclass cls) { (void)env; (void)cls; astc_conv_cancel(); }
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcProgress(JNIEnv *env, jclass cls, jlongArray out) {
+    (void)cls; int64_t v[ASTC_CONV_FIELDS]; astc_conv_progress(v);
+    jsize n = (*env)->GetArrayLength(env, out); if (n > ASTC_CONV_FIELDS) n = ASTC_CONV_FIELDS;
+    jlong w[ASTC_CONV_FIELDS]; for (int i = 0; i < ASTC_CONV_FIELDS; i++) w[i] = (jlong)v[i];
+    (*env)->SetLongArrayRegion(env, out, 0, n, w);
+}
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcBigCores(JNIEnv *env, jclass cls) { (void)env; (void)cls; return astc_conv_big_cores(); }
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_D3Textures_nativeAstcEstimateMinutes(JNIEnv *env, jclass cls) { (void)env; (void)cls; return astc_conv_estimate_minutes(); }

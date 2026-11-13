@@ -66,6 +66,15 @@ uint64_t front_game_res(int docked) {
     }
     return docked ? 900ull << 32 | 1600 : 720ull << 32 | 1280;
 }
+#ifdef DM_GAME_D3
+// [D3] The screen in landscape, (u64)short side << 32 | long side (0 = unknown): hle_d3.c dm_d3_wide_install for screens narrower than 16:9
+// (front_game_res only widens)
+uint64_t front_screen_size(void) {
+    int w = atomic_load(&g_screen_w), h = atomic_load(&g_screen_h);
+    if (h > w) { int t = w; w = h; h = t; }
+    return w > 0 && h > 0 ? (uint64_t)(uint32_t)h << 32 | (uint32_t)w : 0;
+}
+#endif
 
 #ifdef DM_GAME_DOOM
 // ---------------- [DOOM] game controllers ----------------

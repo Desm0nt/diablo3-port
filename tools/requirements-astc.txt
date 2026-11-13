@@ -1,0 +1,5 @@
+# Diablo III Mobile setup: the ASTC texture cache encoder (tools/d3_astc_cache.py), installed by setup into its private Python
+# (tools/.runtime). Pinned: the cache is rebuilt when the encoder version changes (manifest.json). Wheels exist for Windows, Linux and
+# macOS (x86-64 / arm64), CPython 3.10+.
+astc-encoder-py==0.1.12      # MIT; bundles ARM astc-encoder (Apache-2.0)
+numpy<2.4                    # BSD-3-Clause

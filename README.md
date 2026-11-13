@@ -173,7 +173,8 @@ game's Switch shaders need something the GPU lacks (all ported from the DOOM 201
 format-less storage writes or `shaderImageGatherExtended` (those shaders are skipped or degraded), no D24 depth (D32
 is used), no GPU timestamps, no linear filtering of some formats (nearest), no depth bounds / non-solid fill / depth bias
 clamp, no `nullDescriptor`, texel buffer limits, driver pipeline failures (skipped instead of fatal), interrupted fence
-waits on Mali. BC textures, which Mali and PowerVR cannot sample, are decoded on the GPU in batches. One boot.log line
+waits on Mali. BC textures, which Mali and PowerVR cannot sample, come from the ASTC texture cache that setup builds
+(`Download/Diablo3Mobile/astc`, about the BC size in memory), or without it are decoded on the GPU in batches (4-8x larger). One boot.log line
 lists what the device needed: `NVN fallbacks on this device: ...`. `DM_GFX_SIM_GPU=mali` (or `powervr`, `xclipse`) in
 `Download/Diablo3Mobile/dm/env` simulates such a GPU on a Snapdragon for testing. Reports (device, GPU, driver,
 `crash.txt`) are very welcome.
@@ -225,6 +226,8 @@ Diablo III Mobile stands on the work of others — thank you:
   driver loading approach, the sync-lag idea and NVN 55 object sizes (ideas, re-implemented).
 - **[D3CPKUnpack](https://github.com/RedMadKnight/D3CPKUnpack)** by Krzysztof Janiszewski (RedMadKnight, MIT) — the
   Diablo III console CPK archive library, vendored as `tools/d3cpklib.py`.
+- **[d3hack](https://github.com/god-jester/d3hack)** by god-jester (GPL-2.0) — offline seasons, season buffs, cheats and
+  their hooks, ported to this host and update 2.7.7 in `dm/host/hle_d3_mods.c` (GPL-2.0).
 - **[libadrenotools](https://github.com/bylaws/libadrenotools)** by Billy Laws (BSD-2-Clause).
 - **Ryujinx** shader translator (Ryujinx Team and Contributors, MIT), vendored by d2r-mobile in `dm/third_party/ryujinx`.
 - **[AMD FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR)** RCAS (MIT).
@@ -243,6 +246,10 @@ included or distributed here; play it with a copy you own.
 ## License
 
 MIT — see [LICENSE](LICENSE). The d2r-mobile copyright notice is kept; third-party components keep their own licenses.
+
+Exception: `dm/host/hle_d3_mods.c` (the "Mods / cheats" page) contains code derived from
+[d3hack](https://github.com/god-jester/d3hack) and is GPL-2.0 ([its license text](dm/host/hle_d3_mods.LICENSE)). It is linked into
+`libdm.so`, so the APK as a whole is distributed under the GPL-2.0; all its source is in this repository.
 
 ---
 

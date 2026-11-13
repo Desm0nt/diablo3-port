@@ -29,6 +29,7 @@ static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap; static int g_heap_
 // 地址段整个落在客体堆当前已开放（可读写）的范围内：这种读不用陷内核核对，直接 memcpy（diag.c tk_rd 等每拍读客体内存的地方用）
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
 int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintptr_t)g_heap; size_t cur = g_heap_cur; return g_heap && a >= b && n <= cur && a - b <= cur - n; }
+size_t dm_guest_heap_bytes(void) { return g_heap_cur; }   // [D3] issue #20: the guest heap (SetHeapSize), for the engine's [mem] census line
 static uint8_t *g_alias; static size_t g_alias_cap;
 // [ETERNAL] NVN GPU addresses are 40-bit on the Switch, and the game keeps them that way (it masks buffer addresses to 40 bits
 // before binding: bindless UBO reads at 0x674d4e0110 for the host pointer 0x7a674d4e0110). Our GPU addresses are host pointers,
@@ -215,6 +216,7 @@ static void map_del_l(int i) { g_map[i] = g_map[--g_nmap]; }   // caller holds g
 static _Atomic uint64_t *g_alias_bits;
 static uint64_t *g_alias_exposed;   // one bit per host page ever opened (g_map_lock)
 static _Atomic int64_t g_alias_mapped;
+int64_t dm_alias_mapped_bytes(void) { return atomic_load(&g_alias_mapped); }   // [D3] issue #20: guest memory committed with MapPhysicalMemory, for the engine's [mem] census line
 void doom_alias_init(void) {
     size_t pg = (size_t)getpagesize();
     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");

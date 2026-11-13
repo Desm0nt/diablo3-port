@@ -23,6 +23,7 @@ Diablo3Mobile/
   dm/out/{main,sdk}.{patched.bin,fixups.tsv,gates.tsv,sites.tsv,...}   the patched modules
   dm/shaders/<key>.xgs + _vk_build.json             1323 SPIR-V bundles (~31 MB)
   aoc/<index>/*.cpk                                 language packs (~5-6 GiB each), optional
+  astc/d3-astc.pack + manifest.json + quality.tsv   the ASTC texture cache (~6 GiB): phones without BC textures (Mali, PowerVR, Xclipse)
 ```
 
 The app also reads `dm/env` (KEY=VALUE lines, debugging switches) and `drivers/` (Vulkan driver packages) there.
@@ -37,6 +38,7 @@ The app also reads `dm/env` (KEY=VALUE lines, debugging switches) and `drivers/`
 | 6 | RomFS | `tools/romfs_d3.py extract <base> <update> <dest>` (NSZ / XCZ: program expanded first with `tools/ncz2nsp.py`) | IVFC hashes verified, BKTR applied, files + `work/romfs-manifest.json` (sha256 of every file) |
 | 7 | Shaders | the four steps of `tools/d3_shaders_vk.sh`: `tools/d3_cpk.py mextract <romfs> work/cpk-shaders '*.shd'` → `tools/d3_shader_jobs.py` → `tools/build_dmsh_xlate_d3.py` (.NET 10 SDK, Ryujinx 1.3.2 from `dm/third_party/ryujinx`) → `dm/gfx/tools/dmsh_vk_xc2.py` | `dm/shaders/*.xgs`; details in [SHADERS.md](SHADERS.md) |
 | 8 | Language packs | `tools/d3_dlc_romfs.py extract <dlc> [--dest DIR]` | `aoc/<index>/` + `work/aoc-manifest.json` |
+| 9 | ASTC texture cache | `tools/d3_astc_cache.py <romfs> <out> [--aoc aoc/<index>]... [--jobs N]` (astc-encoder-py, numpy); only this step for an existing folder: `setup astc` | `astc/d3-astc.pack`: every BC texture of the merged view and the language packs that reaches >= 42 dB at mip 0 against its decoded BC; steps in order, the first that reaches it is kept: BC1 6x6 / 5x5 / 4x4 `-fast`, 4x4 `-medium`, `-thorough`; BC2 / BC3 4x4 `-fast`, `-medium`, `-thorough`; the rest stays BC (`quality.tsv`: block or `bc`, preset, steps, dB). The phone can make the same folder itself (pause menu "Prepare textures", `dm/android/astc_convert.cpp`); the engine loads it instead of decoding BC to RGBA8 (`DM_GFX_ASTC_CACHE`). `--no-astc` leaves it out (Adreno does not need it) |
 
 Every step is skipped when its output is complete; delete an output to redo it. `setup --steps exefs,patch,verify` (etc.)
 runs a subset, `--skip-verify` / `--skip-shaders` leave those out, `--keep-nsp` keeps the expanded NSPs, `--work DIR`
