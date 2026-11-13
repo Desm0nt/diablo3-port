@@ -18,6 +18,7 @@ _Static_assert((char)-1 < 0,"bcdec signed formats require -fsigned-char");
 
 int xbg_bc_8bit_channels=0;
 int xbg_bc6_e5=0;
+int xbg_bc1_16=0;
 /* [nonadreno] E5B9G9R9 from binary16 (BC6H UF16 output: never negative, at most 0x7bff). value = M*2^-24 with M the half's
  * integer significand shifted by its exponent; the shared exponent E divides by 2^E with round-half-up, as the extension's
  * floor(x/2^(E-24)+0.5). Same arithmetic as xbg_e5b9g9r9 in xbg_bc_gpu.glsl (tests/bc_gpu_decode_test.cpp). */
@@ -48,6 +49,7 @@ int xbg_bc_format_info(uint32_t fmt,xbg_bc_format *out) {
     if(fmt==0x4c)out->pixels=XBG_RG16_SNORM;
     if(fmt==0x4f || fmt==0x50){out->pixels=XBG_RGBA16_SFLOAT;out->bytes_per_pixel=8;}
     if(fmt==0x50 && xbg_bc6_e5){out->pixels=XBG_RGB9E5_UFLOAT;out->bytes_per_pixel=4;}
+    if(xbg_bc1_16 && (fmt==0x41 || fmt==0x42)){out->pixels=fmt==0x41?XBG_RGB565_UNORM:XBG_RGBA5551_UNORM;out->bytes_per_pixel=2;}   /* [nonadreno] issue #20 */
     /* 8 位通道回退：设备不能线性过滤 16 位 R/RG（Mali）。SNORM 仍保留 16 位。
      * 8-bit channel fallback: the device cannot filter 16-bit R/RG (Mali). Signed formats keep 16 bits. */
     if(xbg_bc_8bit_channels){
@@ -215,7 +217,7 @@ int xbg_decode_block(uint32_t fmt,const void *block,size_t bn,void *out,size_t o
             if(channels==2) {dst[i*4+2]=(uint8_t)g[i];dst[i*4+3]=(uint8_t)(g[i]>>8);}
         } return 0;
     }
-    if(fmt<0x41 || fmt>0x48 || on<64) return -2;
+    if(fmt<0x41 || fmt>0x48 || on<16*info.bytes_per_pixel) return -2;
     unsigned base=fmt>=0x45?fmt-4:fmt;
     unsigned bytes=base<=0x42?8:16; if(bn<bytes) return -1;
     color(b+(bytes==16?8:0),rgba,bytes==16,base==0x41);
@@ -224,6 +226,14 @@ int xbg_decode_block(uint32_t fmt,const void *block,size_t bn,void *out,size_t o
         for(unsigned i=0;i<16;i++) rgba[i][3]=(uint8_t)(((a>>(i*4))&15)*17);
     } else if(base==0x44) {
         channel(b,r);for(unsigned i=0;i<16;i++) rgba[i][3]=(uint8_t)((r[i]+128)/257);
+    }
+    if(info.bytes_per_pixel==2) {   /* [nonadreno] xbg_bc1_16: VK R5G6B5 / A1R5G5B5, little-endian 16-bit words (xbg_bc_gpu.glsl bc_pack16) */
+        for(unsigned i=0;i<16;i++) {
+            unsigned r=rgba[i][0],g=rgba[i][1],bl=rgba[i][2],v;
+            if(fmt==0x41) v=((r*31u+127u)/255u)<<11|((g*63u+127u)/255u)<<5|(bl*31u+127u)/255u;
+            else v=(rgba[i][3]>=128u?0x8000u:0u)|((r*31u+127u)/255u)<<10|((g*31u+127u)/255u)<<5|(bl*31u+127u)/255u;
+            dst[i*2]=(uint8_t)v; dst[i*2+1]=(uint8_t)(v>>8);
+        } return 0;
     }
     for(unsigned i=0;i<16;i++) for(unsigned j=0;j<4;j++) dst[i*4+j]=rgba[i][j];
     return 0;

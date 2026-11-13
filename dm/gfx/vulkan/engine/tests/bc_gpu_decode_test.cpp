@@ -27,7 +27,7 @@ static int failures = 0;
 #define CHECK(c, ...) do { if(!(c)) { if(failures++ < 30) { printf("FAIL line %d: ", __LINE__); printf(__VA_ARGS__); printf("\n"); } } } while(0)
 
 static void set_flags(uint32_t fmt, uint32_t opt) {
-    XBG_FMT = fmt; XBG_OPT = opt; xbg_bc_8bit_channels = (opt & 1) ? 1 : 0; xbg_bc6_e5 = (opt & 2) ? 1 : 0;
+    XBG_FMT = fmt; XBG_OPT = opt; xbg_bc_8bit_channels = (opt & 1) ? 1 : 0; xbg_bc6_e5 = (opt & 2) ? 1 : 0; xbg_bc1_16 = (opt & 4) ? 1 : 0;
 }
 static uvec4 payload_of(const uint8_t *b, uint32_t block_bytes) {
     uint32_t w[4] = {0, 0, 0, 0}; memcpy(w, b, block_bytes); return uvec4(w[0], w[1], w[2], w[3]);
@@ -169,11 +169,34 @@ static void test_bands() {
     printf("bands: ok\n");
 }
 
+// xbg_bc1_16 (issue #20): the 16-bit BC1 pixel expanded back to 8 bits is the RGBA8 pixel within the rounding of 5/6 bits, alpha exact.
+static void test_bc1_16() {
+    unsigned worst = 0, n = 0;
+    for(uint32_t fmt : {0x41u, 0x42u}) for(unsigned k = 0; k < 200000; k++) {
+        uint8_t blk[8]; for(auto &b : blk) b = uint8_t(rnd());
+        uint8_t a[64], b16[32];
+        xbg_bc1_16 = 0; CHECK(xbg_decode_block(fmt, blk, 8, a, sizeof(a)) == 0, "bc1 rgba8 decode");
+        xbg_bc1_16 = 1; CHECK(xbg_decode_block(fmt, blk, 8, b16, sizeof(b16)) == 0, "bc1 16-bit decode (32-byte output)");
+        for(unsigned i = 0; i < 16; i++) {
+            unsigned v = b16[2 * i] | b16[2 * i + 1] << 8, r, g, bl, al;
+            if(fmt == 0x41) {r = v >> 11; g = (v >> 5) & 63; bl = v & 31; r = r << 3 | r >> 2; g = g << 2 | g >> 4; bl = bl << 3 | bl >> 2; al = 255;}
+            else {r = (v >> 10) & 31; g = (v >> 5) & 31; bl = v & 31; r = r << 3 | r >> 2; g = g << 3 | g >> 2; bl = bl << 3 | bl >> 2; al = v >> 15 ? 255 : 0;}
+            const unsigned e[3] = {unsigned(abs(int(r) - a[4 * i])), unsigned(abs(int(g) - a[4 * i + 1])), unsigned(abs(int(bl) - a[4 * i + 2]))};
+            for(unsigned c : e) worst = c > worst ? c : worst;
+            CHECK(al == a[4 * i + 3], "bc1 16-bit alpha fmt %#x", fmt); ++n;
+        }
+    }
+    xbg_bc1_16 = 0;
+    CHECK(worst <= 4, "bc1 16-bit worst channel error %u", worst);
+    printf("bc1 16-bit: %u pixels, worst channel error %u/255, alpha exact\n", n, worst);
+}
+
 int main() {
+    test_bc1_16();
     test_bands();
     const uint32_t fmts[] = {0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50};
-    for(uint32_t f : fmts) for(uint32_t opt = 0; opt < 4; opt++) {
-        if(opt && !((opt == 1 && (f == 0x49 || f == 0x4b)) || (opt == 2 && f == 0x50))) continue;
+    for(uint32_t f : fmts) for(uint32_t opt = 0; opt < 8; opt++) {
+        if(opt && !((opt == 1 && (f == 0x49 || f == 0x4b)) || (opt == 2 && f == 0x50) || (opt == 4 && (f == 0x41 || f == 0x42 || f == 0x45 || f == 0x46)))) continue;
         test_blocks(f, opt, 300000);
         test_planned(f, opt);
     }

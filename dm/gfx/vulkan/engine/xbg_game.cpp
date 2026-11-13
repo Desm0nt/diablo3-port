@@ -305,6 +305,9 @@ bool native_bc=false;uint64_t native_bc_images=0,decoded_bc_images=0;int64_t ima
 // perf window: GPU / CPU decode batches, GPU blocks, partial (dirty-block) decoded uploads, CPU decode time; run totals of raw
 // BC bytes uploaded and of decoded bytes, all uploads and first full uploads only (the planned ASTC cache sizes its disk from these).
 int bc_mode=-1;int64_t decoded_bytes_live=0,decoded_native_live=0;
+// [nonadreno] issue #20: decoded BC bytes by source family (0 BC1, 1 BC2/BC3, 2 the rest) for the [mem] census line (namespace memstat)
+int64_t decoded_group_live[3]={};
+inline int decoded_group(uint32_t f){f=f>=0x45 && f<=0x48?f-4:f;return f==0x41 || f==0x42?0:f==0x43 || f==0x44?1:2;}
 // [nonadreno] ASTC / ETC2 / EAC overlay (variant A, xbg_astc_overlay.h): the BC formats whose file blocks the overlay replaced, from
 // DM_GFX_ASTC_FORMATS (set by the boot choice in vulkan_present.cpp only when the overlay is mounted; read at engine init). Their
 // images are created in the substitute format and uploaded as native blocks (bc_store BC_SUBST). Run counts: images substituted per
@@ -482,6 +485,8 @@ VkFormat vertex_format_fallback(VkFormat f,uint32_t loc,uint32_t offset,uint32_t
     const VkFormat w=xbg_vertex_widen(f);if(w==VK_FORMAT_UNDEFINED || !(format_properties(w).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT))return f;
     static std::set<int> told;if(told.insert(int(f)).second)xbg_logf("NVN vertex format %u has no VERTEX_BUFFER support: read as %u (location=%u offset=%u stride=%u; the 4th channel is not 1)",unsigned(f),unsigned(w),loc,offset,stride);
     return w;}
+// [nonadreno] issue #20: device RAM tiers, arena budget under memory pressure and the once-a-minute [mem] census line (defined after bcgpu)
+namespace memstat{extern uint32_t sec;long ram_mb();int ram_tier();size_t arena_keep();void tick();void note_created(uint64_t serial);}
 struct ArenaChunk{VkBuffer buffer{};VkDeviceMemory memory{};uint8_t *mapped{};VkDeviceSize size=0,used=0;bool coherent=true;};
 constexpr VkBufferUsageFlags arena_usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT|VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT|VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 constexpr VkDeviceSize arena_chunk_bytes=32ull*1024*1024;
@@ -525,7 +530,7 @@ struct Arena {
     void reset(){for(auto &c:chunks)c.used=0;current=0;used_total=0;}
     void trim(){
         size_t kept=0;std::vector<ArenaChunk> keep;
-        for(auto &c:chunks){if(c.size==arena_chunk_bytes && kept<std::max<size_t>(keep_chunks,6)){keep.push_back(c);++kept;}else destroy(c);}   // [DOOM] keep what a frame uses (~100 MB): allocate/free per frame cost kgsl ioctls
+        for(auto &c:chunks){if(c.size==arena_chunk_bytes && kept<std::max<size_t>(keep_chunks,memstat::arena_keep())){keep.push_back(c);++kept;}else destroy(c);}   // [DOOM] keep what a frame uses (~100 MB): allocate/free per frame cost kgsl ioctls; [nonadreno] issue #20: memstat::arena_keep() (6, 2 below 7 GB of RAM, 1 under memory pressure)
         chunks.swap(keep);current=0;
     }
     static void destroy(ArenaChunk &c){if(c.mapped)vkUnmapMemory(cfg.device,c.memory);if(c.buffer)vkDestroyBuffer(cfg.device,c.buffer,nullptr);if(c.memory)vkFreeMemory(cfg.device,c.memory,nullptr);c=ArenaChunk{};}
@@ -1167,6 +1172,7 @@ extern uint64_t guest_barriers_skipped,storage_chained,storage_merges,barriers_a
 // Readings of the 3D picture brightening (defined in namespace bright before dispatch)
 namespace bright{extern bool enabled;extern uint64_t applied;extern float last_k;}
 void perf_frame(){
+    memstat::tick();
     {texel_distinct+=texel_frame_keys.size();for(auto k:texel_frame_keys)if(texel_prev_keys.count(k))++texel_reused;texel_prev_keys.swap(texel_frame_keys);texel_frame_keys.clear();}
     if(completion_wait_enabled)fold_completion_wait_stats();
     if(perf_frame_timed)++perf_timed_frames;perf_frame_timed=perf_sample && stats.presents.load()%perf_sample==0;   // the next frame
@@ -1713,6 +1719,8 @@ VkFormat decoded_format(uint32_t pixels) {
     case XBG_R8_UNORM:return VK_FORMAT_R8_UNORM;
     case XBG_RG8_UNORM:return VK_FORMAT_R8G8_UNORM;
     case XBG_RGB9E5_UFLOAT:return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;   // [nonadreno] unsigned BC6H with xbg_bc6_e5 (DM_GFX_BC6_E5)
+    case XBG_RGB565_UNORM:return VK_FORMAT_R5G6B5_UNORM_PACK16;       // [nonadreno] UNORM BC1 with xbg_bc1_16 (DM_GFX_BC1_16, issue #20)
+    case XBG_RGBA5551_UNORM:return VK_FORMAT_A1R5G5B5_UNORM_PACK16;
     default:xbg_fatalf("Invalid decoded BC pixel format %u",pixels);
     }
 }
@@ -1756,12 +1764,13 @@ struct Image {
     // slot_serial at the last get_image of this image: equal to the current value means a command of this submission already used it
     // (gfx-upload-prologue decides by it whether an upload may go ahead of the submission).
     uint64_t slot_use=0;
+    uint32_t use_tick=0;   // [nonadreno] issue #20: memstat::sec at the last get_image (idle decoded BC images are evicted, memstat::evict_idle)
     uint64_t dirty_stamp=0,dirty_seen=0;   // tex_dirty: the tracker stamp of the checked content (0: not tracked yet) and the tracker generation last checked
 #ifdef DM_GAME_ETERNAL
     uint64_t sparse_gen=0,sparse_stamp=0;bool sparse=false;   // [ETERNAL] storage in a virtual pool: mapping generation and dirty stamp of the checked content (sparse_check)
 #endif
     std::map<std::array<uint32_t,8>,VkImageView> views;std::vector<std::vector<uint64_t>> fb_keys; // fb_keys: persistent framebuffers using these views
-    ~Image(){image_bytes_live-=mem_bytes;bc_image_bytes_live-=bc_bytes;astc_ov_bytes_live-=subst_bytes;bc_data_bytes_live-=bc_data;decoded_bytes_live-=dec_bytes;decoded_native_live-=dec_native;forget_framebuffers(*this);for(auto &v:views)vkDestroyImageView(cfg.device,v.second,nullptr);if(image)vkDestroyImage(cfg.device,image,nullptr);if(memory)vkFreeMemory(cfg.device,memory,nullptr);}
+    ~Image(){image_bytes_live-=mem_bytes;bc_image_bytes_live-=bc_bytes;astc_ov_bytes_live-=subst_bytes;bc_data_bytes_live-=bc_data;decoded_bytes_live-=dec_bytes;decoded_native_live-=dec_native;decoded_group_live[decoded_group(source.d.format)]-=dec_bytes;forget_framebuffers(*this);for(auto &v:views)vkDestroyImageView(cfg.device,v.second,nullptr);if(image)vkDestroyImage(cfg.device,image,nullptr);if(memory)vkFreeMemory(cfg.device,memory,nullptr);}
     void transition(VkCommandBuffer cmd,VkImageLayout next){
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.oldLayout=layout;b.newLayout=next;b.image=image;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
         b.subresourceRange={aspects,0,levels,0,layers};b.srcAccessMask=layout==VK_IMAGE_LAYOUT_UNDEFINED?0:VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT;b.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
@@ -1772,6 +1781,9 @@ struct Image {
         if(decoded){
             need(xbg_bc_view_compatible(source.d.format,v->format),"BC texture view must retain compression and signedness");
             xbg_bc_format info;need(xbg_bc_format_info(v->format,&info)==0,"Invalid BC view format");
+            // [nonadreno] DM_GFX_BC1_16: a 16-bit BC1 image has no sRGB partner of its size (sRGB BC1 stays RGBA8): such a view is logged and
+            // viewed as the image's own format (gamma off at worst, never a size-mismatched view)
+            if(info.bytes_per_pixel!=bpp){static unsigned told=0;if(told++<8)xbg_logf("NVN BC1 16-bit: view fmt=%#x of serial=%llu fmt=%#x has no 16-bit format, viewed as vk=%d (DM_GFX_BC1_16=0 restores RGBA8)",v->format,(unsigned long long)source.serial,source.d.format,int(fmt));return fmt;}
             return decoded_format(info.pixels);
         }
         if(subst){   // [nonadreno] ASTC overlay: a view keeps the substitute class (UNORM <-> sRGB of the same substitute); anything else is
@@ -2316,7 +2328,8 @@ Image &get_image_read(const tex_t *t,bool upload);
 enum BcStore{BC_NOT=0,BC_NATIVE,BC_DECODED,BC_SUBST};
 int bc_partial_flag=-1;size_t bc_batch=0;
 bool bc_partial_on(){if(bc_partial_flag<0){const char *e=getenv("DM_GFX_BC_PARTIAL");bc_partial_flag=e?atoi(e)!=0:1;}return bc_partial_flag!=0;}
-size_t bc_batch_bytes(){if(!bc_batch){const char *e=getenv("DM_GFX_BC_BATCH_MB");long mb=e?atol(e):32;if(mb<4)mb=4;if(mb>128)mb=128;bc_batch=size_t(mb)<<20;}return bc_batch;}
+size_t bc_batch_bytes(){if(!bc_batch){const char *e=getenv("DM_GFX_BC_BATCH_MB");long mb=e?atol(e):memstat::ram_tier()>=2?16:32;   /* [nonadreno] issue #20: 16 MB below 7 GB of RAM (GPU scratch 48 -> 24 MB) */
+    if(mb<4)mb=4;if(mb>128)mb=128;bc_batch=size_t(mb)<<20;}return bc_batch;}
 namespace bcgpu{bool prepare();VkPipeline pipeline(uint32_t fmt,uint32_t opt);size_t in_cap();size_t out_cap();void shutdown();}
 // Once, at the first decoded texture: the decoder (DM_GFX_BC_DECODE), E5B9G9R9 for unsigned BC6H (DM_GFX_BC6_E5) and the log line.
 void bc_decode_init(){
@@ -2326,6 +2339,14 @@ void bc_decode_init(){
     VkFormatProperties q{};vkGetPhysicalDeviceFormatProperties(cfg.physical,VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,&q);
     const VkFormatFeatureFlags need_e5=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     xbg_bc6_e5=want_e5 && (q.optimalTilingFeatures&need_e5)==need_e5;
+    // [nonadreno] issue #20 (Samsung A34, Mali-G68, 5.4 GB: LOW_MEMORY kills at rss 2.4 GB with 1.6 GB of decoded BC images, ~60% BC1):
+    // UNORM BC1 decodes to R5G6B5 / A1R5G5B5, half the bytes. DM_GFX_BC1_16=auto (default): on below 10 GB of RAM (memstat::ram_tier
+    // >= 1; DM_MEM_LOW=1 forces it, e.g. on a big phone with DM_GFX_SIM_GPU=mali), 1 always, 0 never. Both formats are mandatory with
+    // linear filtering in Vulkan; a device without them keeps RGBA8.
+    {const char *e1=getenv("DM_GFX_BC1_16");const int want=e1 && *e1 && strcmp(e1,"auto")?atoi(e1)!=0:memstat::ram_tier()>=1;
+     VkFormatProperties a{},b{};vkGetPhysicalDeviceFormatProperties(cfg.physical,VK_FORMAT_R5G6B5_UNORM_PACK16,&a);vkGetPhysicalDeviceFormatProperties(cfg.physical,VK_FORMAT_A1R5G5B5_UNORM_PACK16,&b);
+     xbg_bc1_16=want && (a.optimalTilingFeatures&need_e5)==need_e5 && (b.optimalTilingFeatures&need_e5)==need_e5;
+     xbg_logf("NVN BC decode bc1_16=%d (DM_GFX_BC1_16=%s, ram %ld MB tier %d; R5G6B5 features %#x A1R5G5B5 %#x)",xbg_bc1_16,e1?e1:"auto",memstat::ram_mb(),memstat::ram_tier(),unsigned(a.optimalTilingFeatures),unsigned(b.optimalTilingFeatures));}
     if(bc_mode==2 && !bcgpu::prepare()){bc_mode=1;xbg_logf("NVN BC decode: GPU decoder unavailable, decoding on the CPU");}
     xbg_logf("NVN BC decode device=\"%s\" native_bc=%d bc=%u -> decoder=%s bc6=%s (E5B9G9R9 features %#x) bc4/5_8bit=%d partial=%d batch=%zuMB",
         properties.deviceName,int(native_bc),unsigned(cfg.enabled_core.textureCompressionBC),bc_mode==2?"gpu":"cpu",xbg_bc6_e5?"e5b9g9r9":"rgba16f",unsigned(q.optimalTilingFeatures),
@@ -2386,7 +2407,7 @@ struct BcUpload {
     BcUpload(Image &i,const tex_t *tex,bool prologue):im(i),t(tex),pro(prologue),fmt(tex->d.format),cap(bc_batch_bytes()){
         int w=1,h=1;const int b=nvn_fmt_bpb(fmt,&w,&h);bw=uint32_t(std::max(w,1));bh=uint32_t(std::max(h,1));
         if(!im.decoded){block_bytes=bpp=im.bpp;return;}
-        need(b==8 || b==16,"BC block size");block_bytes=uint32_t(b);bpp=im.bpp;opt=(xbg_bc_8bit_channels && (fmt==0x49 || fmt==0x4b)?1u:0u)|(xbg_bc6_e5 && fmt==0x50?2u:0u);   // only where it changes the output: one pipeline per format
+        need(b==8 || b==16,"BC block size");block_bytes=uint32_t(b);bpp=im.bpp;opt=(xbg_bc_8bit_channels && (fmt==0x49 || fmt==0x4b)?1u:0u)|(xbg_bc6_e5 && fmt==0x50?2u:0u)|(xbg_bc1_16 && (fmt==0x41 || fmt==0x42)?4u:0u);   // only where it changes the output: one pipeline per format
         mode=bc_mode==2?2:1;
         if(mode==2){pipe=bcgpu::pipeline(fmt,opt);if(!pipe){mode=1;static bool told=false;if(!told){told=true;xbg_logf("NVN BC decode: no GPU pipeline for fmt=%#x opt=%u, decoding on the CPU",fmt,opt);}}}
     }
@@ -2529,7 +2550,7 @@ inline Image &get_image(const tex_t *t,bool upload){
     if(img_fast && t && t->serial && t->magic==MAGIC('T','E','X',0) && !provenance_file){
         const ImgFront &front=img_front[(t->serial*0x9E3779B97F4A7C15ull)>>54];
         if(front.epoch==images_epoch && front.serial==t->serial){Image &im=*front.im;
-            if(!upload || (im.checked_submission==stats.submissions && (im.uploaded || im.gpu_written))){im.slot_use=slot_serial;return im;}}}
+            if(!upload || (im.checked_submission==stats.submissions && (im.uploaded || im.gpu_written))){im.slot_use=slot_serial;im.use_tick=memstat::sec;return im;}}}
     return get_image_slow(t,upload);
 }
 Image &get_image_slow(const tex_t *t,bool upload){CPU_SCOPE(Image);
@@ -2606,11 +2627,11 @@ Image &get_image_slow(const tex_t *t,bool upload){CPU_SCOPE(Image);
         need(supported.sampleCounts&p->samples,"Texture sample count unsupported for actual format/usage");need(p->samples==VK_SAMPLE_COUNT_1_BIT || p->levels==1,"Multisample textures cannot have mipmaps");
         VK(vkCreateImage(cfg.device,&ci,nullptr,&p->image));p->create=ci;VkMemoryRequirements r;vkGetImageMemoryRequirements(cfg.device,p->image,&r);
         p->mem_bytes=int64_t(r.size);image_bytes_live+=p->mem_bytes;if(xbg_bc_format_info(t->d.format,&info)==0){p->bc_bytes=p->mem_bytes;p->bc_data=int64_t(t->L.size);bc_image_bytes_live+=p->bc_bytes;bc_data_bytes_live+=p->bc_data;}
-        if(p->decoded){p->dec_bytes=p->mem_bytes;p->dec_native=int64_t(t->L.size);decoded_bytes_live+=p->dec_bytes;decoded_native_live+=p->dec_native;bc_vram_note(*p,t);}
+        if(p->decoded){p->dec_bytes=p->mem_bytes;p->dec_native=int64_t(t->L.size);decoded_bytes_live+=p->dec_bytes;decoded_native_live+=p->dec_native;decoded_group_live[decoded_group(t->d.format)]+=p->dec_bytes;bc_vram_note(*p,t);}
         if(p->subst){p->subst_bytes=p->mem_bytes;astc_ov_bytes_live+=p->subst_bytes;astc_ov_note(t,p->layers,nullptr,p->fmt);}   // [nonadreno] ASTC overlay
         else if(astc_ov_mask && store!=BC_NOT){const char *kept=nullptr;astc_ov_format(t,t->L.layers,&kept);if(kept)astc_ov_note(t,p->layers,kept,VK_FORMAT_UNDEFINED);}
         VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.allocationSize=r.size;ai.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);VK(vkAllocateMemory(cfg.device,&ai,nullptr,&p->memory));VK(vkBindImageMemory(cfg.device,p->image,p->memory,0));
-        it=images.emplace(t->serial,std::move(p)).first;image_index_dirty=true;++memo_check_gen;++memo_bump[4];note_created(t->serial);provenance_image("CREATE",t,*it->second);
+        it=images.emplace(t->serial,std::move(p)).first;image_index_dirty=true;++memo_check_gen;++memo_bump[4];note_created(t->serial);if(it->second->decoded)memstat::note_created(t->serial);provenance_image("CREATE",t,*it->second);
     }
     hit=it->second.get();front.serial=t->serial;front.epoch=images_epoch;front.im=hit;}
     Image &im=*hit;
@@ -2722,7 +2743,7 @@ Image &get_image_slow(const tex_t *t,bool upload){CPU_SCOPE(Image);
         if(partial_eligible(im,t) && !ab_off("texdirty")){nvn_dirty_protect(t->mem,t->L.size);im.dirty_stamp=im.dirty_seen=nvn_dirty_now();im.stable_checks=4;}
         if(reupload)++hud::reuploads;else ++hud::uploads;hud::upload_bytes+=banded?up_bytes:linear.size();hud::upload_ns+=timing_clock()-up_t0;
     }
-    provenance_image(upload?"GET_UPLOAD":"GET",t,im);im.slot_use=slot_serial;return im;
+    provenance_image(upload?"GET_UPLOAD":"GET",t,im);im.slot_use=slot_serial;im.use_tick=memstat::sec;return im;
 }
 // read_preflight: main's order (cc91eb1). Copy the descriptor, resolve CPU reads of its storage, then look the image up.
 Image &get_image_read(const tex_t *t,bool upload){
@@ -5790,6 +5811,93 @@ void record(VkCommandBuffer cmd,const BcJob &j){
     b.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
     vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&b,0,nullptr,0,nullptr);
     vkCmdCopyBufferToImage(cmd,out_buf,j.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,uint32_t(j.copies.size()),j.copies.data());
+}
+}
+// [nonadreno] issue #20 (Samsung A34, Mali-G68 MC4, 5.4 GB, Android 16, v0.2.5): killed with exit reason LOW_MEMORY at rss 2.3-2.4 GB,
+// more often at battery <= 20 % (battery saver lowers the memory budget). Mali has no BC: D3's BC textures live decoded (1.6 GB of
+// RGBA8 for 284 MB of BC after 45 min), device-local, outside the RSS; the guest's own memory (MapPhysicalMemory, ~2.5 GB committed)
+// and the mapped host-visible arenas are inside it.
+//   ram_tier(): 2 = below 7 GB of RAM (6 GB phones report ~5.4-5.6 GB), 1 = below 10 GB (8 GB phones), 0 = more or unknown. MemTotal of
+//     /proc/meminfo; DM_MEM_SIM_MB=<MB> pretends another size, DM_MEM_LOW=1 forces tier 2 (=0: tier 0), to try the low-RAM policies on a
+//     big phone (with DM_GFX_SIM_GPU=mali for the decoded-BC path).
+//   arena_keep(): 32 MB chunks a stream / readback arena keeps after a submission (Arena::trim). 6 as before ([DOOM]: what a frame
+//     uses, no allocate/free per frame); tier 2: 2 (a D3 frame streams ~8 MB; the rest only grows in loading bursts and stayed mapped,
+//     up to 2 slots x 6 x 32 MB); DM_GFX_ARENA_KEEP=<n> sets it. Under memory pressure (MemAvailable below DM_MEM_PRESSURE_MB, default
+//     768 on tiers 1-2 and 512 on tier 0, 0 = off; sampled every 5 s) 1 until it recovers, logged at each change.
+//   tick(): every 60 s (DM_MEM_LOG=<s>, 0 = off) one line "[mem] census": process RSS by kind, MemAvailable, guest memory, the engine's
+//     Vulkan images (decoded BC by family and what native BC would take), arenas, vertex cache and GPU BC scratch.
+extern "C" int64_t dm_alias_mapped_bytes(void) __attribute__((weak));
+extern "C" size_t dm_guest_heap_bytes(void) __attribute__((weak));
+namespace memstat {
+long total_mb=-1,avail_mb=-1;int tier=-1;bool pressure=false;long pressure_mb=-1;size_t keep=0;uint64_t start=0,last_sample=0,last_line=0,line_every=0;
+uint32_t sec=0;   // seconds since the first tick (Image::use_tick)
+// Idle eviction of decoded BC images (DM_GFX_TEX_EVICT): D3 keeps nearly every texture it loaded (issue #20 log: 2681 made, 721
+// finalized in play, 1842 only at exit),
+// decoded on Mali to 1.6 GB of device memory. A decoded image is a pure function of guest memory (its guest copy stays the game's, CPU
+// writes reach it there, partial uploads track them), so one not used for DM_GFX_TEX_IDLE_S (90) seconds can be dropped as
+// nvnTextureFinalize drops one (xbg_legacy_tex_release_now: retired with the recording slot) and is decoded again from the guest copy on
+// its next use. Only above the budget DM_GFX_TEX_BUDGET_MB of decoded bytes (auto: tier 2 512, tier 1 1024; 0 = off), oldest first down
+// to 90 % of it; under memory pressure the budget halves and the idle time drops to a third. Never: GPU-written images (render / copy
+// targets, the guest copy is stale), not yet uploaded ones, ones shared by an alias serial. Logged per round with the re-decodes of
+// evicted serials (churn: raise the budget or the idle time).
+long budget_mb=-1;uint32_t idle_s=90;uint64_t evicted=0,evicted_bytes=0,recreated=0;std::unordered_set<uint64_t> gone;
+void note_created(uint64_t serial){if(!gone.empty() && gone.erase(serial))++recreated;}
+void evict_idle(){
+    if(budget_mb<0){const char *e=getenv("DM_GFX_TEX_EVICT"),*b=getenv("DM_GFX_TEX_BUDGET_MB"),*i=getenv("DM_GFX_TEX_IDLE_S");
+        const bool on=e && *e && strcmp(e,"auto")?atoi(e)!=0:tier>=1;budget_mb=!on?0:b?atol(b):tier>=2?512:1024;if(i && atol(i)>0)idle_s=uint32_t(atol(i));
+        xbg_logf("[mem] decoded BC eviction %s (DM_GFX_TEX_EVICT=%s): budget %ld MB, idle %u s",budget_mb>0?"on":"off",e?e:"auto",budget_mb,idle_s);}
+    if(budget_mb<=0)return;
+    const int64_t budget=(pressure?budget_mb/2:budget_mb)<<20;if(decoded_bytes_live<=budget)return;
+    const uint32_t idle=pressure?std::max(1u,idle_s/3):idle_s;
+    std::vector<std::pair<uint32_t,uint64_t>> cand;
+    for(auto &e:images){const Image &im=*e.second;if(im.decoded && !im.gpu_written && im.uploaded && e.second.use_count()==1 && sec-im.use_tick>=idle)cand.push_back({im.use_tick,e.first});}
+    if(cand.empty())return;
+    std::sort(cand.begin(),cand.end());
+    const int64_t target=budget-budget/10,before=decoded_bytes_live;unsigned n=0;int64_t freed=0;
+    for(auto &c:cand){if(decoded_bytes_live-freed<=target)break;auto it=images.find(c.second);if(it==images.end())continue;
+        freed+=it->second->dec_bytes;note_erased(it->first);retire_object(it->second);images.erase(it);gone.insert(c.second);++n;}
+    if(!n)return;
+    image_index_dirty=true;++images_epoch;++memo_check_gen;memo_bump[2]+=n;evicted+=n;evicted_bytes+=uint64_t(freed);
+    xbg_logf("[mem] evicted %u idle decoded BC images (%.0f MB, idle >= %u s): decoded %.0f -> %.0f MB of budget %ld MB%s; total evicted %llu (%.0f MB), re-decoded later %llu",
+        n,freed/1048576.0,idle,before/1048576.0,(before-freed)/1048576.0,(long)(budget>>20),pressure?" (pressure)":"",(unsigned long long)evicted,evicted_bytes/1048576.0,(unsigned long long)recreated);
+}
+long meminfo(const char *key){FILE *f=fopen("/proc/meminfo","r");if(!f)return -1;char ln[160];long v=-1;const size_t n=strlen(key);
+    while(fgets(ln,sizeof ln,f))if(!strncmp(ln,key,n) && ln[n]==':'){v=atol(ln+n+1)/1024;break;}fclose(f);return v;}
+long ram_mb(){if(total_mb<0){const char *e=getenv("DM_MEM_SIM_MB");total_mb=e && atol(e)>0?atol(e):meminfo("MemTotal");if(total_mb<0)total_mb=0;}return total_mb;}
+int ram_tier(){
+    if(tier<0){const char *e=getenv("DM_MEM_LOW");const long mb=ram_mb();
+        tier=e && *e && strcmp(e,"auto")?(atoi(e)?2:0):!mb?0:mb<7168?2:mb<10240?1:0;
+        const char *p=getenv("DM_MEM_PRESSURE_MB");pressure_mb=p?atol(p):tier?768:512;
+        const char *k=getenv("DM_GFX_ARENA_KEEP");keep=k && atol(k)>0?size_t(atol(k)):tier>=2?2:6;
+        const char *l=getenv("DM_MEM_LOG");line_every=uint64_t(l?atol(l):60)*1000000000ull;
+        xbg_logf("[mem] ram %ld MB (DM_MEM_SIM_MB=%s) tier %d (DM_MEM_LOW=%s): arena keep %zu chunks of 32 MB, pressure below %ld MB available, census every %llu s",
+            mb,getenv("DM_MEM_SIM_MB")?getenv("DM_MEM_SIM_MB"):"-",tier,e?e:"auto",keep,pressure_mb,(unsigned long long)(line_every/1000000000ull));}
+    return tier;}
+size_t arena_keep(){if(tier<0)ram_tier();return pressure?1:keep;}
+size_t arena_bytes(const Arena &a,unsigned *n){size_t b=0;for(auto &c:a.chunks)b+=size_t(c.size);if(n)*n+=unsigned(a.chunks.size());return b;}
+void status(long out[5]){   // VmRSS RssAnon RssFile RssShmem VmSwap, MB
+    static const char *keys[5]={"VmRSS","RssAnon","RssFile","RssShmem","VmSwap"};for(int i=0;i<5;i++)out[i]=-1;
+    FILE *f=fopen("/proc/self/status","r");if(!f)return;char ln[160];
+    while(fgets(ln,sizeof ln,f))for(int i=0;i<5;i++){const size_t n=strlen(keys[i]);if(!strncmp(ln,keys[i],n) && ln[n]==':')out[i]=atol(ln+n+1)/1024;}fclose(f);}
+void tick(){
+    const uint64_t now=timing_clock();if(tier<0)ram_tier();if(!start)start=now;sec=uint32_t((now-start)/1000000000ull);
+    if(now-last_sample<5000000000ull && last_sample)return;last_sample=now;
+    avail_mb=meminfo("MemAvailable");
+    const bool was=pressure;pressure=pressure_mb>0 && avail_mb>=0 && avail_mb<(was?pressure_mb+256:pressure_mb);   // 256 MB hysteresis
+    if(was!=pressure)xbg_logf("[mem] pressure %s: MemAvailable %ld MB (threshold %ld MB): arenas keep %zu chunks",pressure?"on":"off",avail_mb,pressure_mb,arena_keep());
+    if(decoded_bc_images)evict_idle();
+    if(!line_every || (last_line && now-last_line<line_every))return;
+    if(!last_line){last_line=now;return;}   // the first line a minute in
+    last_line=now;
+    long st[5];status(st);unsigned sn=0,rn=0;size_t stream=0,readback=0;for(auto &sl:slots){stream+=arena_bytes(sl.stream,&sn);readback+=arena_bytes(sl.readback,&rn);}
+    const double M=1048576.0;const double guest=dm_alias_mapped_bytes?double(dm_alias_mapped_bytes()):0,heap=dm_guest_heap_bytes?double(dm_guest_heap_bytes()):0;
+    const double gpu_private=double(image_bytes_live)+double(bcgpu::in_bytes+bcgpu::out_bytes);
+    xbg_logf("[mem] census at %llu s: rss %ld MB (anon %ld file %ld shmem %ld swap %ld) avail %ld of %ld MB tier %d pressure %d | guest committed %.0f MB heap %.0f MB | "
+             "vk images %.0f MB (decoded bc %.0f MB: bc1 %.0f bc2/3 %.0f other %.0f, as native bc %.0f MB; bc1_16=%d bc6_e5=%d; astc %.0f MB) | "
+             "arenas stream %.0f MB in %u chunks, readback %.0f MB in %u, vcache %.0f MB, static %.0f MB, bc scratch %.0f MB | images+scratch outside rss on Mali %.0f MB | evicted %llu (%.0f MB), re-decoded %llu",
+        (unsigned long long)((now-start)/1000000000ull),st[0],st[1],st[2],st[3],st[4],avail_mb,ram_mb(),tier,int(pressure),guest/M,heap/M,
+        image_bytes_live/M,decoded_bytes_live/M,decoded_group_live[0]/M,decoded_group_live[1]/M,decoded_group_live[2]/M,decoded_native_live/M,xbg_bc1_16,xbg_bc6_e5,astc_ov_bytes_live/M,
+        stream/M,sn,readback/M,rn,arena_bytes(vcache::arena,nullptr)/M,arena_bytes(static_arena,nullptr)/M,double(bcgpu::in_bytes+bcgpu::out_bytes)/M,gpu_private/M,(unsigned long long)evicted,evicted_bytes/1048576.0,(unsigned long long)recreated);
 }
 }
 namespace bright {
