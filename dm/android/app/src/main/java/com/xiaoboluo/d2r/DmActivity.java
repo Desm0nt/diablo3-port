@@ -154,6 +154,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override public boolean ready() { return started; }
     @Override public void hold(boolean on) { if (!libraryLoaded) return; try { nativeHold(on); } catch (UnsatisfiedLinkError e) { android.util.Log.e("dm", "nativeHold missing: the game is not paused (" + e.getMessage() + ")"); } }
     @Override public void gameSettings() { showDoomSettings(); }
+    @Override public boolean hasMods() { return D3; }   // [D3] "Mods / cheats" is a row of the pause menu (owner 11-13), not inside the game settings
+    @Override public void mods() { showD3Mods(); }
     @Override public FrontMenu.Saves saves() { if (saves == null) saves = SaveTransfer.forGame(this, DATA_DIR); return saves; }
     @Override public void quit() {
         android.util.Log.i("dm", "[java] quit from the pause menu");
@@ -1058,8 +1060,6 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             note(box, ui.getString(R.string.d3_skill_icons_note));
             android.widget.Button editB = new android.widget.Button(this); editB.setText(ui.getString(R.string.d3_edit)); box.addView(editB);
             note(box, ui.getString(R.string.d3_edit_note));
-            android.widget.Button modsB = new android.widget.Button(this); modsB.setText(ui.getString(R.string.d3_mods_open)); box.addView(modsB);
-            modsB.setOnClickListener(v -> showD3Mods());   // its own dialog on top of this one, with its own Save
             heading(box, when(ui, R.string.d3_deadzone, true));
             RadioGroup dz = radios(box, texts(ui, D3_DZ_LABELS), 4000, nearest(DEADZONES, cp.getFloat("move_dz", 0f)), true);
             // Touch layout: walking toward a held finger (D3PadView.HERO_* / DEPTH_*) and what menu-mode swipes press.
