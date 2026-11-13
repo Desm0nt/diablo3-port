@@ -176,26 +176,49 @@ static char g_dir[1100];
 static _Atomic int g_menu_open;
 
 // ---- safe guest reads
-// DM_D3_UI_FAST (default 7, bits; 0 = the old behaviour). The big map / any in-game menu stalled every 10th frame by 55-97 ms and
+// DM_D3_UI_FAST (default 15, bits; 0 = the old behaviour). The big map / any in-game menu stalled every 10th frame by 55-97 ms and
 // every tap in a menu by 330-430 ms: D3 keeps all of its memory in the alias region (MapPhysicalMemory; SetHeapSize stays 0), so
 // rd() below took one process_vm_readv per field, and the list-rect walk (every 10 polls while a menu is open) and the tap snapshot
 // read the whole UI control map (> 8192 controls in game) field by field through the kernel.
 //   1  committed alias pages are copied directly (hle_svc.c dm_guest_alias_read, under the Map/UnmapPhysicalMemory lock)
 //   2  the list-rect walk is spread over the 10 polls (a tenth of the buckets per poll, published when it wraps) instead of whole
 //      every 10th poll
-//   4  the tap snapshot reads each parent's child vector in one copy for the sibling index (was one read per child per entry)
+//   4  the tap snapshot's sibling index: only the vectors of controls that are some control's parent (as the old per-child scan),
+//      each read in 4 KiB pieces (an unreadable piece = its entries absent, as the old per-entry reads gave), not one read per entry
+//   8  a read that touches an alias page not committed is "absent" at once (Horizon would fault there), no process_vm_readv
+// DM_D3_UI_RDSTAT (default 1): the reads that still go through the kernel, counted by guest region (and how many of them failed),
+//   on the "[d3ui] snapshot" / "[d3ui] menu walk" lines.
 // DM_D3_UI_FAST_VERIFY=1: every 256th direct read is compared with process_vm_readv, the snapshot sibling index with the old one.
 // Log: "[d3ui] menu walk ..." when a menu closes (and every 600 polls while one stays open), "[d3ui] snapshot ..." per tap.
 int dm_guest_heap_readable(uint64_t a, size_t n);
 int dm_guest_alias_read(uint64_t a, void *out, size_t n) __attribute__((weak));
-static int g_fast = 7, g_fast_verify;
-static uint64_t g_rd_fast, g_rd_slow, g_rd_vchecks, g_rd_vbad;   // game thread (racy counters are fine: statistics)
+int dm_guest_region(uint64_t a) __attribute__((weak));
+static int g_fast = 15, g_fast_verify, g_rdstat = 1;
+static uint64_t g_rd_fast, g_rd_slow, g_rd_skip, g_rd_vchecks, g_rd_vbad;   // game thread (racy counters are fine: statistics)
+// kernel reads by region: 0 outside the guest address space, 1 heap, 2 alias (not committed), 3 stack region, 4 other inside the
+// address space, 5 a module image other than main; [r][0] reads, [r][1] of them failed; first address seen per region
+enum { RG_N = 6 };
+static const char *const k_rg_name[RG_N] = {"outside", "heap", "alias-uncommitted", "stack", "as-other", "module"};
+static uint64_t g_rg[RG_N][2], g_rg_first[RG_N];
+static int region_of(uint64_t a) {
+    for (int i = 0; i < g_nmod; i++) { uint64_t b = (uint64_t)(uintptr_t)g_mod[i].base; if (g_mod[i].base && a >= b && a - b < g_mod[i].size) return 5; }
+    return dm_guest_region ? dm_guest_region(a) : 0;
+}
+static void rg_text(char *out, size_t cap, const uint64_t (*rg0)[2]) {   // "region reads/failed@first ..." since rg0, empty when none
+    size_t k = 0; out[0] = 0;
+    for (int r = 0; r < RG_N && k + 80 < cap; r++) {
+        uint64_t n = g_rg[r][0] - rg0[r][0], f = g_rg[r][1] - rg0[r][1];
+        if (n) k += (size_t)snprintf(out + k, cap - k, " %s %llu/%llu failed (first %#llx);", k_rg_name[r], (unsigned long long)n, (unsigned long long)f,
+                                     (unsigned long long)g_rg_first[r]);
+    }
+}
 static int rd(uint64_t a, void *out, size_t n) {
     if (a < 0x10000 || a >= (1ull << 48) || n > (1u << 20)) return 0;
     if (dm_guest_heap_readable(a, n)) { memcpy(out, (const void *)(uintptr_t)a, n); return 1; }
     uint64_t b = (uint64_t)(uintptr_t)g_base;
     if (a >= b && n <= g_size && a - b <= g_size - n) { memcpy(out, (const void *)(uintptr_t)a, n); return 1; }
-    if ((g_fast & 1) && dm_guest_alias_read && dm_guest_alias_read(a, out, n)) {
+    int ar = (g_fast & 1) && dm_guest_alias_read ? dm_guest_alias_read(a, out, n) : 0;
+    if (ar > 0) {
         if (!(++g_rd_fast & 255) && g_fast_verify && n <= 256) {   // the same bytes through the kernel
             uint8_t chk[256]; struct iovec l = {chk, n}, r = {(void *)(uintptr_t)a, n};
             g_rd_vchecks++;
@@ -203,10 +226,12 @@ static int rd(uint64_t a, void *out, size_t n) {
         }
         return 1;
     }
+    if (ar < 0 && (g_fast & 8)) { g_rd_skip++; return 0; }   // an alias page not committed: unreadable on Horizon too
     g_rd_slow++;
     struct iovec l = {out, n}, r = {(void *)(uintptr_t)a, n};
     ssize_t got = syscall(SYS_process_vm_readv, getpid(), &l, 1UL, &r, 1UL, 0UL);
     if (got < 0) { static int said; if (!said++ && errno != EFAULT) LOG("[d3ui] process_vm_readv: errno %d (only heap / image reads)", errno); }
+    if (g_rdstat) { int rg = region_of(a); if (!g_rg[rg][0]) g_rg_first[rg] = a; g_rg[rg][0]++; g_rg[rg][1] += got != (ssize_t)n; }
     return got == (ssize_t)n;
 }
 static uint64_t rq(uint64_t a) { uint64_t v = 0; return rd(a, &v, 8) ? v : 0; }
@@ -222,7 +247,8 @@ static int setup(void) {
     const char *e = getenv("DM_D3_UIDUMP"); g_dump_mode = e && *e ? atoi(e) : 0;
     e = getenv("DM_D3_UITAP"); g_tap_mode = e && *e ? atoi(e) : 1;   // default on; 0 = off, 2 = dry run
     e = getenv("DM_D3_UI_CRUMBS"); g_crumbs = !(e && *e == '0');
-    e = getenv("DM_D3_UI_FAST"); g_fast = e && *e ? atoi(e) & 7 : 7;
+    e = getenv("DM_D3_UI_FAST"); g_fast = e && *e ? atoi(e) & 15 : 15;
+    e = getenv("DM_D3_UI_RDSTAT"); g_rdstat = !(e && *e == '0');
     e = getenv("DM_D3_UI_FAST_VERIFY"); g_fast_verify = e && *e == '1';
     if (!dm_guest_alias_read) g_fast &= ~1;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) { g_base = g_mod[i].base; g_size = g_mod[i].size; }
@@ -237,8 +263,8 @@ static int setup(void) {
             LOG("【红】[d3ui] vtable main+%#x slot %#x is not main+%#x: off", k_vts[i].vt, k_vts[i].slot, k_vts[i].fn); return 0; }
     e = getenv("DM_RUNTIME_DIR"); snprintf(g_dir, sizeof g_dir, "%s", e && *e ? e : "dm");
     LOG("[d3ui] on: dump %d, tap %d%s, crumbs %d, trigger %s/ui-dump-now, game thread tid %d; DM_D3_UI_FAST=%d (direct alias reads %d, spread list walk %d, "
-        "bulk sibling index %d)%s", g_dump_mode, g_tap_mode, g_tap_mode == 2 ? " (dry run)" : "", g_crumbs, g_dir, (int)gettid(), g_fast, g_fast & 1, g_fast >> 1 & 1,
-        g_fast >> 2 & 1, g_fast_verify ? ", verify on" : "");
+        "bulk sibling index %d, uncommitted alias absent %d), DM_D3_UI_RDSTAT=%d%s", g_dump_mode, g_tap_mode, g_tap_mode == 2 ? " (dry run)" : "", g_crumbs, g_dir,
+        (int)gettid(), g_fast, g_fast & 1, g_fast >> 1 & 1, g_fast >> 2 & 1, g_fast >> 3 & 1, g_rdstat, g_fast_verify ? ", verify on" : "");
     return g_ok = 1;
 }
 
@@ -324,16 +350,23 @@ static void sib_old(void) {
     }
 }
 static void sib_bulk(void) {
-    static uint8_t *buf;
+    static uint8_t *buf, *isp; static int ispcap;
     if (!buf && !(buf = malloc(4096 * 0x18))) { sib_old(); return; }
-    for (int i = 0; i < g_nc; i++) g_c[i].sib = -1;
+    if (g_nc > ispcap) { uint8_t *v = realloc(isp, (size_t)g_nc); if (!v) { sib_old(); return; } isp = v; ispcap = g_nc; }
+    memset(isp, 0, (size_t)g_nc);
+    for (int i = 0; i < g_nc; i++) { g_c[i].sib = -1; ctrl *p = find(g_c[i].parent); if (p) isp[p - g_c] = 1; }   // the parents the old scan read
     for (int i = 0; i < g_nc; i++) {
+        if (!isp[i]) continue;
         uint64_t pid = g_c[i].id, v = rq(g_c[i].c + 0x60), n = rq(g_c[i].c + 0x68);
-        if (!v || !n) continue;
+        if (!v || !n || v >= (1ull << 48)) continue;
         if (n > 4096) n = 4096;
-        int whole = rd(v, buf, (size_t)n * 0x18);
+        // 4 KiB pieces aligned on the source: an unreadable piece leaves its entries absent, as the old per-entry reads did
+        uint64_t end = v + n * 0x18; uint8_t pok[32]; int np = 0;
+        for (uint64_t s0 = v; s0 < end && np < 32; np++) { uint64_t e = ((s0 >> 12) + 1) << 12; if (e > end) e = end; pok[np] = (uint8_t)rd(s0, buf + (s0 - v), e - s0); s0 = e; }
         for (uint64_t k = 0; k < n; k++) {
-            uint64_t id; if (whole) memcpy(&id, buf + 0x18 * k, 8); else id = rq(v + 0x18 * k);
+            uint64_t o = 0x18 * k, p0 = ((v + o) >> 12) - (v >> 12), p1 = ((v + o + 7) >> 12) - (v >> 12), id;
+            if ((int)p1 >= np || !pok[p0] || !pok[p1]) continue;
+            memcpy(&id, buf + o, 8);
             ctrl *c = find(id);   // g_c does not move: find() only searches it
             if (c && c->parent == pid && c->sib < 0) c->sib = (int)k;
         }
@@ -342,12 +375,15 @@ static void sib_bulk(void) {
 // Snapshot of every control (game thread). Returns the count, -1 when the UI does not exist yet. Grows to MAX_CTRL (in-game maps hold > 8192).
 static int snapshot_inner(uint64_t mgr);
 static int snapshot(uint64_t mgr) {
-    uint64_t t0 = now_ns(), f0 = g_rd_fast, s0 = g_rd_slow;
+    uint64_t t0 = now_ns(), f0 = g_rd_fast, s0 = g_rd_slow, k0 = g_rd_skip, rg0[RG_N][2]; memcpy(rg0, g_rg, sizeof rg0);
     int n = snapshot_inner(mgr);
     static unsigned said;
-    if (n > 0 && said++ < 300)
-        LOG("[d3ui] snapshot: %d controls in %.1f ms (DM_D3_UI_FAST=%d; guest reads %llu direct, %llu through the kernel)", n, (now_ns() - t0) / 1e6, g_fast,
-            (unsigned long long)(g_rd_fast - f0), (unsigned long long)(g_rd_slow - s0));
+    if (n > 0 && said++ < 300) {
+        char rg[600]; rg_text(rg, sizeof rg, (const uint64_t (*)[2])rg0);
+        LOG("[d3ui] snapshot: %d controls in %.1f ms (DM_D3_UI_FAST=%d; guest reads %llu direct, %llu through the kernel, %llu uncommitted alias absent)%s%s", n,
+            (now_ns() - t0) / 1e6, g_fast, (unsigned long long)(g_rd_fast - f0), (unsigned long long)(g_rd_slow - s0), (unsigned long long)(g_rd_skip - k0),
+            *rg ? "; kernel by region:" : "", rg);
+    }
     return n;
 }
 static int snapshot_inner(uint64_t mgr) {
@@ -892,7 +928,8 @@ static _Atomic uint64_t g_scroll_id; static _Atomic int g_scroll_pend;   // trav
 // per poll, the visible lists (UI units) collected across the polls and published when the walk wraps (the same 10-poll refresh;
 // a rehash of the map - other bucket array or mask - starts the walk over).
 static struct { uint64_t map, buckets; uint32_t mask, next; int n; list_rect ui[MAX_LISTS]; uint64_t nodes; } g_lw;
-static struct { unsigned calls, cycles; uint64_t ns, max_ns, nodes, rd_fast0, rd_slow0; } g_ws;   // per menu session (log line)
+static struct { unsigned calls, cycles; uint64_t ns, max_ns, nodes, rd_fast0, rd_slow0, rd_skip0, rg0[RG_N][2]; } g_ws;   // per menu session (log line)
+static void ws_reset(void) { memset(&g_ws, 0, sizeof g_ws); g_ws.rd_fast0 = g_rd_fast; g_ws.rd_slow0 = g_rd_slow; g_ws.rd_skip0 = g_rd_skip; memcpy(g_ws.rg0, g_rg, sizeof g_rg); }
 static void lists_publish(void) {
     pxmap m; if (!px_map(&m)) return;
     list_rect tmp[MAX_LISTS]; int n = g_lw.n;
@@ -927,13 +964,16 @@ static void refresh_lists(uint64_t mgr, unsigned slices) {   // game thread: eve
 }
 static void walk_stats(const char *why) {   // one line per menu session (and every 600 polls while it stays open)
     static unsigned said;
-    if (g_ws.calls && said++ < 200)
+    if (g_ws.calls && said++ < 200) {
+        char rg[600]; rg_text(rg, sizeof rg, (const uint64_t (*)[2])g_ws.rg0);
         LOG("[d3ui] menu walk (%s, DM_D3_UI_FAST=%d): list refresh %u calls, mean %.0f / max %.0f us, %u walks x %.0f nodes; guest reads %llu direct, %llu "
-            "through the kernel", why, g_fast, g_ws.calls, g_ws.ns / 1e3 / g_ws.calls, g_ws.max_ns / 1e3, g_ws.cycles, g_ws.cycles ? (double)g_ws.nodes / g_ws.cycles : 0.0,
-            (unsigned long long)(g_rd_fast - g_ws.rd_fast0), (unsigned long long)(g_rd_slow - g_ws.rd_slow0));
+            "through the kernel, %llu uncommitted alias absent%s%s", why, g_fast, g_ws.calls, g_ws.ns / 1e3 / g_ws.calls, g_ws.max_ns / 1e3, g_ws.cycles,
+            g_ws.cycles ? (double)g_ws.nodes / g_ws.cycles : 0.0, (unsigned long long)(g_rd_fast - g_ws.rd_fast0), (unsigned long long)(g_rd_slow - g_ws.rd_slow0),
+            (unsigned long long)(g_rd_skip - g_ws.rd_skip0), *rg ? "; kernel by region:" : "", rg);
+    }
     if (g_fast_verify && g_rd_vchecks) LOG("[d3ui] verify: %llu direct reads checked against process_vm_readv, %llu differ", (unsigned long long)g_rd_vchecks,
         (unsigned long long)g_rd_vbad);
-    memset(&g_ws, 0, sizeof g_ws); g_ws.rd_fast0 = g_rd_fast; g_ws.rd_slow0 = g_rd_slow;
+    ws_reset();
 }
 int dm_d3_ui_scroll(float x, float y, float dy);
 int dm_d3_ui_scroll(float x, float y, float dy) {
@@ -1191,7 +1231,7 @@ void dm_d3_ui_pump(uint64_t *buttons) {
             uint64_t at[2] = {mgr, rq(mgr)}; int res[2];
             for (int k = 0; k < 2; k++) {
                 uint8_t a[64], b[64]; struct iovec l = {b, sizeof b}, r = {(void *)(uintptr_t)at[k], sizeof b};
-                int d = at[k] && dm_guest_alias_read(at[k], a, sizeof a), kr = at[k] && syscall(SYS_process_vm_readv, getpid(), &l, 1UL, &r, 1UL, 0UL) == (ssize_t)sizeof b;
+                int d = at[k] && dm_guest_alias_read(at[k], a, sizeof a) > 0, kr = at[k] && syscall(SYS_process_vm_readv, getpid(), &l, 1UL, &r, 1UL, 0UL) == (ssize_t)sizeof b;
                 res[k] = !d ? -1 : kr && !memcmp(a, b, sizeof a);   // -1 not a committed alias page, 1 equal, 0 differs
             }
             LOG("[d3ui] direct alias reads self-check: UI manager %#llx %s, control map %#llx %s", (unsigned long long)at[0],
@@ -1211,7 +1251,7 @@ void dm_d3_ui_pump(uint64_t *buttons) {
     { void dm_d3_icons_poll(uint64_t mgr, int menu_open); dm_d3_icons_poll(mgr, open); }   // [D3] HUD skill slots for the touch buttons (hle_d3_icons.c)
     static unsigned tick, open_polls; static int was_open; ++tick;
     if (open != was_open) {   // a menu session starts / ends: its walk line
-        if (was_open) walk_stats("menu closed"); else { memset(&g_ws, 0, sizeof g_ws); g_ws.rd_fast0 = g_rd_fast; g_ws.rd_slow0 = g_rd_slow; }
+        if (was_open) walk_stats("menu closed"); else ws_reset();
         was_open = open; open_polls = 0; g_lw.map = 0;
     }
     if (open && ++open_polls % 600 == 0) walk_stats("menu open");
