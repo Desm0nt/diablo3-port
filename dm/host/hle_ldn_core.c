@@ -432,16 +432,19 @@ uint32_t ldn_scan(ldn_ctx *c, ldn_network *out, int *count, int max, const ldn_s
     if (count) *count = 0;
     int st = ldn_state(c);
     if (st == LDN_NONE || st == LDN_ERROR) return LDN_R_INVALID_STATE;
-    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0); if (fd < 0) return LDN_R_DEVICE_NOT_AVAILABLE;
+    // ~22 KB of buffers: on the heap, the caller is a guest thread with the game's stack (TL2's Pia job threads have small ones)
+    struct scan_work { ldn_network got[16], n; uint8_t pkt[PKT_MAX], in[PKT_MAX]; } *w = calloc(1, sizeof *w);
+    if (!w) return LDN_R_DEVICE_NOT_AVAILABLE;
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0); if (fd < 0) { free(w); return LDN_R_DEVICE_NOT_AVAILABLE; }
     int one = 1; setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
     struct sockaddr_in me; sin_of(&me, c->bind_ip, 0); bind(fd, (struct sockaddr *)&me, sizeof me);
-    uint8_t pkt[PKT_MAX]; int pn = ldn_pkt_encode(pkt, sizeof pkt, LDN_PKT_SCAN, NULL, 0);
+    uint8_t *pkt = w->pkt; int pn = ldn_pkt_encode(pkt, PKT_MAX, LDN_PKT_SCAN, NULL, 0);
     uint32_t tg[12]; int nt = 0;
     tg[nt++] = 0xffffffffu;
     if (c->mask && c->mask != 0xffffffffu) tg[nt++] = c->ip | ~c->mask;
     for (int i = 0; i < c->cfg.npeers && nt < 12; i++) tg[nt++] = c->cfg.peers[i];
     int found = 0, answers = 0, wait = c->cfg.scan_ms > 0 ? c->cfg.scan_ms : 600;
-    ldn_network got[16]; int ngot = 0;
+    ldn_network *got = w->got; int ngot = 0;
     uint64_t t0 = mono_ms(), resend = t0 + (uint64_t)wait / 3;
     for (int k = 0; k < nt; k++) { struct sockaddr_in a; sin_of(&a, tg[k], c->port); sendto(fd, pkt, (size_t)pn, MSG_NOSIGNAL, (struct sockaddr *)&a, sizeof a); }
     // Some access points and phones drop broadcasts (power save, "client isolation" of multicast): ask every address of a small subnet once
@@ -455,12 +458,13 @@ uint32_t ldn_scan(ldn_ctx *c, ldn_network *out, int *count, int max, const ldn_s
         if (resend && now >= resend) { resend = 0; for (int k = 0; k < nt; k++) { struct sockaddr_in a; sin_of(&a, tg[k], c->port); sendto(fd, pkt, (size_t)pn, MSG_NOSIGNAL, (struct sockaddr *)&a, sizeof a); } }
         struct pollfd p = {fd, POLLIN, 0}; int left = (int)(t0 + (uint64_t)wait - now); if (resend && (int)(resend - now) < left) left = (int)(resend - now);
         if (poll(&p, 1, left > 0 ? left : 1) <= 0) continue;
-        uint8_t in[PKT_MAX]; ssize_t r = recv(fd, in, sizeof in, 0); if (r <= 0) continue;
-        ldn_network n; unsigned type; if (ldn_pkt_decode(in, (size_t)r, &type, &n, sizeof n) != (int)sizeof n || type != LDN_PKT_SCAN_RESP) continue;
+        uint8_t *in = w->in; ssize_t r = recv(fd, in, PKT_MAX, 0); if (r <= 0) continue;
+        unsigned type; if (ldn_pkt_decode(in, (size_t)r, &type, &w->n, sizeof w->n) != (int)sizeof w->n || type != LDN_PKT_SCAN_RESP) continue;
+        const ldn_network *np = &w->n;
         answers++;
-        if (!memcmp(n.bssid, c->mac, 6)) continue;   // this phone's own network (D3 hosts while it scans; a console never lists itself)
-        int dup = 0; for (int i = 0; i < ngot; i++) if (!memcmp(got[i].bssid, n.bssid, 6) && !memcmp(got[i].id.session, n.id.session, 16)) { got[i] = n; dup = 1; }
-        if (!dup && ngot < 16) got[ngot++] = n;
+        if (!memcmp(np->bssid, c->mac, 6)) continue;   // this phone's own network (D3 hosts while it scans; a console never lists itself)
+        int dup = 0; for (int i = 0; i < ngot; i++) if (!memcmp(got[i].bssid, np->bssid, 6) && !memcmp(got[i].id.session, np->id.session, 16)) { got[i] = *np; dup = 1; }
+        if (!dup && ngot < 16) got[ngot++] = *np;
     }
     close(fd);
     for (int i = 0; i < ngot; i++) if (filter_ok(&got[i], f)) { if (found < max && out) out[found] = got[i]; found++; }
@@ -470,9 +474,12 @@ uint32_t ldn_scan(ldn_ctx *c, ldn_network *out, int *count, int max, const ldn_s
     clog_(c, "[ldn] scan: %d network(s) answered, %d match the filter (flags %#x, local id %016llx)%s%s", ngot, found, f ? f->flags : 0,
           f ? (unsigned long long)f->id.intent.local_id : 0ull, found ? ": host " : "", found ? ipstr(out[0].nodes[0].ip, b) : "");
     (void)answers;
+    free(w);
     return 0;
 }
-static uint32_t connect_to(ldn_ctx *c, const ldn_network *net, const ldn_user_config *uc, int version) {
+// ~7 KB of buffers on the heap: the caller is a guest thread with the game's own stack (see ldn_scan)
+struct connect_work { uint8_t pkt[PKT_MAX]; conn k; ldn_network n; };
+static uint32_t connect_to_impl(ldn_ctx *c, const ldn_network *net, const ldn_user_config *uc, int version, struct connect_work *w) {
     if (ldn_state(c) != LDN_STATION) return LDN_R_INVALID_STATE;
     uint32_t host = net->nodes[0].ip; char b[16];
     int wait = c->cfg.connect_ms > 0 ? c->cfg.connect_ms : 4000;
@@ -489,38 +496,42 @@ static uint32_t connect_to(ldn_ctx *c, const ldn_network *net, const ldn_user_co
     ldn_node me; memset(&me, 0, sizeof me);
     me.ip = c->ip; memcpy(me.mac, c->mac, 6); me.connected = 1; me.version = (uint16_t)version;
     if (uc) { memcpy(me.name, uc->name, 32); me.name[32] = 0; }
-    uint8_t pkt[PKT_MAX]; int pn = ldn_pkt_encode(pkt, sizeof pkt, LDN_PKT_CONNECT, &me, sizeof me);
-    if (send_all(fd, pkt, pn)) { close(fd); return LDN_R_CONNECT_FAILURE; }
-    conn k = {fd, 0, host, 0, {0}};   // first sync read here, the thread takes the link after
-    ldn_network n; int have = 0;
+    int pn = ldn_pkt_encode(w->pkt, PKT_MAX, LDN_PKT_CONNECT, &me, sizeof me);
+    if (send_all(fd, w->pkt, pn)) { close(fd); return LDN_R_CONNECT_FAILURE; }
+    conn *k = &w->k; k->fd = fd; k->node = 0; k->peer = host; k->n = 0;   // first sync read here, the thread takes the link after
+    ldn_network *n = &w->n; int have = 0;
     while (!have) {
         int left = (int)(t0 + (uint64_t)wait - mono_ms());
         if (left <= 0) { clog_(c, "[ldn] station: no answer from host %s (refused or full)", ipstr(host, b)); close(fd); return LDN_R_CONNECT_REJECTED; }
         p = (struct pollfd){fd, POLLIN, 0}; if (poll(&p, 1, left) <= 0) continue;
-        ssize_t r = recv(fd, k.buf + k.n, sizeof k.buf - (size_t)k.n, 0);
+        ssize_t r = recv(fd, k->buf + k->n, sizeof k->buf - (size_t)k->n, 0);
         if (r < 0 && (errno == EAGAIN || errno == EINTR)) continue;
         if (r <= 0) { clog_(c, "[ldn] station: host %s closed the connection (refused, full or not accepting)", ipstr(host, b)); close(fd); return LDN_R_CONNECT_REJECTED; }
-        k.n += (int)r;
-        while (k.n >= (int)sizeof(pkt_hdr)) {
-            pkt_hdr h; memcpy(&h, k.buf, sizeof h);
+        k->n += (int)r;
+        while (k->n >= (int)sizeof(pkt_hdr)) {
+            pkt_hdr h; memcpy(&h, k->buf, sizeof h);
             if (h.magic != LDN_MAGIC) { close(fd); return LDN_R_CONNECT_FAILURE; }
-            int len = (int)sizeof h + h.size; if (k.n < len) break;
-            unsigned type; int dn = ldn_pkt_decode(k.buf, (size_t)len, &type, &n, sizeof n);
-            memmove(k.buf, k.buf + len, (size_t)(k.n - len)); k.n -= len;
-            if (type == LDN_PKT_SYNC && dn == (int)sizeof n) { have = 1; break; }
+            int len = (int)sizeof h + h.size; if (k->n < len) break;
+            unsigned type; int dn = ldn_pkt_decode(k->buf, (size_t)len, &type, n, sizeof *n);
+            memmove(k->buf, k->buf + len, (size_t)(k->n - len)); k->n -= len;
+            if (type == LDN_PKT_SYNC && dn == (int)sizeof *n) { have = 1; break; }
         }
     }
     pthread_mutex_lock(&c->mu);
     if (c->state != LDN_STATION) { pthread_mutex_unlock(&c->mu); close(fd); return LDN_R_INVALID_STATE; }
-    c->up = k; c->net = n; c->have_net = 1; c->reason = 0; forget_seen(c);
+    c->up = *k; c->net = *n; c->have_net = 1; c->reason = 0; forget_seen(c);
     c->ucfg = uc ? *uc : c->ucfg;
-    memset(&c->ncfg, 0, sizeof c->ncfg); c->ncfg.intent = n.id.intent; c->ncfg.channel = n.channel; c->ncfg.max_nodes = n.max_nodes; c->ncfg.version = n.nodes[0].version;
+    memset(&c->ncfg, 0, sizeof c->ncfg); c->ncfg.intent = n->id.intent; c->ncfg.channel = n->channel; c->ncfg.max_nodes = n->max_nodes; c->ncfg.version = n->nodes[0].version;
     c->state = LDN_STATION_CONNECTED; mark_changed(c);
-    int me_at = -1; for (int i = 0; i < 8; i++) if (n.nodes[i].connected && n.nodes[i].ip == c->ip) me_at = i;
-    clog_(c, "[ldn] station: connected to \"%s\" at %s: %d nodes, this node %d, version %d (host %u)", n.nodes[0].name, ipstr(host, b), n.node_count, me_at, version, n.nodes[0].version);
+    int me_at = -1; for (int i = 0; i < 8; i++) if (n->nodes[i].connected && n->nodes[i].ip == c->ip) me_at = i;
+    clog_(c, "[ldn] station: connected to \"%s\" at %s: %d nodes, this node %d, version %d (host %u)", n->nodes[0].name, ipstr(host, b), n->node_count, me_at, version, n->nodes[0].version);
     pthread_mutex_unlock(&c->mu);
     wake(c); flush_notify(c);
     return 0;
+}
+static uint32_t connect_to(ldn_ctx *c, const ldn_network *net, const ldn_user_config *uc, int version) {
+    struct connect_work *w = calloc(1, sizeof *w); if (!w) return LDN_R_CONNECT_FAILURE;
+    uint32_t r = connect_to_impl(c, net, uc, version, w); free(w); return r;
 }
 uint32_t ldn_connect(ldn_ctx *c, const ldn_network *net, const ldn_user_config *uc, int version) {
     if (!net || !net->nodes[0].ip) return LDN_R_INVALID_ARGUMENT;
@@ -530,10 +541,11 @@ uint32_t ldn_connect_private(ldn_ctx *c, const ldn_net_config *nc, const ldn_sec
     if (!nc || !sp) return LDN_R_INVALID_ARGUMENT;
     ldn_scan_filter f; memset(&f, 0, sizeof f);
     f.id.intent = nc->intent; memcpy(f.id.session, sp->session, 16); f.flags = 1 | 2;
-    ldn_network n[4]; int cnt = 0;
+    ldn_network *n = calloc(4, sizeof *n); int cnt = 0;   // 4.6 KB: heap, guest stack (see ldn_scan)
+    if (!n) return LDN_R_DEVICE_NOT_AVAILABLE;
     for (int tries = 0; tries < 3 && !cnt; tries++) ldn_scan(c, n, &cnt, 4, &f);
-    if (!cnt) { clog_(c, "[ldn] station: private connect: no network with that session"); return LDN_R_CONNECT_NOT_FOUND; }
-    return connect_to(c, &n[0], uc, version);
+    if (!cnt) { free(n); clog_(c, "[ldn] station: private connect: no network with that session"); return LDN_R_CONNECT_NOT_FOUND; }
+    uint32_t r = connect_to(c, &n[0], uc, version); free(n); return r;
 }
 
 // ---------------------------------------------------------------- queries
