@@ -23,6 +23,7 @@
 #include "vulkan_present.h"
 #include "touch_android.h"
 #include "lifecycle_dispatch.h"
+#include "../host/cpu_topo.h"  // [cpu-place] thread placement by core capacity: the [cpu] lines, re-applied after onResume, the gear's "CPU cores"
 #ifndef DM_GAME_DOOM   // [DOOM] D2R overlay contract is not built
 #include "overlay_validate.h"
 #include "dm_overlay_contract.h"
@@ -679,6 +680,7 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
 #endif
     if (!lifecycle_ready()) return -8;
     dm_aperf_start();             // thermal status listener (perf_android.c)
+    dm_cpu_place_start();         // [cpu-place] after the env files (DM_CPU_CORES from the gear): "[cpu] topology" / "[cpu] plan", thread dm-cpu
     dm_haptics_android_start();   // rumble thread, after the env file (DM_RUMBLE...) and before the game asks for vibration devices
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 8u << 20);
     pthread_t th; int rc = pthread_create(&th, &a, host_thread, NULL); pthread_attr_destroy(&a);
@@ -738,6 +740,7 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeFocus(JNIEnv *env
     dm_android_touch_focus(ev == 2 || ev == 3);
     front_android_sensors(ev == 2 || ev == 3);          // motion sensors only while in front
     dm_haptics_android_foreground(ev == 2 || ev == 3);  // no rumble left running in the background
+    dm_cpu_place_focus(ev);                             // [cpu-place] paused in the background, thread masks checked again on the way back
     if (lifecycle_ready()) {
         dm_lifecycle_post(&g_lifecycle, ev);
         __android_log_print(ANDROID_LOG_INFO, "dm-lifecycle", "UI posted event=%d", ev);
@@ -898,6 +901,8 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeLog(JNIEnv *env, 
 }
 JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeLogPath(JNIEnv *env, jclass cls) { (void)cls; return (*env)->NewStringUTF(env, g_log_path); }
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeQuit(JNIEnv *env, jclass cls) { (void)env; (void)cls; LOG("[java] the app ends (pause menu)"); dm_host_shutdown("pause menu: quit"); }
+// [cpu-place] Gear "CPU cores" (0 auto, 1 big cores, 2 all cores), live; the next start reads DM_CPU_CORES (DmActivity.applyDoomSettings).
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeCpuCores(JNIEnv *env, jclass cls, jint mode) { (void)env; (void)cls; dm_cpu_place_set_mode(mode); }
 JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeOpmode(JNIEnv *env, jclass cls) { (void)env; (void)cls; return dm_opmode(); }
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetOpmode(JNIEnv *env, jclass cls, jint m) { (void)env; (void)cls; dm_set_opmode(m ? 1 : 0); }
 
