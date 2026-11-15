@@ -51,7 +51,12 @@ import java.util.Map;
 // the chosen button (Separate) or its group (Grouped) is neither drawn nor hit in play; the editor draws it dimmed and struck through
 // so it can be shown again (the sticks never hide; ⚙ may since GitHub issue #10: Back / the system's edge swipe opens the same pause menu,
 // FrontMenu.back, and with a real controller in use ⚙ is shown anyway). Nothing is written before Save; Cancel / Back drops the changes; "Reset
-// layout" in the pause menu clears everything at once. The ⚙ button keeps its own look
+// layout" in the pause menu clears everything at once. [front] padl3 (owner 15.11, as DOS2 02a3c83; KB FE-PADL3): the toolbar also has Add…
+// and Name…: stand-alone L3 / R3 buttons (the sticks' clicks as buttons of their own; a tap on a stick's knob still clicks it) are in both
+// layouts, hidden until "Add…" shows them (defHidden: a missing key or a value without the 4th field keeps that default, so layouts saved by
+// older builds load unchanged); "Name…" gives the chosen button the player's own label ("d3_btn_<layout>_<name>_lbl", at most PadEdit.MAX_LABEL
+// characters; drawn in the classic look even with a skin; on a skill icon it is the corner badge). The sticks themselves are untouched.
+// The ⚙ button keeps its own look
 // ("gear_mode" / "gear_alpha", as in DoomPadView). With a real controller in use only ⚙ is shown and nothing is sent.
 // Output: the native controller channel of the pad (DmActivity.nativePadKey / nativePadAxes, device PAD_DEVICE), keycodes as
 // front_android.c maps them (Enter=A, Esc=B, R=X, F=Y, Q=L, E=R, Shift=ZL, Ctrl=ZR, Tab=+, M=-, d-pad, BUTTON_THUMBL/R = L3/R3).
@@ -108,15 +113,18 @@ public class D3PadView extends View implements FrontMenu.Pad {
     private static class Ctl {
         final String group, name; final float fx, fy, gx, gy, ox, oy, r; final boolean menu; int pointer = -1;
         float dx, dy, ps = 1; boolean hidden;   // the player's own place inside its group (fractions of the view), size and hide (editor)
+        boolean defHidden;   // [front] padl3: hidden until the player adds it (the stand-alone L3 / R3)
         Ctl(String group, String name, float fx, float fy, float gx, float gy, float ox, float oy, float r, boolean menu) {
             this.group = group; this.name = name; this.fx = fx; this.fy = fy; this.gx = gx; this.gy = gy; this.ox = ox; this.oy = oy; this.r = r; this.menu = menu;
         }
     }
     private static final class Btn extends Ctl {
         final String label; final int key;
+        String custom, title;   // [front] padl3: the player's label (null = label), the Add list's name when not the label
         Btn(String label, int key, String group, float fx, float fy, float gx, float gy, float ox, float oy, float r, boolean menu) {
             super(group, group + "_" + (key < 0 ? "k" + (-key) : String.valueOf(key)), fx, fy, gx, gy, ox, oy, r, menu); this.label = label; this.key = key;
         }
+        boolean canRename() { return key >= 0; }   // every game key; not ⚙ / the MENU toggle
     }
     // zoneW > 0: floating; a touch within zoneW (fraction of the width) left / right of the home and below (home - zoneUp of the height)
     // that hits nothing else puts the base under the finger. grab: touches within grab x r of the home take the stick.
@@ -183,6 +191,14 @@ public class D3PadView extends View implements FrontMenu.Pad {
         addBtn("L", K_L, "l", 0.19f, 0.09f, 0, 0, 0, 0, 26, true); addBtn("ZL", K_ZL, "zl", 0.065f, 0.09f, 0, 0, 0, 0, 28, true);
         addBtn("-", K_MINUS, "minus", 0.38f, 0.09f, 0, 0, 0, 0, 22, true);
         addBtn("⚙", SETTINGS, "gear", 0.50f, 0.09f, 0, 0, 0, 0, 20, true);
+        addStickClick("L3", K_L3, "l3", 0.30f, 0.55f, 0, 0);   // [front] padl3: hidden until "Add…"
+        addStickClick("R3", K_R3, "r3", 0.70f, 0.55f, 0, 0);
+    }
+    // [front] padl3: a stand-alone stick click (its own group, radius 22 dp), hidden until the editor's "Add…" shows it
+    private void addStickClick(String label, int key, String group, float fx, float fy, float gx, float gy) {
+        addBtn(label, key, group, fx, fy, gx, gy, 0, 0, 22, true);
+        Btn b = btns.get(btns.size() - 1); b.defHidden = true; b.hidden = true;
+        b.title = key == K_L3 ? (edRu ? "L3 (нажатие левого стика)" : "L3 (left stick click)") : (edRu ? "R3 (нажатие правого стика)" : "R3 (right stick click)");
     }
     private void buildTouch() {   // TL2's layout (Tl2Touch "tl2"): the fan for the right thumb, top row, D3's floating stick
         left = new Stick("lstick", 0.12f, 0.68f, 64, K_L3, 1.4f, 0.18f, 0.30f);   // floating zone: x < 0.30, y > 0.38 at home
@@ -204,6 +220,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         addBtn("R3", K_R3, "tr", 1, 0, -30, 30, 0, 0, 19, false);   // TL2: R3 at the top right, the rest of the row to its left
         addBtn(menuLabel, MENU_TOGGLE, "tr", 1, 0, -30, 30, -52, 0, 22, true);
         addBtn("L", K_L, "tr", 1, 0, -30, 30, -104, 0, 20, true);
+        addStickClick("L3", K_L3, "l3", 0.30f, 0.55f, 0, 0);   // [front] padl3: hidden until "Add…" (R3 is in the top row already)
     }
     private boolean touch() { return LAYOUT_TOUCH.equals(layout); }
     private List<Ctl> all() { List<Ctl> a = new ArrayList<>(btns); a.add(left); if (right != null) a.add(right); return a; }
@@ -232,6 +249,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         iconsOn = p.getBoolean("d3_icons", true); iconSerial = -2;
         hideSticks = p.getBoolean("d3_hide_sticks", true);
         skinPack = p.getString("skin", PadSkin.CLASSIC);   // [front] PadSkin pack or classic
+        edRu = "ru".equals(ui.getResources().getConfiguration().getLocales().get(0).getLanguage());
         String want = LAYOUT_TOUCH.equals(p.getString("d3_layout", LAYOUT_DEFAULT)) ? LAYOUT_TOUCH : LAYOUT_GAMEPAD;
         if (!want.equals(layout) || (LAYOUT_TOUCH.equals(want) && scale != builtScale)) {   // the minimap arcs follow the button size
             releaseAll(); menuMode = false; layout = want; btns.clear();
@@ -253,12 +271,14 @@ public class D3PadView extends View implements FrontMenu.Pad {
                 try { if (f.length >= 2) pos.put(k.group, new float[] {clampF(Float.parseFloat(f[0])), clampF(Float.parseFloat(f[1])), f.length >= 3 ? clampS(Float.parseFloat(f[2])) : 1f}); }
                 catch (NumberFormatException e) { /* ignore */ }
             }
-            k.dx = k.dy = 0; k.ps = 1; k.hidden = false;
+            k.dx = k.dy = 0; k.ps = 1; k.hidden = k.defHidden;
+            if (k instanceof Btn) { Btn bt = (Btn) k; bt.custom = bt.canRename() ? PadEdit.clean(p.getString(btnKey(k) + "_lbl", null)) : null; }   // [front] padl3
             String b = p.getString(btnKey(k), null);
             if (b == null) continue;
             String[] f = b.split(";");
-            try { if (f.length >= 3) { k.dx = Float.parseFloat(f[0]); k.dy = Float.parseFloat(f[1]); k.ps = clampS(Float.parseFloat(f[2])); k.hidden = f.length >= 4 && "1".equals(f[3]) && canHide(k); } }
-            catch (NumberFormatException e) { k.dx = k.dy = 0; k.ps = 1; k.hidden = false; }
+            // [front] padl3: a value without the 4th field (older builds) keeps the default hide (the stand-alone L3 / R3 hidden)
+            try { if (f.length >= 3) { k.dx = Float.parseFloat(f[0]); k.dy = Float.parseFloat(f[1]); k.ps = clampS(Float.parseFloat(f[2])); k.hidden = canHide(k) && (f.length >= 4 ? "1".equals(f[3]) : k.defHidden); } }
+            catch (NumberFormatException e) { k.dx = k.dy = 0; k.ps = 1; k.hidden = k.defHidden; }
         }
     }
     private void savePlaces() {
@@ -267,8 +287,9 @@ public class D3PadView extends View implements FrontMenu.Pad {
             float[] o = pos.get(k.group);
             if (o == null) ed.remove(posKey(k.group));
             else ed.putString(posKey(k.group), o[2] == 1f ? String.format(Locale.ROOT, "%.4f,%.4f", o[0], o[1]) : String.format(Locale.ROOT, "%.4f,%.4f,%.4f", o[0], o[1], o[2]));
-            if (k.dx == 0 && k.dy == 0 && k.ps == 1 && !k.hidden) ed.remove(btnKey(k));
+            if (k.dx == 0 && k.dy == 0 && k.ps == 1 && k.hidden == k.defHidden) ed.remove(btnKey(k));
             else ed.putString(btnKey(k), String.format(Locale.ROOT, "%.5f;%.5f;%.4f;%d", k.dx, k.dy, k.ps, k.hidden ? 1 : 0));
+            if (k instanceof Btn) { String l = ((Btn) k).custom; if (l == null) ed.remove(btnKey(k) + "_lbl"); else ed.putString(btnKey(k) + "_lbl", l); }   // [front] padl3
         }
         ed.apply();
     }
@@ -524,18 +545,21 @@ public class D3PadView extends View implements FrontMenu.Pad {
     }
 
     // ---------------- edit mode ----------------
-    // TL2's / DOOM's layout editor: drag a control; a second finger resizes it; toolbar − + Grouped/Separate Hide/Show Reset Cancel Save.
+    // TL2's / DOOM's layout editor: drag a control; a second finger resizes it; toolbar − + Grouped/Separate Hide/Show Add… Name… Reset Cancel Save.
     // Grouped moves / resizes the chosen control's whole group, Separate the chosen control alone (inside its group). − / + with nothing
     // chosen resize every group. Nothing is written before Save.
-    private static final int ED_BUTTONS = 7;
+    private static final int ED_BUTTONS = 9;   // [front] padl3: + Add… Name…
+    private static final int ED_ADD = 4, ED_NAME = 5, ED_RESET = 6, ED_CANCEL = 7;
     private int edPtr = -1, edPtr2 = -1, edBtnDown = -1; private Ctl edSel; private boolean edRu;
     private float edX0, edY0, edD0, edDx0, edDy0, edPs0; private float[] edO0 = {0, 0, 1};
     private final Map<String, float[]> edSavedPos = new HashMap<>(); private final Map<Ctl, float[]> edSavedCtl = new HashMap<>();
+    private final Map<Btn, String> edSavedLbl = new HashMap<>();   // [front] padl3: the labels when the editor opened (Cancel)
     private final RectF[] edRects = new RectF[ED_BUTTONS]; private final RectF selRect = new RectF();
     void startEdit() {
         releaseAll(); editMode = true; edSel = null; edPtr = edPtr2 = edBtnDown = -1;
         edSavedPos.clear(); for (Map.Entry<String, float[]> en : pos.entrySet()) edSavedPos.put(en.getKey(), en.getValue().clone());
         edSavedCtl.clear(); for (Ctl k : all()) edSavedCtl.put(k, new float[] {k.dx, k.dy, k.ps, k.hidden ? 1 : 0});
+        edSavedLbl.clear(); for (Btn b : btns) edSavedLbl.put(b, b.custom);
         iconGate(); invalidate();
     }
     // save: write every place / size / hide (Save); else back to what it was when the editor opened (Cancel, Back)
@@ -545,11 +569,12 @@ public class D3PadView extends View implements FrontMenu.Pad {
         else {
             pos.clear(); for (Map.Entry<String, float[]> en : edSavedPos.entrySet()) pos.put(en.getKey(), en.getValue().clone());
             for (Ctl k : all()) { float[] v = edSavedCtl.get(k); if (v != null) { k.dx = v[0]; k.dy = v[1]; k.ps = v[2]; k.hidden = v[3] != 0; } }
+            for (Btn b : btns) if (edSavedLbl.containsKey(b)) b.custom = edSavedLbl.get(b);
         }
         editMode = false; edPtr = edPtr2 = edBtnDown = -1; edSel = null; iconGate(); invalidate();
         Runnable d = editDone; editDone = null; if (notify && d != null) d.run();
     }
-    private void clearPlaces() { pos.clear(); for (Ctl k : all()) { k.dx = k.dy = 0; k.ps = 1; k.hidden = false; } }
+    private void clearPlaces() { pos.clear(); for (Ctl k : all()) { k.dx = k.dy = 0; k.ps = 1; k.hidden = k.defHidden; if (k instanceof Btn) ((Btn) k).custom = null; } }   // + padl3: default hides and labels
     private boolean selOne() { return edSel != null && (split || edSel instanceof Stick); }   // Separate (a stick is its own group anyway)
     private boolean inSel(Ctl k) { return editMode && edSel != null && (k == edSel || (!selOne() && k.group.equals(edSel.group))); }
     private Ctl hitAny(float x, float y) {   // hidden buttons too: the editor shows them so they can be shown again
@@ -598,6 +623,44 @@ public class D3PadView extends View implements FrontMenu.Pad {
         boolean gear = false; for (Ctl k : all()) if (inSel(k) && canHide(k)) { k.hidden = hide; gear |= hide && ((Btn) k).key == SETTINGS; }
         if (gear) android.widget.Toast.makeText(getContext(), edRu ? "Без ⚙ меню открывается жестом «Назад» (свайп от края экрана)" : "Without ⚙ the menu opens with the Back gesture (a swipe from the screen edge)", android.widget.Toast.LENGTH_LONG).show();
     }
+    // [front] padl3 "Add…": the hidden buttons (the stand-alone L3 / R3 first, then the ones the player hid; a group is one row while grouped);
+    // a pick shows it (its group while grouped) and chooses it
+    private String edTitle(Btn b) { String d = b.title != null ? b.title : b.label; return b.custom != null ? b.custom + " (" + d + ")" : d; }
+    private void edAdd() {
+        if (!editMode) return;
+        final List<Btn> pick = new ArrayList<>(); List<String> labels = new ArrayList<>(); java.util.Set<String> seen = new java.util.HashSet<>();
+        for (int pass = 0; pass < 2; pass++) for (Btn b : btns) {
+            if (!b.hidden || b.defHidden != (pass == 0)) continue;
+            boolean asGroup = !split && !b.defHidden;
+            if (asGroup) { if (!seen.add(b.group)) continue;
+                StringBuilder g = new StringBuilder(); for (Btn o : btns) if (o.group.equals(b.group)) { if (g.length() > 0) g.append(' '); g.append(o.custom != null ? o.custom : o.label); }
+                labels.add(g.toString()); }
+            else labels.add(edTitle(b));
+            pick.add(b);
+        }
+        PadEdit.addMenu(getContext(), edRu ? "Добавить кнопку" : "Add a button", labels.toArray(new String[0]), edRu ? "Все кнопки уже на экране" : "Every button is on the screen already", i -> {
+            if (!editMode || i < 0 || i >= pick.size()) return;
+            Btn sel = pick.get(i); boolean asGroup = !split && !sel.defHidden;
+            for (Btn o : btns) if (o == sel || (asGroup && o.group.equals(sel.group))) o.hidden = false;
+            edSel = sel; android.util.Log.i("dm", "[java] layout editor: added " + sel.name);
+            invalidate();
+        });
+    }
+    // [front] padl3 "Name…": the chosen button's own label (OK / Default / Cancel); kept on Save, dropped by Cancel / Reset
+    private void edRename() {
+        if (!editMode) return;
+        if (!(edSel instanceof Btn) || !((Btn) edSel).canRename()) {
+            android.widget.Toast.makeText(getContext(), edRu ? "Сначала выберите кнопку" : "Choose a button first", android.widget.Toast.LENGTH_SHORT).show(); return; }
+        final Btn b = (Btn) edSel;
+        PadEdit.rename(getContext(), edRu ? "Имя кнопки" : "Button name",
+            edRu ? "До " + PadEdit.MAX_LABEL + " символов; пусто — как было (" + b.label + ")" : "Up to " + PadEdit.MAX_LABEL + " characters; empty = the default (" + b.label + ")",
+            b.custom, b.label, edRu ? "Готово" : "OK", edRu ? "По умолчанию" : "Default", edRu ? "Отмена" : "Cancel", t -> {
+                if (!editMode) return;
+                b.custom = PadEdit.clean(t);
+                android.util.Log.i("dm", "[java] layout editor: " + b.name + " label " + (b.custom == null ? "default" : "set"));
+                invalidate();
+            });
+    }
     private RectF edButton(int i) {   // the toolbar (DOOM's / TL2's look), centred a little above the middle
         float W = getWidth(), H = getHeight(), gap = H * 0.02f, bw = Math.min(H * 0.17f, (W - 32 * dp - (ED_BUTTONS - 1) * gap) / ED_BUTTONS), bh = H * 0.085f;
         float total = ED_BUTTONS * bw + (ED_BUTTONS - 1) * gap, x0 = (W - total) / 2, y0 = H * 0.30f;
@@ -610,8 +673,10 @@ public class D3PadView extends View implements FrontMenu.Pad {
         case 0: case 1: { float f = bt == 1 ? 1.1f : 1 / 1.1f; if (edSel == null) edScaleAll(f); else { edGrab(edX0, edY0); edScale(f); } break; }
         case 2: split = !split; getContext().getSharedPreferences("doom_controls", Context.MODE_PRIVATE).edit().putBoolean("d3_split", split).apply(); break;
         case 3: edToggleHide(); break;
-        case 4: clearPlaces(); edSel = null; break;
-        case 5: endEdit(false, true); return true;
+        case ED_ADD: post(this::edAdd); break;
+        case ED_NAME: post(this::edRename); break;
+        case ED_RESET: clearPlaces(); edSel = null; break;
+        case ED_CANCEL: endEdit(false, true); return true;
         default: endEdit(true, true); return true;
         }
         return false;
@@ -856,14 +921,16 @@ public class D3PadView extends View implements FrontMenu.Pad {
         int code = iconsOn && b.key >= 0 ? codeOf(b.key) : -1;
         if (code >= 0 && iconSh[code] != null) { drawIconBtn(c, b, code, x, y, r, k, on); accent(c, b, x, y, r, k); return; }
         boolean empty = code >= 0 && iconState[code] == 2;   // the HUD slot on this button is empty / locked: dim letter
-        if (drawSkinned(c, b, x, y, r, k, on)) return;   // [front] the pad's skin
+        if (b.custom == null && drawSkinned(c, b, x, y, r, k, on)) return;   // [front] the pad's skin (a renamed button: the classic look with its label)
         c.drawCircle(x, y, r, fill); c.drawCircle(x, y, r, line); accent(c, b, x, y, r, k);
+        String l = lab(b);
         float ts = touch() ? Math.max(12 * u(), 0.55f * r) : 15 * u();   // gamepad: the labels of DoomPadView's D3 pad
-        text.setTextSize(ts); float w = text.measureText(b.label);
-        if (w > 1.7f * r) { ts *= 1.7f * r / w; text.setTextSize(ts); }   // long labels (MENU / МЕНЮ) fit the circle
+        text.setTextSize(ts); float w = text.measureText(l);
+        if (w > 1.7f * r) { ts *= 1.7f * r / w; text.setTextSize(ts); }   // long labels (MENU / МЕНЮ, the player's) fit the circle
         text.setColor(0xffffffff); text.setAlpha(Math.round((empty ? 0x70 : 0xd0) * k));
-        c.drawText(b.label, x, y + ts * 0.35f, text);
+        c.drawText(l, x, y + ts * 0.35f, text);
     }
+    private static String lab(Btn b) { return b.custom != null ? b.custom : b.label; }   // [front] padl3: the player's label or the default
     // Touch layout: A (confirm / primary) is as big as the others, a brighter gold ring tells it apart.
     private void accent(Canvas c, Btn b, float x, float y, float r, float k) {
         if (!touch() || b.key != K_A || editMode) return;
@@ -885,7 +952,8 @@ public class D3PadView extends View implements FrontMenu.Pad {
         float bs = Math.max(9 * dp, 0.32f * r); text.setTextSize(bs); text.setColor(0xffffffff); text.setAlpha(Math.round(0xe0 * kk));
         float bx = x + r * 0.55f, by = y + r * 0.62f;
         fill.setColor(0xff000000); fill.setAlpha(Math.round(0xa0 * kk)); c.drawCircle(bx, by - bs * 0.35f, bs * 0.85f, fill);
-        c.drawText(b.label, bx, by, text);
+        String l = lab(b); if (b.custom != null) PadEdit.fit(text, l, 1.9f * bs);   // [front] padl3: the player's label in the badge
+        c.drawText(l, bx, by, text);
     }
     // [front] a button in the skin: by its label's name; the d-pad's four buttons are drawn as the skin's one d-pad, by the up button, at the group's centre,
     // unless its arrows are apart (dpadApart): then each arrow is the skin's own arrow sprite at its own place and size (GitHub issue #17)
@@ -912,13 +980,14 @@ public class D3PadView extends View implements FrontMenu.Pad {
     // in the editor's Separate mode, and whenever an arrow of the group has its own place, size or is hidden (then the rest is drawn, the hidden one not)
     private boolean dpadApart(Btn b) {
         if (editMode && split) return true;
-        for (Btn d : btns) if (d.group.equals(b.group) && dpadKey(d.key) && (d.dx != 0 || d.dy != 0 || d.ps != 1 || d.hidden)) return true;
+        for (Btn d : btns) if (d.group.equals(b.group) && dpadKey(d.key) && (d.dx != 0 || d.dy != 0 || d.ps != 1 || d.hidden || d.custom != null)) return true;   // + padl3: a renamed arrow
         return false;
     }
     private void drawEditor(Canvas c) {   // DOOM's / TL2's toolbar look, the chosen control (or its group) framed
         boolean sh = selHidden(), ch = canHideSel();
-        String[] names = edRu ? new String[] {"−", "+", split ? "Раздельно" : "Группами", sh ? "Показать" : "Скрыть", "Сброс", "Отмена", "Сохранить"}
-                              : new String[] {"−", "+", split ? "Separate" : "Grouped", sh ? "Show" : "Hide", "Reset", "Cancel", "Save"};
+        String[] names = edRu ? new String[] {"−", "+", split ? "Раздельно" : "Группами", sh ? "Показать" : "Скрыть", "Добавить…", "Имя…", "Сброс", "Отмена", "Сохранить"}
+                              : new String[] {"−", "+", split ? "Separate" : "Grouped", sh ? "Show" : "Hide", "Add…", "Name…", "Reset", "Cancel", "Save"};
+        boolean cr = edSel instanceof Btn && ((Btn) edSel).canRename();
         float H = getHeight(), W = getWidth();
         line.setStrokeWidth(1.5f * dp);
         for (int i = 0; i < ED_BUTTONS; i++) {
@@ -926,15 +995,15 @@ public class D3PadView extends View implements FrontMenu.Pad {
             fill.setColor(i == edBtnDown ? 0xff1fb6c9 : i == ED_BUTTONS - 1 ? 0xe0157c8a : 0xd0202833); line.setColor(0xff7fe3f0);
             float rr = r.height() / 2; c.drawRoundRect(r, rr, rr, fill); c.drawRoundRect(r, rr, rr, line);
             float ts = H * 0.04f; text.setTextSize(ts); float tw = text.measureText(names[i]); if (tw > r.width() * 0.9f) { ts *= r.width() * 0.9f / tw; text.setTextSize(ts); }
-            text.setColor(0xffffffff); text.setAlpha(i == 3 && !ch ? 0x60 : 0xff);   // Hide is grey while nothing hideable is chosen
+            text.setColor(0xffffffff); text.setAlpha((i == 3 && !ch) || (i == ED_NAME && !cr) ? 0x60 : 0xff);   // Hide / Name… are grey while nothing they act on is chosen
             c.drawText(names[i], r.centerX(), r.centerY() + ts * 0.35f, text);
         }
         line.setStrokeWidth(2 * dp);
         selRect.setEmpty();
         for (Ctl k : all()) if (inSel(k)) { float x = cx(k), y = cy(k), r = rad(k); selRect.union(x - r, y - r, x + r, y + r); }
         if (!selRect.isEmpty()) { line.setColor(0xff7fe3f0); selRect.inset(-4 * dp, -4 * dp); c.drawRoundRect(selRect, 12 * dp, 12 * dp, line); }
-        String hint = edRu ? (split ? "Тяните кнопку пальцем (каждая отдельно)" : "Тяните кнопку пальцем (группа — целиком)") + ", второй палец — размер; −/+ без выбора меняют все; «Скрыть» убирает выбранное из игры"
-                           : (split ? "Drag a button (every button on its own)" : "Drag a button (its group moves as one)") + "; a second finger resizes it; − / + with none chosen resize all; Hide takes the chosen out of the game";
+        String hint = edRu ? (split ? "Тяните кнопку пальцем (каждая отдельно)" : "Тяните кнопку пальцем (группа — целиком)") + ", второй палец — размер; −/+ без выбора меняют все; «Скрыть» убирает выбранное из игры; «Добавить…» — L3 / R3 и скрытые; «Имя…» — своя подпись"
+                           : (split ? "Drag a button (every button on its own)" : "Drag a button (its group moves as one)") + "; a second finger resizes it; − / + with none chosen resize all; Hide takes the chosen out of the game; Add… brings L3 / R3 and hidden ones; Name… sets a label";
         float ts = H * 0.032f; text.setTextSize(ts); float tw = text.measureText(hint); if (tw > W * 0.96f) { ts *= W * 0.96f / tw; text.setTextSize(ts); }
         text.setColor(0xffffffff); text.setAlpha(220);
         c.drawText(hint, W / 2f, edButton(0).bottom + H * 0.06f, text);
