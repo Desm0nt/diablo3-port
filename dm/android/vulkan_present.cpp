@@ -10,6 +10,7 @@ extern "C" void dm_aperf_present(ANativeWindow*,float);
 #endif
 #include "../gfx/vulkan/nvn_vk.h"
 #include "../gfx/xtrace.h"
+#include "../host/cpu_topo.h"   // [cpu-place] the translator's pin comes from the placement plan unless a marker sets it
 #include <android/log.h>
 #include <android/native_window.h>
 #include <dlfcn.h>
@@ -77,7 +78,10 @@ bool present_timing=false;VkQueryPool present_queries=VK_NULL_HANDLE;bool presen
 // (in-process A/B, CPU 17.1 -> 14.3 ms). MIUI rewrites thread affinity masks, so the pin is checked every 120 presents.
 // Marker gfx-no-pin turns it off and gfx-pin-cpu = hex mask picks the cores; gfx-ab-toggle = N with gfx-ab-target = pin
 // alternates pinned and released every N seconds, in phase with the engine's A/B (its PERF lines carry ab=).
-unsigned pin_mask=0;int pin_ab=0;int pin_state=-1;unsigned pin_presents=0,pin_drifts=0,pin_failures=0;cpu_set_t pin_original;bool pin_have_original=false;
+// [cpu-place] Without any of these markers the pin is no longer made here: hle_cpu_place.c places this thread (and the guest threads) by
+// the capacity plan and the gear's "CPU cores" mode, checks the masks every 2 s and again after onResume; pin_update only tells it
+// which thread presents. With a marker this code pins as before and the module leaves the presenting thread alone.
+unsigned pin_mask=0;int pin_ab=0;int pin_state=-1;unsigned pin_presents=0,pin_drifts=0,pin_failures=0;cpu_set_t pin_original;bool pin_have_original=false;bool pin_markers=false;
 unsigned fastest_cores(){
     unsigned best=0,mask=0,present=0;
     for(int c=0;c<32;c++){char path[96];snprintf(path,sizeof path,"/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq",c);FILE *f=fopen(path,"rb");if(!f)continue;
@@ -85,6 +89,7 @@ unsigned fastest_cores(){
     return mask==present?0:mask;   // one core class: nothing to pick
 }
 void pin_update(){
+    dm_cpu_place_translator(int(gettid()));if(!pin_markers)return;   // [cpu-place]
     if(!pin_mask)return;bool want=true;
     if(pin_ab>0){timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);want=((ts.tv_sec/pin_ab)&1)==0;}
     bool changed=int(want)!=pin_state;if(!changed && ++pin_presents%120)return;
@@ -552,11 +557,12 @@ extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t byte
     VkSemaphoreCreateInfo sc{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};if((r=vkCreateSemaphore(device,&sc,nullptr,&acquired)))return fail("Acquire semaphore",r);VkFenceCreateInfo fc{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};if((r=vkCreateFence(device,&fc,nullptr,&fence)))return fail("Present fence",r);
     {std::string dir=path;size_t cut=dir.find_last_of('/');FILE *m=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-present-overlap").c_str(),"rb");overlap=true;if(m){overlap=fgetc(m)!='0';fclose(m);}
      auto open_marker=[&](const char *name){return fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+name).c_str(),"rb");};
-     pin_mask=fastest_cores();pin_ab=0;pin_state=-1;pin_have_original=false;pin_presents=pin_drifts=0;
-     if(FILE *p=open_marker("/gfx-pin-cpu")){if(fscanf(p,"%x",&pin_mask)!=1)pin_mask=0;fclose(p);}
-     if(FILE *n=open_marker("/gfx-no-pin")){pin_mask=0;fclose(n);}
-     if(FILE *t=open_marker("/gfx-ab-target")){char target[16]={0};if(fscanf(t,"%15s",target)==1 && !strcmp(target,"pin"))if(FILE *a=open_marker("/gfx-ab-toggle")){if(fscanf(a,"%d",&pin_ab)!=1)pin_ab=0;fclose(a);}fclose(t);}
-     __android_log_print(ANDROID_LOG_INFO,"dm-vulkan","NVN pin mask=%x ab=%d (markers gfx-no-pin, gfx-pin-cpu, gfx-ab-target=pin)",pin_mask,pin_ab);
+     pin_mask=fastest_cores();pin_ab=0;pin_state=-1;pin_have_original=false;pin_presents=pin_drifts=0;pin_markers=false;
+     if(FILE *p=open_marker("/gfx-pin-cpu")){if(fscanf(p,"%x",&pin_mask)!=1)pin_mask=0;fclose(p);pin_markers=true;}
+     if(FILE *n=open_marker("/gfx-no-pin")){pin_mask=0;fclose(n);pin_markers=true;}
+     if(FILE *t=open_marker("/gfx-ab-target")){char target[16]={0};if(fscanf(t,"%15s",target)==1 && !strcmp(target,"pin"))if(FILE *a=open_marker("/gfx-ab-toggle")){if(fscanf(a,"%d",&pin_ab)!=1)pin_ab=0;fclose(a);pin_markers=true;}fclose(t);}
+     if(!pin_markers)pin_mask=0;dm_cpu_place_markers(pin_markers);   // [cpu-place] no marker: the module pins
+     __android_log_print(ANDROID_LOG_INFO,"dm-vulkan","NVN pin mask=%x ab=%d (markers gfx-no-pin, gfx-pin-cpu, gfx-ab-target=pin%s)",pin_mask,pin_ab,pin_markers?"":"; none set: the [cpu] plan places this thread");
      if(FILE *b=open_marker("/gfx-membench")){fclose(b);membench();}}
     if(overlap){if((r=vkCreateCommandPool(device,&cp,nullptr,&overlap_pool)))return fail("Present command pool",r);ca.commandPool=overlap_pool;if((r=vkAllocateCommandBuffers(device,&ca,&overlap_command)))return fail("Present command",r);
         if((r=vkCreateSemaphore(device,&sc,nullptr,&overlap_acquired)))return fail("Acquire semaphore",r);if((r=vkCreateFence(device,&fc,nullptr,&overlap_fence)))return fail("Present fence",r);}

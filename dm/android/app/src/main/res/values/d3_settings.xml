@@ -30,6 +30,11 @@
     <string name="d3_high">High</string>
     <string name="d3_fps_limit">Frame rate limit</string>
     <string name="d3_fps_note">30 saves battery and heat. The game itself runs at 60 (as on the Switch); higher limits are not offered.</string>
+    <string name="d3_cpu_cores">CPU cores</string>
+    <string name="d3_cpu_auto">Auto (by core power)</string>
+    <string name="d3_cpu_big">Big cores only</string>
+    <string name="d3_cpu_all">All cores (the system decides)</string>
+    <string name="d3_cpu_cores_note">Which processor cores the game may use. Auto suits most phones. If the game slows down after a while (and speeds up again after a trip to the recent apps), try Big cores only, then All cores.</string>
     <string name="d3_driver">Vulkan driver</string>
     <string name="d3_driver_system">System (vendor driver)</string>
     <string name="d3_driver_system_short">system</string>

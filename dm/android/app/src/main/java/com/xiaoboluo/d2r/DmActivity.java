@@ -87,6 +87,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native void nativeQuit();
     static native int nativeOpmode();
     static native void nativeSetOpmode(int mode);
+    static native void nativeCpuCores(int mode);        // [cpu-place] gear "CPU cores": 0 auto, 1 big cores, 2 all cores (live; hle_cpu_place.c)
     static final String FRONT_DATA_DIR = "Diablo3Mobile";   // Download/<this>: the player's data folder; save exports go to its saves/
     private FrontMenu front;
     private SaveTransfer saves;
@@ -472,6 +473,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 Os.unsetenv("DM_DOOM_DRS"); Os.unsetenv("DM_DOOM_RES");
                 // Frame rate limit (hle_nvn.c present_cap_hz): the largest integer fraction of the refresh rate not above it
                 Os.setenv("DM_PRESENT_MAX_HZ", String.valueOf(d3FpsLimit()), true);
+                // [cpu-place] Gear "CPU cores" (issue #23): auto = the capacity plan, big = every game thread on the big cores, all = no
+                // affinity (the scheduler decides); the running game also gets it live (nativeCpuCores)
+                Os.setenv("DM_CPU_CORES", D3_CPU_MODES[d3CpuCores()], true);
                 // Resolution = the Switch operation mode the game is told (hle_oe.c GetOperationMode / GetPerformanceMode): docked
                 // renders 1600x900, handheld the game's own 720p preset. dm/env still wins (it is applied after this).
                 startedHandheld = p.getBoolean("handheld", false);
@@ -832,6 +836,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final int[] D3_DZ_LABELS = {R.string.d3_dz_none, R.string.d3_dz_small, R.string.d3_dz_medium, R.string.d3_dz_large};   // DEADZONES
     static final int[] D3_GEAR_LABELS = {R.string.d3_gear_normal, R.string.d3_gear_faded};   // DoomPadView.GEAR_*
     private int d3FpsLimit() { return doomPrefs().getInt("fps_limit", 60) == 30 ? 30 : 60; }
+    static final String[] D3_CPU_MODES = {"auto", "big", "all"};   // [cpu-place] DM_CPU_CORES; pref "cpu_cores" = the index
+    static final int[] D3_CPU_LABELS = {R.string.d3_cpu_auto, R.string.d3_cpu_big, R.string.d3_cpu_all};
+    private int d3CpuCores() { return Math.max(0, Math.min(D3_CPU_MODES.length - 1, doomPrefs().getInt("cpu_cores", 0))); }
     // [D3] The game's render size, as the native side picks it: docked 1600x900, handheld 1280x720; widescreen (aspect 2, DM_D3_WIDE=1,
     // hle_d3.c dm_d3_wide_install) W x 900 with W = front_game_res(1) (front_android.c: 900 x screen aspect, rounded to 8, max 4096)
     // rounded to 16 (max 3200), or for a screen narrower than 16:9 900 x its aspect rounded to 16, at least 1200 (4:3); 4:3 (aspect 3,
@@ -916,6 +923,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             for (int i = 0; i < limLabels.length; i++) { limLabels[i] = String.valueOf(D3_FPS_LIMITS[i]); if (D3_FPS_LIMITS[i] == d3FpsLimit()) limAt = i; }
             RadioGroup fpsLim = radios(box, limLabels, 8500, limAt, true);
             note(box, ui.getString(R.string.d3_fps_note));
+            // [cpu-place] Which cores the game's threads may use (issue #23: some phones are faster with one, some with another); live
+            heading(box, when(ui, R.string.d3_cpu_cores, true));
+            RadioGroup cpuG = radios(box, texts(ui, D3_CPU_LABELS), 9500, d3CpuCores(), false);
+            note(box, ui.getString(R.string.d3_cpu_cores_note));
             // Vulkan driver: the system one, or any adrenotools package under files/drivers/<name>/ (bundled Turnip 27, or imported from
             // Download/Diablo3Mobile/drivers), labelled with the name from its meta.json; below it, what the running game actually uses.
             heading(box, when(ui, R.string.d3_driver, false));
@@ -1001,7 +1012,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
                     .putString("driver", driverPicked(drvNames, drvG)).putBoolean("rumble", rumble.isChecked())
                     .putBoolean("d3_stretch_loading", stretchL.isChecked()).putBoolean("d3_logs", logsC.isChecked())
-                    .putInt("mp_pads", picked(mpG, 9400, 3)).putBoolean("mp_lan", lanC.isChecked()).apply();
+                    .putInt("mp_pads", picked(mpG, 9400, 3)).putBoolean("mp_lan", lanC.isChecked()).putInt("cpu_cores", picked(cpuG, 9500, D3_CPU_MODES.length)).apply();
+                if (libraryLoaded && started) try { nativeCpuCores(d3CpuCores()); } catch (UnsatisfiedLinkError e) { /* a library without the module */ }
                 cp.edit().putBoolean("fps", fps.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putBoolean("d3_hide_sticks", hideSt.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
                     .putInt("gear_mode", picked(gearG, 9000, D3_GEAR_LABELS.length)).putInt("d3_menu_swipe", picked(swG, 9300, 2)).apply();
                 if (d3Pad != null) d3Pad.reloadSettings();

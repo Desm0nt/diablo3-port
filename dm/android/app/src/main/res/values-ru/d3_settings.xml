@@ -29,6 +29,11 @@
     <string name="d3_high">Сильная</string>
     <string name="d3_fps_limit">Ограничение FPS</string>
     <string name="d3_fps_note">30 экономит батарею и меньше греет. Сама игра идёт в 60 (как на Switch); выше не предлагается.</string>
+    <string name="d3_cpu_cores">Ядра CPU</string>
+    <string name="d3_cpu_auto">Авто (по мощности ядер)</string>
+    <string name="d3_cpu_big">Только мощные ядра</string>
+    <string name="d3_cpu_all">Все ядра (решает система)</string>
+    <string name="d3_cpu_cores_note">На каких ядрах процессора работает игра. «Авто» подходит большинству телефонов. Если игра через какое-то время замедляется (и снова ускоряется после выхода в недавние приложения), попробуйте «Только мощные», затем «Все ядра».</string>
     <string name="d3_driver">Драйвер Vulkan</string>
     <string name="d3_driver_system">Системный (драйвер производителя)</string>
     <string name="d3_driver_system_short">системный</string>
