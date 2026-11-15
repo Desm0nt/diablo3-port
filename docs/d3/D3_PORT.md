@@ -511,3 +511,35 @@ G99: маски, повтор после «системы», фон, resume, ж�
 6. Рецентс и обратно: `[perf] ADPF workload reset (back in front) -> rc 0`; после загрузки уровня — `(loading screen gone)`.
 7. GameState: `[perf] game state (java): polling …`, затем `[perf] game state: loading 0, mode none (… scene front end …)`, при входе в игру
    `loading 1, mode gameplay interruptible (load screen up …)`, потом `loading 0, mode gameplay interruptible (… scene game …)`.
+
+## Полосы Mali в широком режиме и DRS игры: ⚙ «Динамическое разрешение игры», выравнивание 64, копия для ToneMap, частота GPU (issue #23) — 15.11.2026 (ветка `wt/mali23`)
+
+Отчёт #23 (Helio G99, Mali-G57 MC2, r32p1, 0.2.15): «по форме экрана» + «720p» (1632×720) тонкие цветные полосы через ~92 px под UI
+(разбор — KB MALI-16). Причина сужена до 3D-кадра DRS игры: пост-цепочка рендерит 3D в подобласть и растягивает её `PostFX Upscale`.
+
+**DRS игры (main 2.7.7, найдено по строке «Variable Res Percent %6.2f. Device Frame us: %d» в 0x3ee30):** состояние 0x44 байта на
+вид (конструктор 0x3cb90, у вида +0x2c0): пороги GPU-времени 14250 / 15250 мкс, шаг 0.05, масштаб 0.7..1.0, пауза 8 кадров после
+смены, кольцо 8 последних времён GPU. Регулятор 0x3cd10 раз в кадр (поток рендера 0x428f0) берёт время GPU прошлого кадра (0xeaf60,
+таймер NX64NVNCore по ReportCounter), опция игры 0x79 → 1.0. Проход сцены (0x43220, место 0x43c14) берёт размер 3D-цели из 0xebac0
+(в handheld — цель док-размера × 0.8) и рисует в (u32)(масштаб × w) × (u32)(масштаб × h) **без округления**. На медленном GPU масштаб
+садится на 0.7: широкий handheld 2048×900 → цель 1638×720 → 3D 1146×504 (не кратно 64); 16:9 handheld 1280×0.7 = 896 = 14×64.
+Замечание: в широком handheld и при 1.0 3D = 1638 (2048 × 0.8), а окно 1632 — апскейл и тут слегка сжимает (не трогали).
+
+**Что сделано:**
+- `dm/host/hle_d3_drs.c`: регулятор 0x3cd10 заменён своим (та же логика, слова сверяются). `DM_D3_DRS=auto` (по умолчанию, игра) /
+  `off` (всегда 1.0), ⚙ «Динамическое разрешение игры» (вкл. по умолчанию), живо (`nativeSetD3Drs`). `DM_D3_DRS_ALIGN=<n>`: ширина
+  3D кратна n — в состояние пишется (⌊масштаб × w / n⌋ × n + 0.5) / w, свой невыровненный масштаб регулятор хранит отдельно;
+  по умолчанию 64 не на Adreno (семейство политики, `DM_GFX_SIM_GPU=mali` считается Mali), 0 на Adreno; решается, когда известен GPU
+  (`xbg_gpu_policy_family`). Лог `[d3drs] installed …`, `[d3drs] 3D target WxH (window …); width alignment N (…)`, раз в 10 с
+  `[d3drs] 10s: DRS auto|off, scale now … (min avg max, changes) -> 3D WxH of …, GPU X ms avg (game target 14.25..15.25 ms …)`.
+- `xbg_game.cpp`: перенос ETR `DM_GFX_FEEDBACK_COPY` (5d73072 + c877c73, KB SYNC-06): draw, сэмплирующий свою же цель, читает копию,
+  снятую перед draw. По умолчанию вкл. не на Adreno, выкл. на Adreno; лог `NVN same-draw feedback copy DM_GFX_FEEDBACK_COPY=…` и
+  `NVN feedback copy shader=<ключ> …` раз на шейдер / биндинг (ждём `703334b9…` = ToneMap).
+- `perf_android.c`: в `[perf] ADPF 10s` — `GPU MHz cur C max M`; источник ищется один раз (`[perf] GPU frequency: <путь> …` или
+  `no readable GPU frequency; tried …` с ошибкой каждого пути): kgsl gpuclk / devfreq, MediaTek GED `current_freqency`, `gpu_cur_freq`,
+  `/proc/gpufreqv2/gpufreq_status`, `/proc/gpufreq/gpufreq_var_dump`, `mali0/device/cur_freq`, `/sys/class/devfreq/*{mali,gpu,g3d,kgsl}*`.
+
+**Проверка:** обе APK собраны, на телефоне не проверено (тестовая сборка «0.2.16 - test issue #23», заметки `work/rel/notes2/test23.md`).
+На Mi 14 (Adreno): `width alignment 0 (default: Adreno, off)`, `DM_GFX_FEEDBACK_COPY=0`; строка `[d3drs] 10s` (обычно scale 1.000);
+⚙ выкл. — в логе `[d3drs] gear: … off`, при 100 % ничего не меняется. С `DM_GFX_SIM_GPU=mali`: `alignment 64`, `FEEDBACK_COPY=1`,
+`NVN feedback copy shader=703334b9…`, картинка без изменений (в широком handheld 3D 1600 вместо 1638).
