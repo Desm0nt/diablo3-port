@@ -910,6 +910,12 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeCpuCores(JNIEnv *
 void xbg_set_aniso(int level); void dm_present_set_upscale(int mode);
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetAniso(JNIEnv *env, jclass cls, jint level) { (void)env; (void)cls; LOG("[java] gear: anisotropic filtering %d", (int)level); xbg_set_aniso(level); }
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetUpscale(JNIEnv *env, jclass cls, jint mode) { (void)env; (void)cls; LOG("[java] gear: upscale %d", (int)mode); dm_present_set_upscale(mode); }
+// [D3] Gear "Dynamic resolution" (on = the game's own DRS, off = always full resolution; hle_d3_drs.c), live; the next start reads
+// DM_D3_DRS (DmActivity.applyDoomSettings)
+#ifdef DM_GAME_D3
+void dm_d3_drs_set(int on);
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetD3Drs(JNIEnv *env, jclass cls, jboolean on) { (void)env; (void)cls; dm_d3_drs_set(on ? 1 : 0); }
+#endif
 JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeOpmode(JNIEnv *env, jclass cls) { (void)env; (void)cls; return dm_opmode(); }
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetOpmode(JNIEnv *env, jclass cls, jint m) { (void)env; (void)cls; dm_set_opmode(m ? 1 : 0); }
 

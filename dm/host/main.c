@@ -169,6 +169,7 @@ static void host_preload(int argc, char **argv) {
 #endif
 #ifdef DM_GAME_D3
     { void dm_d3_wide_install(void); dm_d3_wide_install(); }   // [D3] DM_D3_WIDE: widen the NVN window / display mode before the guest runs (hle_d3.c)
+    { void dm_d3_drs_install(void); dm_d3_drs_install(); }   // [D3] DM_D3_DRS / DM_D3_DRS_ALIGN: the game's dynamic resolution under host control (hle_d3_drs.c, issue #23)
     { void dm_d3_mods_install(void); dm_d3_mods_install(); }   // [D3] DM_D3_SEASON / DM_D3_THEME / DM_D3_CHEATS: mods / cheats code patches before the guest runs (hle_d3_mods.c)
     { void dm_d3_jobs_install(void); dm_d3_jobs_install(); }   // [D3] DM_D3_JOBS: the game's job pool on a host queue (hle_d3_jobs.c, issue #18)
 #endif

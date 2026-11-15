@@ -90,6 +90,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native void nativeCpuCores(int mode);        // [cpu-place] gear "CPU cores": 0 auto, 1 big cores, 2 all cores (live; hle_cpu_place.c)
     static native void nativeSetAniso(int level);       // [D3] gear "Anisotropic filtering": 0 off, 4 = x4 (live; xbg_game.cpp namespace aniso)
     static native void nativeSetUpscale(int mode);      // [D3] gear "Upscale": 0 off, 1 auto (live; vulkan_present.cpp namespace upscale)
+    static native void nativeSetD3Drs(boolean on);      // [D3] gear "Game dynamic resolution": on = the game's DRS, off = always full resolution (live; hle_d3_drs.c)
     static final String FRONT_DATA_DIR = "Diablo3Mobile";   // Download/<this>: the player's data folder; save exports go to its saves/
     private FrontMenu front;
     private SaveTransfer saves;
@@ -502,6 +503,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 // both also switched live from the gear (nativeSetAniso / nativeSetUpscale)
                 Os.setenv("DM_GFX_ANISO", p.getBoolean("d3_aniso", false) ? "4" : "0", true);
                 Os.setenv("DM_GFX_UPSCALE", p.getInt("d3_upscale", 0) == 1 ? "auto" : "0", true);
+                // The game's dynamic resolution (hle_d3_drs.c, issue #23): on = its own DRS (3D down to 0.7 when the GPU is late), off = always
+                // full resolution; also switched live from the gear (nativeSetD3Drs)
+                Os.setenv("DM_D3_DRS", p.getBoolean("d3_drs", true) ? "auto" : "off", true);
                 // Widescreen only: loading screens' 16:9 art presented alone, stretched to the screen (hle_d3.c ls_present_crop)
                 Os.setenv("DM_D3_WIDE_STRETCH_LOADING", p.getBoolean("d3_stretch_loading", true) ? "1" : "0", true);
                 // Gear "Write logs" (issue #19, CrashLog.logsOn): off keeps boot.log in the private runtime dir (jni_android.c log_init)
@@ -841,7 +845,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     //     720p; the labels show the size for the picked picture shape, widescreen W x 900 / W*4/5 x 720: d3RenderSize), frame rate limit (DM_PRESENT_MAX_HZ 30 / 60 -> hle_nvn.c), sharpening (DM_GFX_SHARPEN -> RCAS in vulkan_present.cpp),
     //     Vulkan driver (DM_VK_DRIVER -> vk_driver.c), vibration (DM_RUMBLE), native screen resolution (experimental, DM_D3_HEIGHT=native -> hle_d3.c);
     //   live and at the next launch: upscale off / auto (DM_GFX_UPSCALE, nativeSetUpscale -> vulkan_present.cpp), anisotropic filtering x4
-    //     (DM_GFX_ANISO, nativeSetAniso -> xbg_game.cpp), CPU cores (DM_CPU_CORES, nativeCpuCores);
+    //     (DM_GFX_ANISO, nativeSetAniso -> xbg_game.cpp), CPU cores (DM_CPU_CORES, nativeCpuCores), game dynamic resolution (DM_D3_DRS,
+    //     nativeSetD3Drs -> hle_d3_drs.c);
     //   immediately: picture shape (16:9 bars / stretched: the SurfaceView size, applyAspectLayout), and "doom_controls" read by
     //     D3PadView.reloadSettings: FPS counter, stick dead-zone compensation, settings button look (normal / faded + opacity),
     //     control layout ("d3_layout" touch / gamepad, on pick), skill icons on the buttons ("d3_icons", hle_d3_icons.c via nativeD3Icons), layout opacity / size ("d3_opacity" / "d3_scale" %, live sliders),
@@ -953,6 +958,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             // Anisotropic filtering x4 (xbg_game.cpp namespace aniso); live
             CheckBox anisoC = new CheckBox(this); anisoC.setText(when(ui, R.string.d3_aniso, true)); anisoC.setChecked(p.getBoolean("d3_aniso", false)); box.addView(anisoC);
             note(box, ui.getString(R.string.d3_aniso_note));
+            // The game's dynamic resolution (hle_d3_drs.c DM_D3_DRS); live
+            CheckBox drsC = new CheckBox(this); drsC.setText(when(ui, R.string.d3_drs, true)); drsC.setChecked(p.getBoolean("d3_drs", true)); box.addView(drsC);
+            note(box, ui.getString(R.string.d3_drs_note));
             heading(box, when(ui, R.string.d3_fps_limit, false));
             String[] limLabels = new String[D3_FPS_LIMITS.length]; int limAt = 0;
             for (int i = 0; i < limLabels.length; i++) { limLabels[i] = String.valueOf(D3_FPS_LIMITS[i]); if (D3_FPS_LIMITS[i] == d3FpsLimit()) limAt = i; }
@@ -1048,9 +1056,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     .putString("driver", driverPicked(drvNames, drvG)).putBoolean("rumble", rumble.isChecked())
                     .putBoolean("d3_stretch_loading", stretchL.isChecked()).putBoolean("d3_logs", logsC.isChecked())
                     .putInt("mp_pads", picked(mpG, 9400, 3)).putBoolean("mp_lan", lanC.isChecked()).putInt("cpu_cores", picked(cpuG, 9500, D3_CPU_MODES.length))
-                    .putBoolean("d3_native_res", nativeC.isChecked()).putInt("d3_upscale", picked(upG, 9600, 2)).putBoolean("d3_aniso", anisoC.isChecked()).apply();
+                    .putBoolean("d3_native_res", nativeC.isChecked()).putInt("d3_upscale", picked(upG, 9600, 2)).putBoolean("d3_aniso", anisoC.isChecked())
+                    .putBoolean("d3_drs", drsC.isChecked()).apply();
                 if (libraryLoaded && started) try { nativeCpuCores(d3CpuCores()); } catch (UnsatisfiedLinkError e) { /* a library without the module */ }
                 if (libraryLoaded && started) try { nativeSetAniso(anisoC.isChecked() ? 4 : 0); nativeSetUpscale(picked(upG, 9600, 2)); } catch (UnsatisfiedLinkError e) { /* an older library */ }
+                if (libraryLoaded && started) try { nativeSetD3Drs(drsC.isChecked()); } catch (UnsatisfiedLinkError e) { /* an older library */ }
                 cp.edit().putBoolean("fps", fps.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putBoolean("d3_hide_sticks", hideSt.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
                     .putInt("gear_mode", picked(gearG, 9000, D3_GEAR_LABELS.length)).putInt("d3_menu_swipe", picked(swG, 9300, 2)).apply();
                 if (d3Pad != null) d3Pad.reloadSettings();
