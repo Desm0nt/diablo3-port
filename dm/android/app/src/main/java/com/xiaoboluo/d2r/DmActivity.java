@@ -1328,6 +1328,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             showStartError(resource == 0 ? getString(R.string.dmAndroidStartFailed, result) : (D3 ? d3Ui() : this).getString(resource)); return;
         }
         started = true;
+        GameStateHint.install(this, resumed);   // [game-state] GameManager.setGameState from the native loading / scene state (API 33)
         if (touchOverlay != null) touchOverlay.setInputEnabled(true);
         // [D3] VkDrivers.gameStarted (DOOM 2016): the notice from choose(), the crash guard cleared at the first frames, the fallback dialog
         // (DRV-09), the in-process fallback after a failed Vulkan start (DRV-07); then the "a new version is out" check (once per start)

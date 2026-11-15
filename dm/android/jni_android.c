@@ -740,6 +740,7 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeFocus(JNIEnv *env
     dm_android_touch_focus(ev == 2 || ev == 3);
     front_android_sensors(ev == 2 || ev == 3);          // motion sensors only while in front
     dm_haptics_android_foreground(ev == 2 || ev == 3);  // no rumble left running in the background
+    dm_aperf_focus(ev);                                 // [adpf-boost] back in front: a workload reset hint at the next present
     dm_cpu_place_focus(ev);                             // [cpu-place] paused in the background, thread masks checked again on the way back
     if (lifecycle_ready()) {
         dm_lifecycle_post(&g_lifecycle, ev);

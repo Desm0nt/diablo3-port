@@ -1,30 +1,62 @@
-// Android performance plumbing for the presents: CPU performance hints (ADPF), thermal status, and the display refresh-rate vote.
-// - ADPF (APerformanceHint, Android 13; resolved with dlsym so older systems still load): the frame's work is reported against the game's
-//   present period (dm_present_period, the pacing tier hle_nvn.c picked), so the CPU governor raises clocks before a frame runs late instead
-//   of after. The work of a frame is the largest CPU time any thread of the session spent between two presents (per-thread CPU clocks): a wall
-//   interval would include the pacer's idle wait and ask for clocks the frame does not need (the same reasoning as hle_nvn.c pace_adapt_tick).
-//   Every 300 presents the threads that used at least 15% of a core join the session (up to 5 besides the presenting one; Android 14
-//   APerformanceHint_setThreads), the idle ones leave. Android 15 also gets the frame's GPU time (reportActualWorkDuration2) when the
+// Android performance plumbing for the presents: CPU performance hints (ADPF), boost hints, the game state, thermal status and the display
+// refresh-rate vote.
+// - ADPF (APerformanceHint, Android 13; resolved with dlsym so older systems still load): the frame's work is reported against a target, so the
+//   CPU governor raises clocks before a frame runs late instead of after. The work of a frame is the largest CPU time any thread of the session
+//   spent between two presents (per-thread CPU clocks): a wall interval would include the pacer's idle wait and ask for clocks the frame does
+//   not need (the same reasoning as hle_nvn.c pace_adapt_tick). Android 15 also gets the frame's GPU time (reportActualWorkDuration2) when the
 //   Vulkan backend measures it (xbg_recent_gpu_ms).
+// - [adpf] From DOOM Eternal (PERF-E14, ETR 26ece9a / adpf 53e8f89; port-common/modules/adpf-boost):
+//   - target = min(present period, frame budget DM_ADPF_BUDGET_MS, default 33.33 = the Switch's 30 fps). The old target followed the pacer's
+//     tier, so when slow frames pushed the tier down the hint relaxed with it and asked for less clock exactly when the game was late.
+//     DM_ADPF_TARGET_MS=period is the old behaviour; <ms> fixed; auto = the mean work of the last 60 reports. Changes sent at most every 2 s.
+//   - reports: every return code is counted; EPIPE (session lost) closes the session and re-opens it after 5 s (at most 8 times). A frame longer
+//     than 1 s, or longer than 250 ms with < 25% CPU, is a hold (load, pause) and is not reported.
+//   - members: re-scanned every DM_ADPF_SCAN_MS (5000; was every 300 presents). The presenting thread (nvn-translate) is always a member. [D3]
+//     The game's main guest thread is a member from the start, its job workers (guest names DM_CPU_JOB_NAMES, default "JobWorker", the
+//     cpu-place list; hle_thread.c thr_guest_threads) join at >= 5% of a core, before any other thread; the other game threads join at >= 15%;
+//     the Java UI thread, RenderThread, binder, audio, JIT, GC and our idle helpers never; a member leaves after two scans below 5%; at most
+//     DM_ADPF_MAX_THREADS (6) tids.
+//   - setPreferPowerEfficiency(false) once (Android 15; DM_ADPF_POWER_EFF=1 asks for true, -1 does not call).
+//   - DM_ADPF_DIAG_MS (10000; 0 = off): "[perf] ADPF 10s:" line with the report and boost counters, work vs target, each member's name / last
+//     cpu / uclamp.min (when the kernel shows it) and every cpufreq policy's scaling_min / cur / max: whether the system acts on the hints.
+// - [adpf-boost] Workload-increase hints (diablo3-port #23: after the launch boost runs out a Helio G99 drops the game to slow motion until
+//   the recents screen or a screen recording boosts it again). On the presenting thread, when DM_ADPF_BOOST_FRAMES (3) frames in a row did
+//   more CPU work than the target, or the frames of a whole second came on average > 15% slower than the target (fps under the game's pace),
+//   the session gets a CPU load-up hint, at most once per DM_ADPF_BOOST_MS (500): APerformanceHint_notifyWorkloadIncrease(cpu, !gpu) where it
+//   exists (public NDK, Android 16 / API 36), else APerformanceHint_sendHint(CPU_LOAD_UP) where libandroid exports it (platform symbol behind
+//   Java PerformanceHintManager.Session.sendHint, which is @hide: Android 14-15 builds; not a public API, DM_ADPF_BOOST=2 skips it). After
+//   the app comes back to the front (dm_aperf_focus) and when a loading screen goes away, a reset (notifyWorkloadReset / CPU_LOAD_RESET).
+//   Android 13 without either: no boost hints (logged). DM_ADPF_BOOST=0 turns them off.
+//   The decisions (when to boost, who is in the session) are plain functions in perf_boost.h (host test in port-common adpf-boost/test).
+// - [game-state] GameManager.setGameState (Java, Android 13; GameStateHint.java polls nativeGameState twice a second while the app is in
+//   front): loading = the game's loading screen is up (diag.c dm_loadscreen_up); mode = gameplay interruptible in a game (uninterruptible
+//   once local play was opened: hle_ldn.c dm_ldn_lan_on), none in the front end (touch_android.c dm_android_scene_game). DM_GAME_STATE=0: off.
 // - Thermal (AThermal, Android 11/12): the status is followed with a listener, logged with the headroom, and returned by dm_thermal_now()
 //   (hle_nvn.c's perf summary). At SEVERE or worse the window's frame-rate vote drops to the lowest rate that is a multiple of the game's
 //   rate and >= 60 Hz (a 120 Hz panel costs power the 30 / 60 fps game does not use); it returns to the marker vote at MODERATE or better.
 // - Display rate: the vote vulkan_present.cpp makes at surface creation (marker gfx-frame-rate, default 120 Hz) is re-applied here whenever the
 //   window or the wanted rate changes, with ANativeWindow_setFrameRateWithChangeStrategy(ONLY_IF_SEAMLESS) where available (Android 12), so a
 //   thermal step never blanks the screen for a mode switch.
-// Switches (env file): DM_NO_ADPF=1 no hint session; DM_THERMAL_VOTE=0 keep the marker vote whatever the temperature.
+// Switches (env file): DM_NO_ADPF=1 / DM_ADPF=0 no hint session; DM_ADPF_TARGET_MS, DM_ADPF_BUDGET_MS=33.33, DM_ADPF_POWER_EFF=0,
+// DM_ADPF_SCAN_MS=5000, DM_ADPF_MAX_THREADS=6, DM_ADPF_DIAG_MS=10000; DM_ADPF_BOOST=1 (0 off, 2 public NDK call only), DM_ADPF_BOOST_MS=500,
+// DM_ADPF_BOOST_FRAMES=3; DM_GAME_STATE=1 (0 off); DM_THERMAL_VOTE=0 keep the marker vote whatever the temperature.
 // Hook: dm_aperf_present(window, frame_rate_vote) once per present on the presenting thread (vulkan_present.cpp present(), before
-// vkQueuePresentKHR); dm_aperf_start() once at boot (jni_android.c).
-// Portions ported from nx2android (https://github.com/seedds/nx2android) nxnative/dm/android/perf_android.c (ADPF session, thread scan),
-// Copyright (c) 2026 seedds, MIT License.
+// vkQueuePresentKHR); dm_aperf_start() once at boot and dm_aperf_focus(ev) from nativeFocus (jni_android.c).
+// Portions ported from nx2android (https://github.com/seedds/nx2android) nxnative/dm/android/perf_android.c (ADPF session, thread scan,
+// load increase after 3 frames over the target), Copyright (c) 2026 seedds, MIT License.
 #include "../host/dm.h"
 #include "touch_android.h"
+#include "perf_boost.h"
 #include <android/native_window.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <jni.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +66,12 @@
 
 double dm_present_period(void);   // gfx/vulkan/nvn_vk.c: this present's pacing period (s)
 __attribute__((weak)) double xbg_recent_gpu_ms(void);
+// [D3] the game's threads (hle_thread.c, cpu-place): live guest threads with host tid, kind (1 = the main thread) and the guest's own name
+__attribute__((weak)) int thr_guest_threads(int32_t *tid, uint8_t *kind, char (*name)[32], int max);
+// [game-state] what the game shows: diag.c (the loading screen), touch_android.c (in a game / front end), hle_ldn.c (local play opened)
+__attribute__((weak)) int dm_loadscreen_up(void);
+__attribute__((weak)) int dm_android_scene_game(void);
+__attribute__((weak)) int dm_ldn_lan_on(void);
 
 // ---------------- ADPF ----------------
 typedef struct APerformanceHintManager APerformanceHintManager;
@@ -44,13 +82,31 @@ static struct {
     APerformanceHintSession *(*create)(APerformanceHintManager *, const int32_t *, size_t, int64_t);
     int (*update)(APerformanceHintSession *, int64_t);
     int (*report)(APerformanceHintSession *, int64_t);
+    void (*close)(APerformanceHintSession *);
     int (*set_threads)(APerformanceHintSession *, const int32_t *, size_t);   // Android 14
     AWorkDuration *(*wd_create)(void);                                        // Android 15
     void (*wd_start)(AWorkDuration *, int64_t), (*wd_total)(AWorkDuration *, int64_t), (*wd_cpu)(AWorkDuration *, int64_t), (*wd_gpu)(AWorkDuration *, int64_t);
     int (*report2)(APerformanceHintSession *, AWorkDuration *);
+    int (*power)(APerformanceHintSession *, bool);                            // Android 15
+    int (*increase)(APerformanceHintSession *, bool, bool, const char *);     // Android 16 (API 36)
+    int (*wreset)(APerformanceHintSession *, bool, bool, const char *);       // Android 16 (API 36)
+    int (*send_hint)(APerformanceHintSession *, int32_t);                     // platform symbol (Android 14-15 libandroid): SessionHint
 } H;
+enum { HINT_CPU_LOAD_UP = 0, HINT_CPU_LOAD_RESET = 2 };   // the platform's SessionHint values (= Java PerformanceHintManager.Session.CPU_LOAD_*)
+static APerformanceHintManager *g_hint_mgr;
 static APerformanceHintSession *g_hint; static int64_t g_hint_target; static int32_t g_hint_tids[8]; static int g_hint_n;
+static uint8_t g_hint_low[8];   // consecutive scans each member spent below 5% of a core
+static int g_adpf_power = 0, g_adpf_auto, g_adpf_period_mode, g_adpf_max_threads = 6;
+static int64_t g_adpf_target_ns, g_adpf_budget_ns = 33333333, g_adpf_scan_ns = 5000000000LL, g_adpf_diag_ns = 10000000000LL;
+static int g_boost = 1, g_boost_frames = 3; static int64_t g_boost_ns = 500000000;
+static char g_job_names[128] = "JobWorker";
 static AWorkDuration *g_wd;
+// report and boost counters (presenting thread only), printed by the 10 s diagnostic line
+static struct { unsigned ok, ok2, fail2, fail, lost, reopened; int last_err; int64_t wsum, wmax; unsigned wn;
+                unsigned up_work, up_slow, up_refused, up_limited, resets, reset_refused; int up_rc; } g_rep;
+static int64_t g_hint_reopen_at; static int64_t g_hint_last_update;
+static _Atomic int g_reset_pending;   // 1: back in front (dm_aperf_focus), 2: a loading screen went away
+static int g_ls_up;                   // the loading screen is up (dm_loadscreen_up, polled every 250 ms on the presenting thread)
 
 static int64_t perf_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec; }
 // CPU time of any thread of this process: the kernel's per-thread CPU clock id (MAKE_THREAD_CPUCLOCK(tid, CPUCLOCK_SCHED)).
@@ -59,69 +115,148 @@ static int64_t thread_cpu_ns(int32_t tid) {
     if (clock_gettime(c, &ts)) return -1;
     return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
 }
+// /proc/self/task/<tid>/stat: comm, utime + stime (clock ticks), the CPU it last ran on (field 39) (from DOOM 2016's r2 perf_android.c)
+typedef struct { uint64_t ticks; int cpu; char comm[16]; } tstat_t;
+static int task_stat(int tid, tstat_t *o) {
+    char p[64], b[1024]; snprintf(p, sizeof p, "/proc/self/task/%d/stat", tid);
+    o->ticks = 0; o->cpu = -1; o->comm[0] = 0;
+    int fd = open(p, O_RDONLY | O_CLOEXEC); if (fd < 0) return -1;
+    ssize_t n = read(fd, b, sizeof b - 1); close(fd); if (n <= 0) return -1;
+    b[n] = 0;
+    char *l = strchr(b, '('), *r = strrchr(b, ')'); if (!l || !r || r < l) return -1;
+    size_t cl = (size_t)(r - l - 1); if (cl > 15) cl = 15;
+    memcpy(o->comm, l + 1, cl); o->comm[cl] = 0;
+    unsigned long long ut = 0, st = 0; int field = 2;
+    for (char *t = r + 1; *t; t++) if (*t == ' ') { field++;
+        if (field == 14) ut = strtoull(t + 1, NULL, 10); else if (field == 15) st = strtoull(t + 1, NULL, 10);
+        else if (field == 39) { o->cpu = atoi(t + 1); break; } }
+    o->ticks = ut + st; return 0;
+}
 
-static void hint_init(int64_t target) {
+static void adpf_cfg_read(void) {
+    const char *e;
+    if ((e = getenv("DM_ADPF_POWER_EFF")) && *e) g_adpf_power = atoi(e) < 0 ? -1 : atoi(e) != 0;
+    if ((e = getenv("DM_ADPF_TARGET_MS")) && *e) {
+        if (!strcmp(e, "auto")) g_adpf_auto = 1; else if (!strcmp(e, "period")) g_adpf_period_mode = 1;
+        else if (atof(e) > 0.5 && atof(e) < 500) g_adpf_target_ns = (int64_t)(atof(e) * 1e6);
+    }
+    if ((e = getenv("DM_ADPF_BUDGET_MS")) && *e && atof(e) > 0.5 && atof(e) < 500) g_adpf_budget_ns = (int64_t)(atof(e) * 1e6);
+    if ((e = getenv("DM_ADPF_SCAN_MS")) && *e && atoi(e) >= 500) g_adpf_scan_ns = (int64_t)atoi(e) * 1000000;
+    if ((e = getenv("DM_ADPF_DIAG_MS")) && *e) g_adpf_diag_ns = (int64_t)(atoi(e) > 0 ? atoi(e) : 0) * 1000000;
+    if ((e = getenv("DM_ADPF_MAX_THREADS")) && *e) { int v = atoi(e); g_adpf_max_threads = v < 1 ? 1 : v > 8 ? 8 : v; }
+    if ((e = getenv("DM_ADPF_BOOST")) && *e) g_boost = atoi(e) < 0 ? 0 : atoi(e) > 2 ? 2 : atoi(e);
+    if ((e = getenv("DM_ADPF_BOOST_MS")) && *e && atoi(e) >= 100) g_boost_ns = (int64_t)atoi(e) * 1000000;
+    if ((e = getenv("DM_ADPF_BOOST_FRAMES")) && *e && atoi(e) >= 1) g_boost_frames = atoi(e);
+    if ((e = getenv("DM_CPU_JOB_NAMES")) && *e) snprintf(g_job_names, sizeof g_job_names, "%s", e);
+    LOG("[perf] ADPF switches: DM_ADPF_TARGET_MS=%s DM_ADPF_BUDGET_MS=%.2f DM_ADPF_POWER_EFF=%d DM_ADPF_SCAN_MS=%lld DM_ADPF_MAX_THREADS=%d DM_ADPF_DIAG_MS=%lld"
+        " DM_ADPF_BOOST=%d DM_ADPF_BOOST_MS=%lld DM_ADPF_BOOST_FRAMES=%d; job workers = guest names %s*",
+        g_adpf_auto ? "auto" : g_adpf_period_mode ? "period" : g_adpf_target_ns ? "fixed" : "budget(default)", g_adpf_budget_ns / 1e6, g_adpf_power,
+        (long long)(g_adpf_scan_ns / 1000000), g_adpf_max_threads, (long long)(g_adpf_diag_ns / 1000000), g_boost, (long long)(g_boost_ns / 1000000),
+        g_boost_frames, g_job_names);
+}
+// The target the session gets for a present period p (ns): fixed / auto value, the period itself (old), or the period capped at the frame budget.
+static int64_t adpf_target(int64_t p) {
+    if (g_adpf_target_ns) return g_adpf_target_ns;
+    if (g_adpf_period_mode) return p;
+    return p < g_adpf_budget_ns ? p : g_adpf_budget_ns;
+}
+static const char *boost_path(void) {
+    if (!g_boost) return "off (DM_ADPF_BOOST=0)";
+    if (H.increase && H.wreset) return "notifyWorkloadIncrease / Reset (Android 16)";
+    if (H.send_hint && g_boost == 1) return "sendHint CPU_LOAD_UP / RESET (platform symbol)";
+    return "none on this Android";
+}
+static void hint_create(int64_t target) {
+    g_hint = H.create(g_hint_mgr, g_hint_tids, (size_t)g_hint_n, target);
+    g_hint_target = target; g_hint_last_update = perf_now();
+    if (g_hint && g_adpf_power >= 0 && H.power) { int r = H.power(g_hint, g_adpf_power != 0); LOG("[perf] ADPF setPreferPowerEfficiency(%s) -> %d", g_adpf_power ? "true" : "false", r); }
+}
+static void hint_init(int64_t period) {
     static int tried; if (tried) return; tried = 1;
     if (getenv("DM_NO_ADPF")) { LOG("[perf] DM_NO_ADPF: CPU hints off"); return; }
     void *lib = dlopen("libandroid.so", RTLD_NOW); if (!lib) return;
     H.get = dlsym(lib, "APerformanceHint_getManager"); H.create = dlsym(lib, "APerformanceHint_createSession");
     H.update = dlsym(lib, "APerformanceHint_updateTargetWorkDuration"); H.report = dlsym(lib, "APerformanceHint_reportActualWorkDuration");
-    H.set_threads = dlsym(lib, "APerformanceHint_setThreads");
+    H.close = dlsym(lib, "APerformanceHint_closeSession"); H.set_threads = dlsym(lib, "APerformanceHint_setThreads");
     H.wd_create = dlsym(lib, "AWorkDuration_create"); H.wd_start = dlsym(lib, "AWorkDuration_setWorkPeriodStartTimestampNanos");
     H.wd_total = dlsym(lib, "AWorkDuration_setActualTotalDurationNanos"); H.wd_cpu = dlsym(lib, "AWorkDuration_setActualCpuDurationNanos");
     H.wd_gpu = dlsym(lib, "AWorkDuration_setActualGpuDurationNanos"); H.report2 = dlsym(lib, "APerformanceHint_reportActualWorkDuration2");
+    H.power = dlsym(lib, "APerformanceHint_setPreferPowerEfficiency");
+    H.increase = dlsym(lib, "APerformanceHint_notifyWorkloadIncrease"); H.wreset = dlsym(lib, "APerformanceHint_notifyWorkloadReset");
+    H.send_hint = dlsym(lib, "APerformanceHint_sendHint");
     if (!H.get || !H.create || !H.report) { LOG("[perf] no APerformanceHint on this Android: CPU hints off"); return; }
-    APerformanceHintManager *m = H.get(); if (!m) return;
+    adpf_cfg_read();
+    const int64_t target = adpf_target(period);
+    LOG("[perf] ADPF symbols: setThreads %s, reportActualWorkDuration2 %s, setPreferPowerEfficiency %s, notifyWorkloadIncrease %s, sendHint (platform) %s; boost hints: %s",
+        H.set_threads ? "yes" : "no", H.report2 ? "yes" : "no", H.power ? "yes" : "no", H.increase && H.wreset ? "yes" : "no", H.send_hint ? "yes" : "no", boost_path());
+    g_hint_mgr = H.get(); if (!g_hint_mgr) { LOG("[perf] ADPF: APerformanceHint_getManager returned NULL: CPU hints off"); return; }
     g_hint_tids[0] = (int32_t)gettid(); g_hint_n = 1;
-    g_hint = H.create(m, g_hint_tids, (size_t)g_hint_n, target); g_hint_target = target;
+    hint_create(target);
     if (g_hint && H.wd_create && H.wd_start && H.wd_total && H.wd_cpu && H.wd_gpu && H.report2) g_wd = H.wd_create();
-    LOG("[perf] ADPF session %s (target %.2f ms, thread %d%s%s)", g_hint ? "open" : "refused", target / 1e6, g_hint_tids[0],
-        H.set_threads ? ", threads join by load" : "", g_wd ? ", GPU time reported" : "");
+    LOG("[perf] ADPF session %s (target %.2f ms = min(period %.2f, budget %.2f), thread %d%s%s)", g_hint ? "open" : "refused", target / 1e6, period / 1e6,
+        g_adpf_budget_ns / 1e6, g_hint_tids[0], H.set_threads ? ", threads join by load" : "", g_wd ? ", GPU time reported" : "");
+}
+// EPIPE from a report: the system dropped the session (binder death, HAL restart). Close it and open a new one 5 s later (at most 8 times).
+static void hint_lost(int64_t now) {
+    if (!g_hint) return;
+    if (H.close) H.close(g_hint);
+    g_hint = NULL; g_rep.lost++;
+    g_hint_reopen_at = g_rep.lost <= 8 ? now + 5000000000LL : 0;
+    LOG("[perf] ADPF session lost (EPIPE, %u so far): %s", g_rep.lost, g_hint_reopen_at ? "re-opening in 5 s" : "giving up");
+}
+// Which threads may join by load: the game's (guest threads) and our own frame threads; never the Java UI thread (tid = pid), the platform's
+// threads or our idle / diagnostic helpers, whose load is not the frame's.
+static int adpf_thread_ok(int tid, const char *comm) {
+    if (tid == (int)getpid()) return 0;
+    static const char *const deny[] = {"RenderThread", "binder:", "HwBinder:", "AudioTrack", "AAudio", "Jit thread", "HeapTaskDaemon", "hwuiTask",
+        "blastAsyncWork", "FinalizerDaemon", "FinalizerWatchd", "ReferenceQueueD", "Signal Catcher", "Profile Saver", "perfetto", "queued-work",
+        "GPU completion", "ADB-JDWP", "dm-sensors", "dm-ctl", "pin-trace", "dm-crumbs", "dm-lifecycle", "dm-java-input", "haptics", "dm-listw",
+        "dm-prep", "dm-hold", "dm-l3mem", "dm-csched", "dm-cpu"};
+    for (size_t i = 0; i < sizeof deny / sizeof deny[0]; i++) if (!strncmp(comm, deny[i], strlen(deny[i]))) return 0;
+    return 1;
+}
+static int is_job_name(const char *name) {
+    char list[128]; snprintf(list, sizeof list, "%s", g_job_names);
+    for (char *sv = NULL, *t = strtok_r(list, ",", &sv); t; t = strtok_r(NULL, ",", &sv)) if (*t && !strncmp(name, t, strlen(t))) return 1;
+    return 0;
 }
 // The other threads that do frame work: the presenting thread is the Vulkan backend's, the game's main thread (simulation) and its job workers
-// set the pace as much. Every 300 presents the threads that used at least 15% of a core since the last look join the session (up to 5 besides
-// the presenting one), the ones that went idle leave it (nx2android: without them the main thread stayed on mid cores and its bursts made long frames).
-static uint64_t task_ticks(int tid) {
-    char p[64], b[512]; snprintf(p, sizeof p, "/proc/self/task/%d/stat", tid);
-    FILE *f = fopen(p, "r"); if (!f) return 0;
-    size_t n = fread(b, 1, sizeof b - 1, f); fclose(f); b[n] = 0;
-    char *c = strrchr(b, ')'); if (!c) return 0;
-    unsigned long long ut = 0, st = 0; int field = 2;
-    for (char *t = c + 1; *t && field < 15; t++) if (*t == ' ') { field++; if (field == 14) ut = strtoull(t + 1, NULL, 10); else if (field == 15) st = strtoull(t + 1, NULL, 10); }
-    return ut + st;
-}
+// set the pace as much (nx2android: without them the main thread stayed on mid cores and its bursts made long frames).
+// Every DM_ADPF_SCAN_MS: the presenting thread is always a member, [D3] the game's main thread too (from the first scan, unless idle on two
+// scans in a row); the other members stay unless they spent < 5% of a core on two scans in a row; free places go first to the game's job
+// workers with >= 5% of a core, then to the busiest other allowed threads with >= 15% (DOOM 2016 r2 DM_ADPF_HYST, ETR adpf).
 static void hint_threads_scan(int32_t self) {
     static struct { int tid; uint64_t ticks; } prev[512]; static int np; static int64_t last;
     int64_t now = perf_now(); double secs = last ? (now - last) / 1e9 : 0; last = now;
     DIR *d = opendir("/proc/self/task"); if (!d) return;
-    static struct { int tid; uint64_t used; } cur[512]; int nc = 0; struct dirent *e;
-    while ((e = readdir(d)) && nc < 512) { int tid = atoi(e->d_name); if (tid <= 0) continue; cur[nc].tid = tid; cur[nc].used = task_ticks(tid); nc++; }
+    static struct { int tid; uint64_t used; char comm[16]; } cur[512]; static dm_hint_cand_t cand[512]; int nc = 0; struct dirent *e;
+    while ((e = readdir(d)) && nc < 512) { int tid = atoi(e->d_name); if (tid <= 0) continue;
+        tstat_t ts; task_stat(tid, &ts); cur[nc].tid = tid; cur[nc].used = ts.ticks; memcpy(cur[nc].comm, ts.comm, sizeof ts.comm); nc++; }
     closedir(d);
-    int32_t pick[8]; int npick = 0; pick[npick++] = self;
-    if (secs > 0) {
-        long hz = sysconf(_SC_CLK_TCK); double need = 0.15 * secs * (double)(hz > 0 ? hz : 100);
-        for (int k = 0; k < 5; k++) {   // the busiest first
-            int best = -1; uint64_t bu = 0;
-            for (int i = 0; i < nc; i++) {
-                if (cur[i].tid == self) continue;
-                int taken = 0; for (int j = 0; j < npick; j++) taken |= pick[j] == cur[i].tid;
-                if (taken) continue;
-                uint64_t was = 0; for (int j = 0; j < np; j++) if (prev[j].tid == cur[i].tid) { was = prev[j].ticks; break; }
-                uint64_t u = cur[i].used > was ? cur[i].used - was : 0;
-                if (was && u >= need && u > bu) { bu = u; best = i; }
-            }
-            if (best < 0) break;
-            pick[npick++] = cur[best].tid;
-        }
+    // [D3] the game's roles: 1 = its main thread, 2 = a job worker (by the guest's own thread name), 0 = anything else
+    static int32_t gt[256]; static uint8_t gk[256]; static char gn[256][32];
+    int ng = thr_guest_threads ? thr_guest_threads(gt, gk, gn, 256) : 0, main_tid = 0;
+    for (int i = 0; i < ng; i++) if (gk[i] == 1 && gt[i] > 0) main_tid = gt[i];
+    for (int i = 0; i < nc; i++) {
+        uint64_t was = 0; for (int j = 0; j < np; j++) if (prev[j].tid == cur[i].tid) { was = prev[j].ticks; break; }
+        cand[i].tid = cur[i].tid; cand[i].was = was != 0; cand[i].u = cur[i].used > was ? cur[i].used - was : 0;
+        cand[i].ok = adpf_thread_ok(cur[i].tid, cur[i].comm); cand[i].role = 0;
+        for (int k = 0; k < ng; k++) if (gt[k] == cur[i].tid) { cand[i].role = gk[k] == 1 ? 1 : is_job_name(gn[k]) ? 2 : 0; if (cand[i].role) { cand[i].ok = 1; snprintf(cur[i].comm, sizeof cur[i].comm, "%.15s", gk[k] == 1 ? "main" : gn[k]); } break; }
     }
     np = 0; for (int i = 0; i < nc; i++) { prev[np].tid = cur[i].tid; prev[np].ticks = cur[i].used; np++; }
+    long hz = sysconf(_SC_CLK_TCK); double tick_s = secs * (double)(hz > 0 ? hz : 100);
+    int32_t pick[8]; uint8_t plow[8] = {0};
+    int npick = dm_hint_pick(cand, nc, self, main_tid, g_hint_tids, g_hint_low, g_hint_n, (uint64_t)(0.15 * tick_s), (uint64_t)(0.05 * tick_s), secs <= 0, g_adpf_max_threads, pick, plow);
     if (!g_hint || !H.set_threads) return;
     int same = npick == g_hint_n;
     for (int i = 0; same && i < npick; i++) { int in = 0; for (int j = 0; j < g_hint_n; j++) in |= g_hint_tids[j] == pick[i]; same = in; }
-    if (same) return;
-    if (H.set_threads(g_hint, pick, (size_t)npick)) { LOG("[perf] ADPF: the session refused threads"); return; }
-    memcpy(g_hint_tids, pick, sizeof(int32_t) * (size_t)npick); g_hint_n = npick;
-    char l[160]; size_t o = 0; for (int i = 0; i < npick && o < sizeof l; i++) o += (size_t)snprintf(l + o, sizeof l - o, " %d", pick[i]);
+    if (same) { for (int i = 0; i < npick; i++) for (int j = 0; j < g_hint_n; j++) if (g_hint_tids[j] == pick[i]) g_hint_low[j] = plow[i]; return; }
+    int r = H.set_threads(g_hint, pick, (size_t)npick);
+    if (r) { static unsigned told; if (told++ < 8) LOG("[perf] ADPF: the session refused %d threads (rc %d)", npick, r); if (r == EPIPE) hint_lost(now); return; }
+    memcpy(g_hint_tids, pick, sizeof(int32_t) * (size_t)npick); memcpy(g_hint_low, plow, (size_t)npick); g_hint_n = npick;
+    char l[320]; size_t o = 0;
+    for (int i = 0; i < npick && o < sizeof l; i++) { const char *nm = "?"; for (int k = 0; k < nc; k++) if (cur[k].tid == pick[i]) { nm = cur[k].comm; break; }
+        o += (size_t)snprintf(l + o, sizeof l - o, " %d:%s", pick[i], nm); }
     LOG("[perf] ADPF session threads:%s", l);
 }
 // The session threads' CPU time since the previous present: the largest one is the frame's work (the critical path's CPU share).
@@ -135,6 +270,110 @@ static int64_t frame_cpu_work(void) {
         g_tid_cpu[i] = c; g_tid_seen[i] = g_hint_tids[i];
     }
     return worst;
+}
+
+// ---------------- [adpf-boost] workload hints ----------------
+// One hint to the session: up (CPU load increase) or reset. Public NDK calls where Android 16 has them, else the platform's sendHint.
+// Returns the call's rc, or -1 when this Android has no way to send it.
+static int boost_call(int reset, const char *why) {
+    if (H.increase && H.wreset) return reset ? H.wreset(g_hint, true, false, why) : H.increase(g_hint, true, false, why);
+    if (H.send_hint && g_boost == 1) return H.send_hint(g_hint, reset ? HINT_CPU_LOAD_RESET : HINT_CPU_LOAD_UP);
+    return -1;
+}
+// Per reported frame (not on holds): N frames in a row over the target, or a whole second of frames > 15% slower than the target, asks for
+// more CPU (at most once per DM_ADPF_BOOST_MS); a pending reset (front again, loading screen gone) is sent first.
+static void boost_tick(int64_t t, int64_t work, int64_t iv, int held, int64_t target) {
+    static dm_boost_t st;
+    if (!g_boost || !g_hint || (!(H.increase && H.wreset) && !(H.send_hint && g_boost == 1))) return;
+    int why_reset = atomic_exchange(&g_reset_pending, 0);
+    if (why_reset) {
+        const char *why = why_reset == 1 ? "back in front" : "loading screen gone";
+        int r = boost_call(1, why);
+        if (r == 0) g_rep.resets++; else g_rep.reset_refused++;
+        static unsigned told; if (told++ < 8) LOG("[perf] ADPF workload reset (%s) -> rc %d", why, r);
+        dm_boost_clear(&st);
+        if (r == EPIPE) { hint_lost(t); return; }
+    }
+    // loads: GameState isLoading speaks for them
+    int d = dm_boost_decide(&st, t, work, iv, held || g_ls_up, target, g_boost_frames, g_boost_ns);
+    if (d == DM_BOOST_LIMITED) { g_rep.up_limited++; return; }
+    if (d == DM_BOOST_NONE) return;
+    const char *why = d == DM_BOOST_SLOW ? "frames slow for 1 s" : "frames over target";
+    int r = boost_call(0, why);
+    if (r == 0) { if (d == DM_BOOST_SLOW) g_rep.up_slow++; else g_rep.up_work++; }
+    else if (r == EBUSY) g_rep.up_limited++;   // the system's own rate limit (Android 16)
+    else { g_rep.up_refused++; g_rep.up_rc = r; if (r == EPIPE) hint_lost(t); }
+    static unsigned told; if (told++ < 5) LOG("[perf] ADPF load increase (%s: work %.1f ms, frame %.1f ms, target %.1f ms) -> rc %d", why, work / 1e6, iv / 1e6, target / 1e6, r);
+}
+// nativeFocus (jni_android.c, UI thread): 2 / 3 = in front again: the next present sends a workload reset.
+void dm_aperf_focus(int ev) { if (ev == 2 || ev == 3) atomic_store(&g_reset_pending, 1); }
+
+// [adpf] DM_ADPF_DIAG_MS: does the system act on the hints? A boosting HAL either raises the session threads' uclamp.min (AOSP / Pixel
+// ADPF: /proc/self/task/<tid>/sched shows it when the kernel has CONFIG_SCHED_DEBUG + uclamp) or takes a perf lock that raises a cluster's
+// scaling_min_freq. File reads only (no sched_getattr: the app seccomp policy is not known to allow it).
+static int uclamp_of(int tid, int *umin, int *eff) {
+    char p[64], b[4096]; snprintf(p, sizeof p, "/proc/self/task/%d/sched", tid); *umin = *eff = -1;
+    int fd = open(p, O_RDONLY | O_CLOEXEC); if (fd < 0) return -1;
+    ssize_t n = read(fd, b, sizeof b - 1); close(fd); if (n <= 0) return -1; b[n] = 0;
+    for (char *s = b; s && *s; s = strchr(s, '\n'), s = s ? s + 1 : NULL) {
+        char *c = strchr(s, ':'); if (!c) continue;
+        if (!strncmp(s, "uclamp.min", 10)) *umin = atoi(c + 1); else if (!strncmp(s, "effective uclamp.min", 20)) *eff = atoi(c + 1);
+    }
+    return *umin >= 0 ? 0 : -1;
+}
+static int read_khz(const char *path) { char b[32]; int fd = open(path, O_RDONLY | O_CLOEXEC); if (fd < 0) return -1; ssize_t r = read(fd, b, sizeof b - 1); close(fd); if (r <= 0) return -1; b[r] = 0; return atoi(b); }
+static void adpf_diag(int64_t now, int64_t target) {
+    static int64_t last; if (!g_adpf_diag_ns || (last && now - last < g_adpf_diag_ns)) return;
+    if (!last) { last = now; return; }
+    double secs = (now - last) / 1e9; last = now;
+    char l[1280]; size_t o = (size_t)snprintf(l, sizeof l, "[perf] ADPF %.0fs: session %s target %.2f ms; reports ok %u (with GPU time %u, GPU refused %u) failed %u (last rc %d) lost %u;"
+        " work mean %.1f / max %.1f ms; boost up %u (over target %u, slow 1 s %u) refused %u (rc %d) limited %u, reset %u (refused %u); threads",
+        secs, g_hint ? "open" : "none", target / 1e6, g_rep.ok, g_rep.ok2, g_rep.fail2, g_rep.fail, g_rep.last_err, g_rep.lost,
+        g_rep.wn ? g_rep.wsum / g_rep.wn / 1e6 : 0.0, g_rep.wmax / 1e6, g_rep.up_work + g_rep.up_slow, g_rep.up_work, g_rep.up_slow, g_rep.up_refused, g_rep.up_rc,
+        g_rep.up_limited, g_rep.resets, g_rep.reset_refused);
+    for (int i = 0; i < g_hint_n && o < sizeof l; i++) {
+        tstat_t ts; int um, ue; task_stat(g_hint_tids[i], &ts); uclamp_of(g_hint_tids[i], &um, &ue);
+        o += (size_t)snprintf(l + o, sizeof l - o, " %d:%s@cpu%d", g_hint_tids[i], ts.comm[0] ? ts.comm : "?", ts.cpu);
+        if (um >= 0 && o < sizeof l) o += (size_t)snprintf(l + o, sizeof l - o, " uclamp.min %d/eff %d", um, ue);
+    }
+    if (o < sizeof l) o += (size_t)snprintf(l + o, sizeof l - o, "; policies MHz min/cur/max:");
+    for (int p = 0; p < 16 && o < sizeof l; p++) {
+        char path[96]; snprintf(path, sizeof path, "/sys/devices/system/cpu/cpufreq/policy%d/scaling_cur_freq", p);
+        int cur = read_khz(path); if (cur < 0) continue;
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpufreq/policy%d/scaling_min_freq", p); int mn = read_khz(path);
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpufreq/policy%d/scaling_max_freq", p); int mx = read_khz(path);
+        o += (size_t)snprintf(l + o, sizeof l - o, " p%d %d/%d/%d", p, mn > 0 ? mn / 1000 : -1, cur / 1000, mx > 0 ? mx / 1000 : -1);
+    }
+    LOG("%s", l);
+    // per window (lost / last rc are totals)
+    g_rep.ok = g_rep.ok2 = g_rep.fail2 = g_rep.fail = 0; g_rep.wsum = g_rep.wmax = 0; g_rep.wn = 0;
+    g_rep.up_work = g_rep.up_slow = g_rep.up_refused = g_rep.up_limited = g_rep.resets = g_rep.reset_refused = 0;
+}
+
+// ---------------- [game-state] GameManager.setGameState (Java GameStateHint polls this) ----------------
+// Returns -2 when off (DM_GAME_STATE=0: Java stops asking), else loading (bit 0) | GameState mode << 4 (0 unknown, 1 none, 2 gameplay
+// interruptible, 3 gameplay uninterruptible). Logs every change.
+enum { GS_UNKNOWN = 0, GS_NONE = 1, GS_PLAY = 2, GS_PLAY_UNINT = 3 };
+static int game_state_code(void) {
+    static int off = -1; if (off < 0) { const char *e = getenv("DM_GAME_STATE"); off = e && *e && !atoi(e); if (off) LOG("[perf] DM_GAME_STATE=0: no GameManager.setGameState"); }
+    if (off) return -2;
+    int ls = dm_loadscreen_up ? dm_loadscreen_up() : 0, sg = dm_android_scene_game ? dm_android_scene_game() : -1, lan = dm_ldn_lan_on ? dm_ldn_lan_on() : 0;
+    int mode = sg > 0 ? (lan ? GS_PLAY_UNINT : GS_PLAY) : ls ? GS_PLAY : sg == 0 ? GS_NONE : GS_UNKNOWN;
+    int code = (ls ? 1 : 0) | mode << 4;
+    static int last = -1;
+    if (code != last) {
+        static const char *const mn[] = {"unknown", "none", "gameplay interruptible", "gameplay uninterruptible"};
+        LOG("[perf] game state: loading %d, mode %s (load screen %s, scene %s, local play %s)", ls ? 1 : 0, mn[mode], ls ? "up" : "down",
+            sg < 0 ? "unknown" : sg ? "game" : "front end", lan ? "opened" : "no");
+        last = code;
+    }
+    return code;
+}
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_GameStateHint_nativeGameState(JNIEnv *env, jclass cls) { (void)env; (void)cls; return game_state_code(); }
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_GameStateHint_nativeGameStateNote(JNIEnv *env, jclass cls, jstring s) {
+    (void)cls; const char *c = s ? (*env)->GetStringUTFChars(env, s, NULL) : NULL;
+    LOG("[perf] game state (java): %s", c ? c : "?");
+    if (c) (*env)->ReleaseStringUTFChars(env, s, c);
 }
 
 // ---------------- thermal ----------------
@@ -209,24 +448,52 @@ void dm_aperf_present(ANativeWindow *w, float marker_vote) {
     double period = dm_present_period();
     int64_t p = period > 0 && period < 1 ? (int64_t)(period * 1e9) : 16666667, t = perf_now();
     hint_init(p);
-    static unsigned frames; static int64_t prev_t;
-    if (frames++ % 300 == 0) hint_threads_scan((int32_t)gettid());
+    p = adpf_target(p);   // [adpf] the hint target: min(period, budget) by default (DM_ADPF_TARGET_MS: fixed / auto / period)
+    static unsigned frames; static int64_t prev_t, next_scan, next_ls;
+    // [adpf] a lost session (EPIPE) is re-opened here, with the current members
+    if (!g_hint && g_hint_reopen_at && t >= g_hint_reopen_at && g_hint_mgr) {
+        g_hint_reopen_at = 0; hint_create(p); if (g_hint) g_rep.reopened++;
+        LOG("[perf] ADPF session re-open %s (%d threads, target %.2f ms)", g_hint ? "ok" : "refused", g_hint_n, p / 1e6);
+    }
+    if (frames++ == 0 || t >= next_scan) { next_scan = t + g_adpf_scan_ns; hint_threads_scan((int32_t)gettid()); }
+    // [adpf-boost] a loading screen that went away asks for a workload reset (polled every 250 ms: dm_loadscreen_up takes a lock)
+    if (dm_loadscreen_up && t >= next_ls) { next_ls = t + 250000000; int ls = dm_loadscreen_up() != 0; if (g_ls_up && !ls) atomic_store(&g_reset_pending, 2); g_ls_up = ls; }
     if (g_hint) {
         if (!g_hint_n) { g_hint_tids[0] = (int32_t)gettid(); g_hint_n = 1; }
         int64_t work = frame_cpu_work(), iv = prev_t ? t - prev_t : 0;
         if (work > iv && iv > 0) work = iv;
-        if (work > 0 && iv > 0 && iv < 250000000) {   // (a longer span: the game was held, by a load, the pause menu or the background)
-            double gms = xbg_recent_gpu_ms ? xbg_recent_gpu_ms() : -1;
+        // A hold (load screen, pause menu, background) is not a frame: longer than 1 s, or longer than 250 ms with under 25% CPU. Slow real
+        // frames are reported: they are exactly the frames the governor should see.
+        const int held = iv <= 0 || iv >= 1000000000 || (iv >= 250000000 && work < iv / 4);
+        if (work > 0 && !held) {
+            double gms = xbg_recent_gpu_ms ? xbg_recent_gpu_ms() : -1; int rc;
             if (g_wd && gms > 0) {
                 int64_t g = (int64_t)(gms * 1e6);
                 H.wd_start(g_wd, prev_t); H.wd_total(g_wd, work > g ? work : g); H.wd_cpu(g_wd, work); H.wd_gpu(g_wd, g);
-                if (H.report2(g_hint, g_wd)) H.report(g_hint, work);
-            } else H.report(g_hint, work);
-            static int64_t wsum, wmax; static unsigned wn; wsum += work; if (work > wmax) wmax = work;
-            if (++wn == 600) { LOG("[perf] ADPF: frame CPU work mean %.1f / max %.1f ms against %.1f ms, thermal %s", wsum / 600 / 1e6, wmax / 1e6, p / 1e6, th_name(atomic_load(&g_tstatus))); wsum = wmax = 0; wn = 0; }
+                rc = H.report2(g_hint, g_wd);
+                if (rc) { g_rep.fail2++; rc = H.report(g_hint, work); } else g_rep.ok2++;
+            } else rc = H.report(g_hint, work);
+            if (rc) { g_rep.fail++; g_rep.last_err = rc; static unsigned told; if (told++ < 4) LOG("[perf] ADPF report of %.2f ms failed: rc %d (%s)", work / 1e6, rc, strerror(rc));
+                if (rc == EPIPE) hint_lost(t); }
+            else g_rep.ok++;
+            g_rep.wsum += work; g_rep.wn++; if (work > g_rep.wmax) g_rep.wmax = work;
+            static int64_t wsum, wmax, asum; static unsigned wn, an; wsum += work; if (work > wmax) wmax = work;
+            if (g_adpf_auto && ++an == 60) {   // DM_ADPF_TARGET_MS=auto: the target follows the mean work of the last 60 reports
+                int64_t m = (asum + work) / 60; if (m < 1000000) m = 1000000; if (m > 500000000) m = 500000000;
+                if (!g_adpf_target_ns || m > g_adpf_target_ns + g_adpf_target_ns / 10 || m < g_adpf_target_ns - g_adpf_target_ns / 10) g_adpf_target_ns = m;
+                asum = 0; an = 0;
+            } else asum += work;
+            if (++wn == 600) { LOG("[perf] ADPF: frame CPU work mean %.1f / max %.1f ms against %.1f ms, thermal %s", wsum / 600 / 1e6, wmax / 1e6, (g_hint_target ? g_hint_target : p) / 1e6, th_name(atomic_load(&g_tstatus))); wsum = wmax = 0; wn = 0; }
         }
-        if (p != g_hint_target && H.update) { H.update(g_hint, p); g_hint_target = p; LOG("[perf] ADPF target %.2f ms", p / 1e6); }
+        if (g_hint) boost_tick(t, work, iv, held || work <= 0, g_hint_target ? g_hint_target : p);
+        // [adpf] target changes at most every 2 s (the pacer's tier moves every few seconds; each update is a binder call and a HAL re-tune)
+        if (g_hint && p != g_hint_target && H.update && t - g_hint_last_update >= 2000000000LL) {
+            int r = H.update(g_hint, p); g_hint_last_update = t;
+            if (!r) { g_hint_target = p; static unsigned told; if (told++ < 32) LOG("[perf] ADPF target %.2f ms", p / 1e6); }
+            else { LOG("[perf] ADPF target %.2f ms refused: rc %d", p / 1e6, r); if (r == EPIPE) hint_lost(t); }
+        }
     }
+    if (g_hint_mgr) adpf_diag(t, g_hint_target ? g_hint_target : p);
     prev_t = t;
     static ANativeWindow *voted_w; static float voted;
     float want = vote_for(marker_vote, period);
