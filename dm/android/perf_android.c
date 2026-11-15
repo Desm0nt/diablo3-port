@@ -19,6 +19,7 @@
 //   - setPreferPowerEfficiency(false) once (Android 15; DM_ADPF_POWER_EFF=1 asks for true, -1 does not call).
 //   - DM_ADPF_DIAG_MS (10000; 0 = off): "[perf] ADPF 10s:" line with the report and boost counters, work vs target, each member's name / last
 //     cpu / uclamp.min (when the kernel shows it) and every cpufreq policy's scaling_min / cur / max: whether the system acts on the hints.
+//     Then the GPU clock "GPU MHz cur C max M" (Adreno kgsl, MediaTek GED / gpufreq, Mali / devfreq; probed once: gpu_probe).
 // - [adpf-boost] Workload-increase hints (diablo3-port #23: after the launch boost runs out a Helio G99 drops the game to slow motion until
 //   the recents screen or a screen recording boosts it again). On the presenting thread, when DM_ADPF_BOOST_FRAMES (3) frames in a row did
 //   more CPU work than the target, or the frames of a whole second came on average > 15% slower than the target (fps under the game's pace),
@@ -322,6 +323,62 @@ static int uclamp_of(int tid, int *umin, int *eff) {
     return *umin >= 0 ? 0 : -1;
 }
 static int read_khz(const char *path) { char b[32]; int fd = open(path, O_RDONLY | O_CLOEXEC); if (fd < 0) return -1; ssize_t r = read(fd, b, sizeof b - 1); close(fd); if (r <= 0) return -1; b[r] = 0; return atoi(b); }
+// [adpf] GPU frequency for the "[perf] ADPF 10s" line (D3 issue #23: does the slow-down follow a GPU clock drop?). Probed once (first
+// diag line): the first readable source of the list below, logged as "[perf] GPU frequency: <path> ..." or "no readable GPU frequency"
+// with each tried path's error (SELinux denies most of them to apps on many phones); then " GPU MHz cur C max M" every line. Values
+// in Hz, kHz or MHz are told apart by size. MediaTek GED "current_freqency" is "<opp index> <kHz>" (the last number is taken), the
+// gpufreqv2 status "... Freq: <kHz> ..." (the first "Freq:"), the gpufreq v1 dump "g_cur_gpu_freq = <kHz>".
+enum { GF_NUM = 0, GF_LAST, GF_TAG_FREQ, GF_TAG_CUR };
+typedef struct { const char *cur, *max; int kind; } gpu_src_t;
+static const gpu_src_t k_gpu_src[] = {
+    {"/sys/class/kgsl/kgsl-3d0/gpuclk", "/sys/class/kgsl/kgsl-3d0/max_gpuclk", GF_NUM},                       // Adreno (Hz)
+    {"/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq", "/sys/class/kgsl/kgsl-3d0/devfreq/max_freq", GF_NUM},       // Adreno devfreq (Hz)
+    {"/sys/kernel/ged/hal/current_freqency", NULL, GF_LAST},                                                   // MediaTek GED "<opp> <kHz>"
+    {"/sys/kernel/ged/hal/gpu_cur_freq", NULL, GF_LAST},
+    {"/proc/gpufreqv2/gpufreq_status", NULL, GF_TAG_FREQ},                                                    // MediaTek gpufreq v2 (kHz)
+    {"/proc/gpufreq/gpufreq_var_dump", NULL, GF_TAG_CUR},                                                     // MediaTek gpufreq v1 (kHz)
+    {"/sys/class/misc/mali0/device/cur_freq", "/sys/class/misc/mali0/device/max_freq", GF_NUM},               // Mali generic
+};
+static char g_gpu_cur[160], g_gpu_max[160]; static int g_gpu_kind = -1;   // -1 not probed, -2 none readable
+static int gpu_read(const char *path, char *b, size_t n) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC); if (fd < 0) return -errno;
+    ssize_t r = read(fd, b, n - 1); int e = errno; close(fd); if (r <= 0) return r < 0 ? -e : -ENODATA; b[r] = 0; return 0;
+}
+static int gpu_mhz(long long v) { return v <= 0 ? -1 : v >= 10000000LL ? (int)(v / 1000000) : v >= 10000 ? (int)(v / 1000) : (int)v; }
+static int gpu_parse(const char *b, int kind) {
+    const char *p = b;
+    if (kind == GF_TAG_FREQ || kind == GF_TAG_CUR) { p = strstr(b, kind == GF_TAG_FREQ ? "Freq:" : "cur_gpu_freq"); if (!p) return -1; }
+    long long v = -1;
+    for (; *p && *p != '\n'; p++) if (*p >= '0' && *p <= '9') {
+        v = strtoll(p, (char **)&p, 10); if (kind != GF_LAST) break; if (!*p || *p == '\n') break;
+    }
+    return gpu_mhz(v);
+}
+static int gpu_now(const char *path, int kind) { char b[2048]; return path && *path && !gpu_read(path, b, sizeof b) ? gpu_parse(b, kind) : -1; }
+static void gpu_probe(void) {
+    char tried[900]; size_t o = 0; tried[0] = 0;
+    for (unsigned i = 0; i < sizeof k_gpu_src / sizeof *k_gpu_src; i++) {
+        char b[2048]; int r = gpu_read(k_gpu_src[i].cur, b, sizeof b), mhz = r ? -1 : gpu_parse(b, k_gpu_src[i].kind);
+        if (mhz > 0) { snprintf(g_gpu_cur, sizeof g_gpu_cur, "%s", k_gpu_src[i].cur); g_gpu_kind = k_gpu_src[i].kind;
+            g_gpu_max[0] = 0; if (k_gpu_src[i].max && gpu_now(k_gpu_src[i].max, GF_NUM) > 0) snprintf(g_gpu_max, sizeof g_gpu_max, "%s", k_gpu_src[i].max);
+            LOG("[perf] GPU frequency: %s (now %d MHz), max %s%s", g_gpu_cur, mhz, g_gpu_max[0] ? g_gpu_max : "not readable", tried[0] ? tried : ""); return; }
+        if (o < sizeof tried) o += (size_t)snprintf(tried + o, sizeof tried - o, "%s %s: %s", o ? ";" : "; tried", k_gpu_src[i].cur, r ? strerror(-r) : "no number");
+    }
+    DIR *d = opendir("/sys/class/devfreq");   // devfreq nodes of the GPU: *mali*, *gpu*, *g3d*, *kgsl*
+    if (d) { struct dirent *de;
+        while ((de = readdir(d))) {
+            if (de->d_name[0] == '.' || !(strstr(de->d_name, "mali") || strstr(de->d_name, "gpu") || strstr(de->d_name, "g3d") || strstr(de->d_name, "kgsl"))) continue;
+            char c[160], m[160]; snprintf(c, sizeof c, "/sys/class/devfreq/%s/cur_freq", de->d_name); snprintf(m, sizeof m, "/sys/class/devfreq/%s/max_freq", de->d_name);
+            char b[256]; int r = gpu_read(c, b, sizeof b), mhz = r ? -1 : gpu_parse(b, GF_NUM);
+            if (mhz > 0) { snprintf(g_gpu_cur, sizeof g_gpu_cur, "%s", c); g_gpu_kind = GF_NUM; g_gpu_max[0] = 0; if (gpu_now(m, GF_NUM) > 0) snprintf(g_gpu_max, sizeof g_gpu_max, "%s", m);
+                closedir(d); LOG("[perf] GPU frequency: %s (now %d MHz), max %s%s", g_gpu_cur, mhz, g_gpu_max[0] ? g_gpu_max : "not readable", tried); return; }
+            if (o < sizeof tried) o += (size_t)snprintf(tried + o, sizeof tried - o, "; %s: %s", c, r ? strerror(-r) : "no number");
+        }
+        closedir(d);
+    } else if (o < sizeof tried) o += (size_t)snprintf(tried + o, sizeof tried - o, "; /sys/class/devfreq: %s", strerror(errno));
+    g_gpu_kind = -2;
+    LOG("[perf] GPU frequency: no readable GPU frequency%s", tried);
+}
 static void adpf_diag(int64_t now, int64_t target) {
     static int64_t last; if (!g_adpf_diag_ns || (last && now - last < g_adpf_diag_ns)) return;
     if (!last) { last = now; return; }
@@ -343,6 +400,12 @@ static void adpf_diag(int64_t now, int64_t target) {
         snprintf(path, sizeof path, "/sys/devices/system/cpu/cpufreq/policy%d/scaling_min_freq", p); int mn = read_khz(path);
         snprintf(path, sizeof path, "/sys/devices/system/cpu/cpufreq/policy%d/scaling_max_freq", p); int mx = read_khz(path);
         o += (size_t)snprintf(l + o, sizeof l - o, " p%d %d/%d/%d", p, mn > 0 ? mn / 1000 : -1, cur / 1000, mx > 0 ? mx / 1000 : -1);
+    }
+    if (g_gpu_kind == -1) gpu_probe();
+    if (g_gpu_kind >= 0 && o < sizeof l) {
+        int cur = gpu_now(g_gpu_cur, g_gpu_kind), mx = g_gpu_max[0] ? gpu_now(g_gpu_max, GF_NUM) : -1;
+        o += (size_t)snprintf(l + o, sizeof l - o, "; GPU MHz cur %d", cur);
+        if (mx > 0 && o < sizeof l) o += (size_t)snprintf(l + o, sizeof l - o, " max %d", mx);
     }
     LOG("%s", l);
     // per window (lost / last rc are totals)
