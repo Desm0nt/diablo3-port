@@ -129,6 +129,9 @@ extern "C" int mtl_addr(uint64_t addr,uint64_t len,void **buf,uint64_t *off);   
 // the switch sim_gpu is 0 and this is the driver's answer unchanged.
 static uint32_t sim_gpu=0;
 static XbgGpuFamily gpu_family=XBG_GPU_OTHER,gpu_policy=XBG_GPU_OTHER;
+// [D3] the policy family for host code outside the engine (hle_d3_drs.c: DM_D3_DRS_ALIGN default): -1 until the device is made
+static std::atomic<int> gpu_policy_pub{-1};
+extern "C" int xbg_gpu_policy_family(void){return gpu_policy_pub.load(std::memory_order_acquire);}
 static bool ubo_dynamic_on=true,noout_mask_on=false;static uint64_t depth_bounds_dropped=0,noout_masked=0;   // DM_GFX_UBO_DYNAMIC (dyn_mode_for), DM_GFX_NOOUT_MASK (draw); per-family defaults   // the real family / the one the per-family defaults use (sim)
 static void dm_sim_format_properties(VkPhysicalDevice d,VkFormat f,VkFormatProperties *p){vkGetPhysicalDeviceFormatProperties(d,f,p);if(sim_gpu)xbg_sim_format_features(sim_gpu,f,p);}
 #define vkGetPhysicalDeviceFormatProperties dm_sim_format_properties
@@ -1802,6 +1805,10 @@ struct Image {
         need(aspects==VK_IMAGE_ASPECT_COLOR_BIT && aspect(v->format)==aspects && bw==1 && bh==1 && bytes==int(bpp),"Incompatible NVN texture view format class");
         return format(v->format);
     }
+    // [D3] mip / layer range of a sampled view as view() builds it (NVN count 0 = all from the base); ETR 5d73072 (feedback copy)
+    void view_range(const view_t *v,uint32_t &base,uint32_t &n,uint32_t &layer,uint32_t &ls) const {
+        base=v&&v->set_levels?v->base_level:0;n=v&&v->set_levels?v->nlevels:levels;layer=v&&v->set_layers?v->min_layer:0;ls=v&&v->set_layers?v->nlayers:layers;
+        if(v&&v->set_levels&&!n&&base<levels)n=levels-base;if(v&&v->set_layers&&!ls&&layer<layers)ls=layers-layer;}
     VkImageView view(const view_t *v,bool attachment=false,bool storage=false,VkFormat force=VK_FORMAT_UNDEFINED){
         uint32_t base=v&&v->set_levels?v->base_level:0,n=v&&v->set_levels?v->nlevels:levels;
         uint32_t layer=v&&v->set_layers?v->min_layer:0,ls=v&&v->set_layers?v->nlayers:layers;
@@ -4240,6 +4247,57 @@ int memo_simg_on=-1;uint64_t memo_simg_hits=0;   // [perf3] DM_GFX_MEMO_SIMG (de
 inline bool memo_simg(){if(memo_simg_on<0){const char *e=getenv("DM_GFX_MEMO_SIMG");memo_simg_on=e?atoi(e)!=0:1;   /* default on since 28.10: heavy scenes 27.5 -> 34.8 fps with GS_PASSTHRU */xbg_logf("NVN descriptor memo of storage-image sets DM_GFX_MEMO_SIMG=%d",memo_simg_on);}return memo_simg_on>0;}
 std::vector<DescMemo::Texel> desc_memo_texel;bool desc_memo_texel_fail=false;
 void descriptors_build(Descriptors &out,Commands &commands,bool compute);
+// [D3] Same-draw feedback (port of DOOM Eternal 5d73072 + c877c73, KB SYNC-06; D3 issue #23, KB MALI-16): a draw sampling a
+// subresource it also writes as a colour / depth attachment. D3's "PostFX SoftFocus ToneMap_con" (PS 703334b9) samples the 3D
+// colour target it renders into. Vulkan forbids the simultaneous attachment write and non-attachment read without the
+// feedback-loop extension (not enabled), and a barrier before the draw does not cover accesses inside it; Adreno happens to give
+// the Maxwell result, a tiler (Mali) may not. The read goes to a snapshot instead: the pass is ended, the read view's mips / layers
+// are copied into a scratch image of the same shape (one per shape and binding, reused, ordered by full barriers), and the
+// descriptor gets the scratch view; the attachment stays the original. The draw samples the contents as of its start, which is
+// what Maxwell gives for texels the draw itself does not write before reading.
+//   DM_GFX_FEEDBACK_COPY unset: on for every GPU family except Adreno (policy family, so DM_GFX_SIM_GPU=mali turns it on);
+//   =1 on everywhere, =0 off (the old shared binding). The first call comes from a draw's descriptors, after the device is made.
+// Log: "NVN feedback copy shader=<key> ..." once per shader / binding (then at powers of two), "NVN feedback scratch ..." per shape.
+int fb_copy_on=-1;uint64_t fb_snapshots=0,fb_scratch_bytes=0;
+bool fb_on(){if(fb_copy_on<0){const char *e=getenv("DM_GFX_FEEDBACK_COPY");fb_copy_on=e&&*e?atoi(e)!=0:gpu_policy!=XBG_GPU_ADRENO;
+        xbg_logf("NVN same-draw feedback copy DM_GFX_FEEDBACK_COPY=%d (%s; policy family %s): a draw sampling its own attachment %s",fb_copy_on,e&&*e?"set":"default: on except Adreno",
+                 xbg_gpu_family_name(gpu_policy),fb_copy_on?"samples a copy taken at the draw":"shares the attachment");}
+    return fb_copy_on>0;}
+// The written attachments of the draw whose descriptors are being built (fb_begin, once per descriptors() call; an image not
+// made yet is looked up again when asked), and whether it writes `im` in mips [base, base+n) x layers [layer, layer+ls)
+struct FbTarget{const tex_t *t;uint32_t level,layer;Image *im;};FbTarget fb_targets[9];unsigned fb_count=0;
+void fb_begin(bool compute){fb_count=0;if(compute || !fb_on())return;
+    auto add=[](const tex_t *t,const view_t *v){if(t && t->serial)fb_targets[fb_count++]={t,uint32_t(v&&v->set_levels?v->base_level:0),uint32_t(v&&v->set_layers?v->min_layer:0),find_image(t->serial)};};
+    for(int i=0;i<state.rt.n && i<8;i++)if(state.rt.color[i] && ((state.mask.mask>>(4*i))&15))add(state.rt.color[i],state.rt.has_cview[i]?&state.rt.cview[i]:nullptr);
+    if(state.rt.depth && ((state.ds.dt && state.ds.dw) || state.ds.st))add(state.rt.depth,state.rt.has_dview?&state.rt.dview:nullptr);}
+bool fb_written(const Image &im,uint32_t base,uint32_t n,uint32_t layer,uint32_t ls){
+    for(unsigned i=0;i<fb_count;i++){FbTarget &x=fb_targets[i];if(!x.im)x.im=find_image(x.t->serial);   // pointers compared only, never followed
+        if(x.im==&im && x.level>=base && x.level-base<n && x.layer>=layer && x.layer-layer<ls)return true;}
+    return false;
+}
+std::map<std::array<uint64_t,6>,Image*> fb_scratch;   // never freed: bounded by the shapes and bindings that read their own target
+Image &fb_snapshot(Image &im,const view_t *v,VkCommandBuffer cmd,const char *shader,uint32_t slot){
+    uint32_t base,n,layer,ls;im.view_range(v,base,n,layer,ls);need(base<im.levels && n && n<=im.levels-base && layer<im.layers && ls && ls<=im.layers-layer,"Invalid feedback view range");
+    const std::array<uint64_t,6> key{uint64_t(im.fmt)|uint64_t(uint32_t(im.source.d.format))<<32,uint64_t(im.width)|uint64_t(im.height)<<32,uint64_t(im.depth)|uint64_t(im.levels)<<32,
+        uint64_t(im.layers)|uint64_t(im.samples)<<32,uint64_t(im.create.flags)|uint64_t(uint32_t(im.source.d.target))<<32,uint64_t(im.usage)|uint64_t(slot)<<32};
+    Image *&sp=fb_scratch[key];
+    if(!sp){sp=new Image();Image &s=*sp;s.source=im.source;s.fmt=im.fmt;s.aspects=im.aspects;s.usage=im.usage;s.width=im.width;s.height=im.height;s.depth=im.depth;s.levels=im.levels;s.layers=im.layers;s.bpp=im.bpp;s.samples=im.samples;s.decoded=im.decoded;
+        s.subst=im.subst;s.pack=im.pack;s.pack_unorm=im.pack_unorm;s.pack_srgb=im.pack_srgb;   // [D3] the same view formats (render targets have neither; pack_bytes stays 0)
+        s.create=im.create;s.create.pNext=nullptr;s.mutable_format=(s.create.flags&VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)!=0;   // no format list: any compatible view
+        VK(vkCreateImage(cfg.device,&s.create,nullptr,&s.image));VkMemoryRequirements r;vkGetImageMemoryRequirements(cfg.device,s.image,&r);
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.allocationSize=r.size;ai.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);VK(vkAllocateMemory(cfg.device,&ai,nullptr,&s.memory));VK(vkBindImageMemory(cfg.device,s.image,s.memory,0));
+        s.mem_bytes=int64_t(r.size);image_bytes_live+=s.mem_bytes;fb_scratch_bytes+=r.size;
+        xbg_logf("NVN feedback scratch fmt=%d %ux%ux%u levels=%u layers=%u bytes=%llu (shapes %zu, total %llu MiB) for serial=%llu",int(s.fmt),s.width,s.height,s.depth,s.levels,s.layers,(unsigned long long)r.size,fb_scratch.size(),(unsigned long long)(fb_scratch_bytes>>20),(unsigned long long)im.source.serial);}
+    Image &s=*sp;s.source=im.source;
+    end_open_pass();if(im.layout!=VK_IMAGE_LAYOUT_GENERAL)im.transition(cmd,VK_IMAGE_LAYOUT_GENERAL);if(s.layout!=VK_IMAGE_LAYOUT_GENERAL)s.transition(cmd,VK_IMAGE_LAYOUT_GENERAL);
+    full_barrier(cmd);   // the attachment's writes so far, and earlier reads of the scratch, before the copy
+    std::vector<VkImageCopy> regions;for(uint32_t l=base;l<base+n;l++){VkImageCopy rc{};rc.srcSubresource={im.aspects,l,layer,ls};rc.dstSubresource=rc.srcSubresource;rc.extent={std::max(1u,im.width>>l),std::max(1u,im.height>>l),std::max(1u,im.depth>>l)};regions.push_back(rc);}
+    vkCmdCopyImage(cmd,im.image,VK_IMAGE_LAYOUT_GENERAL,s.image,VK_IMAGE_LAYOUT_GENERAL,uint32_t(regions.size()),regions.data());
+    full_barrier(cmd);s.gpu_written=true;
+    const uint64_t k=++fb_snapshots;{static std::set<std::pair<std::string,uint32_t>> seen;if((seen.size()<64 && seen.insert({shader,slot}).second) || !(k&(k-1)))
+        xbg_logf("NVN feedback copy shader=%s binding=%u stage=%u serial=%llu fmt=%d %ux%u mips=%u+%u layers=%u+%u (copies %llu)",shader,slot&0xffffu,slot>>16,(unsigned long long)im.source.serial,int(im.fmt),im.width,im.height,base,n,layer,ls,(unsigned long long)k);}
+    return s;
+}
 // Dynamic uniform buffers (Claude C151): Maleoon allows 8 per pipeline layout. Mode 1 = every uniform buffer dynamic (fits);
 // mode 2 = only the per-draw ones (guest uniform buffers, driver blocks) dynamic, the support block (depends on the viewport
 // only, kept in the static arena) and c1 constants (static) bound at fixed offsets; mode 0 = none dynamic.
@@ -4710,7 +4768,7 @@ void descriptors(Descriptors &out,Commands &commands,bool compute){struct InDesc
 #ifdef DM_GAME_ETERNAL
         if(!in_descriptors){desc_serial0=slot_serial;desc_abandoned=false;desc_chained.clear();}   // [ETERNAL] desc_abandon's reference point
 #endif
-        ++in_descriptors;}~InDesc(){--in_descriptors;}}in_desc_scope;storage_images_bound.clear();
+        ++in_descriptors;}~InDesc(){--in_descriptors;}}in_desc_scope;storage_images_bound.clear();fb_begin(compute);   // [D3] same-draw feedback targets (ETR c877c73)
 #ifdef DM_GAME_ETERNAL
     if(bindless::uses(compute))bindless::sync(commands.command,compute);   // before the memo: a memo hit binds set 1 too
     if(DESC_ABANDON(out))return;   // [ETERNAL] the sync's get_image ended the submission
@@ -4803,6 +4861,7 @@ void descriptors(Descriptors &out,Commands &commands,bool compute){struct InDesc
                 if(same && m.persistent)for(auto &st:m.stor){snap_site=3;Buffer b=snapshot(st.base,st.bytes,properties.limits.minStorageBufferOffsetAlignment);snap_site=0;
                     if(DESC_ABANDON(out))return;   // [ETERNAL] the snapshot's cpu_access submitted
                     if(b.buffer!=st.buffer || b.offset!=st.offset){same=false;break;}}
+                if(same && fb_on())for(auto &ti:m.images)if(!ti.storage && fb_written(*ti.second,0,~0u,0,~0u)){same=false;break;}   // [D3] feedback: rebuild (fb_snapshot)
                 if(same){
                 // 命中也走既有按 submit 节流的 CPU 内容复核，不强制重传。
                 // Hits retain get_image's bounded per-submit CPU checks, without forcing uploads.
@@ -4996,7 +5055,7 @@ void descriptors_build(Descriptors &out,Commands &commands,bool compute){CPU_SCO
                         auto it=img_cache.find(ikey);
                         auto live=it==img_cache.end()?images.end():images.find(it->second.tex->serial);
                         if(it!=img_cache.end() && it->second.record->revision==it->second.revision &&
-                            live!=images.end() && live->second.get()==it->second.im){Image *im=&get_image(it->second.tex,true);
+                            live!=images.end() && live->second.get()==it->second.im && !(fb_on() && !compute && fb_written(*it->second.im,0,~0u,0,~0u))){Image *im=&get_image(it->second.tex,true);
                             if(DESC_ABANDON(out))return;   // [ETERNAL] get_image submitted: img_cache was cleared (`it` dangles), commands.command is stale
                             {Image &sm=*im;if(b.type!=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && !sm.sampled_ever){sm.sampled_ever=true;}}prepare_read(*im,commands.command,b.type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);if(desc_memo_recording)desc_memo_images.push_back({it->second.tex,im,it->second.record,it->second.revision});
                             VkDescriptorImageInfo ii{};ii.imageView=it->second.view;ii.sampler=b.type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER?it->second.sampler:VK_NULL_HANDLE;ii.imageLayout=VK_IMAGE_LAYOUT_GENERAL;
@@ -5040,7 +5099,10 @@ void descriptors_build(Descriptors &out,Commands &commands,bool compute){CPU_SCO
                     VkBufferViewCreateInfo v{VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO};v.buffer=buf->buffer;v.offset=buf->offset;v.format=format(texture.d.format);v.range=texel_range(bytes,v.format);VkBufferView bv;{auto &cache=recording_slot().texel_views;std::array<uint64_t,4> key{uint64_t(v.buffer),v.offset,v.range,uint64_t(v.format)};auto f=cache.find(key);if(f!=cache.end())bv=f->second;else{VK(vkCreateBufferView(cfg.device,&v,nullptr,&bv));cache.emplace(key,bv);}}texel_views.push_back(bv);write.pTexelBufferView=&texel_views.back();}}
                 else{if(aspect(texture.d.format)!=VK_IMAGE_ASPECT_COLOR_BIT){auto prior=images.find(texture.serial);if(prior==images.end() || (!prior->second->uploaded && !prior->second->gpu_written))xbg_logf("NVN initial depth descriptor shader=%s stage=%u slot=%u id=%d serial=%llu format=%#x",shader.key.c_str(),ns,slot,id,(unsigned long long)texture.serial,texture.d.format);}
                     VkDescriptorImageInfo ii{};
-                    Image &im=get_image(&texture,true);if(DESC_ABANDON(out))return;   /* [ETERNAL] get_image submitted: commands.command is stale */provenance_log("BIND shader=%s stage=%u slot=%u id=%d handle=%llu descriptorMem=%p descriptorOff=%lld type=%u",shader.key.c_str(),ns,slot,id,(unsigned long long)handle,state.texture_pool.pool?state.texture_pool.pool->mem:nullptr,(long long)state.texture_pool.off,unsigned(b.type));provenance_image("BIND",&texture,im,registered.has_view?&registered.view:nullptr);{Image &sm=im;if(b.type!=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && !sm.sampled_ever){sm.sampled_ever=true;}}DESC_CALL(ImageTransition, prepare_read(im,commands.command,b.type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE));if(desc_memo_recording)desc_memo_images.push_back({&texture,&im,record,record->revision,uint8_t(b.type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)});ii.imageView=DESC_CALL(ImageView, im.view(registered.has_view?&registered.view:nullptr,false,b.type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,storage_int_view(b,im,registered.has_view?&registered.view:nullptr)));ii.imageLayout=VK_IMAGE_LAYOUT_GENERAL;
+                    Image &im=get_image(&texture,true);if(DESC_ABANDON(out))return;   /* [ETERNAL] get_image submitted: commands.command is stale */
+                    Image *fbs=nullptr;   // [D3] same-draw feedback: sample a snapshot (fb_snapshot), not the attachment being written
+                    if(!compute && (b.type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || b.type==VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) && fb_on()){uint32_t fb0,fbn,fl0,fln;im.view_range(registered.has_view?&registered.view:nullptr,fb0,fbn,fl0,fln);
+                        if(fb_written(im,fb0,fbn,fl0,fln)){fbs=&fb_snapshot(im,registered.has_view?&registered.view:nullptr,commands.command,shader.key.c_str(),b.binding|ns<<16);img_cacheable=false;desc_memo_texel_fail=true;}}provenance_log("BIND shader=%s stage=%u slot=%u id=%d handle=%llu descriptorMem=%p descriptorOff=%lld type=%u",shader.key.c_str(),ns,slot,id,(unsigned long long)handle,state.texture_pool.pool?state.texture_pool.pool->mem:nullptr,(long long)state.texture_pool.off,unsigned(b.type));provenance_image("BIND",&texture,im,registered.has_view?&registered.view:nullptr);{Image &sm=im;if(b.type!=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && !sm.sampled_ever){sm.sampled_ever=true;}}DESC_CALL(ImageTransition, prepare_read(im,commands.command,b.type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE));if(desc_memo_recording)desc_memo_images.push_back({&texture,&im,record,record->revision,uint8_t(b.type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)});ii.imageView=DESC_CALL(ImageView, (fbs?*fbs:im).view(registered.has_view?&registered.view:nullptr,false,b.type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,storage_int_view(b,im,registered.has_view?&registered.view:nullptr)));ii.imageLayout=VK_IMAGE_LAYOUT_GENERAL;
                     if(capture.active){char label[100];snprintf(label,sizeof(label),"st%u-bind%u-el%u-input",st,b.binding,element);out.capture_inputs.push_back({&im,registered.view,registered.has_view,label});capture_log("TEXTURE label=%s shader=%s nvnStage=%u slot=%u handle=%#llx id=%d serial=%llu cachedSerial=%llu image=%p view=%p viewFormat=%u sourceKind=%u",label,shader.key.c_str(),ns,slot,(unsigned long long)handle,id,(unsigned long long)texture.serial,(unsigned long long)im.source.serial,(void*)im.image,(void*)ii.imageView,unsigned(im.view_format(registered.has_view?&registered.view:nullptr)),b.source);}
                     if(b.type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || b.type==VK_DESCRIPTOR_TYPE_SAMPLER){DESC_SCOPE(SamplerBind);uint64_t sh=handle;if(b.sampler_slot!=UINT32_MAX && !from_ubo){need(b.sampler_slot<128,"Sampler slot out of range");sh=state.samp[ns][b.sampler_slot];}int sid=int(sh>>20);samp_par parameters{};if(sid==0){parameters.ws=parameters.wt=parameters.wr=7;parameters.aniso=1;parameters.cmp_func=1;}
                         else{auto sp=samplers.find(pool_key(&state.sampler_pool));auto &table=sp==samplers.end()?legacy_samplers:sp->second;auto sa=table.find(sid);
@@ -6983,6 +7045,7 @@ extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t b
      gpu_family=xbg_gpu_family(properties.vendorID,properties.deviceName);
      if(sim_gpu){xbg_sim_features(sim_gpu,&cfg.enabled_core);xbg_sim_subgroup(sim_gpu,&subgroup);xbg_sim_limits(sim_gpu,&properties.limits);}
      gpu_policy=xbg_effective_family(gpu_family,sim_gpu);
+     gpu_policy_pub.store(int(gpu_policy),std::memory_order_release);
      xbg_logf("NVN gpu family=%s (vendor=%#x \"%s\") policy family=%s DM_GFX_SIM_GPU=%s sim=%#x%s%s",xbg_gpu_family_name(gpu_family),properties.vendorID,properties.deviceName,
               xbg_gpu_family_name(gpu_policy),se&&*se?se:"-",sim_gpu,*unknown?" unknown token: ":"",unknown);
      // Per-family defaults (xbg_vendor_policy.h), each overridable by its DM_GFX_* switch ("0" / "1"); on Adreno they equal the old behaviour.
