@@ -137,8 +137,21 @@ static int collect(live_t *lv, int max, int xtid) {
     for (int i = 0; i < ng && n < max; i++) {
         if (tid[i] <= 0 || tid[i] == xtid) continue;   // DM_NVN_SYNC=1: the guest thread that presents keeps the translator's place
         lv[n].tid = tid[i]; lv[n].role = kind[i] == 1 ? R_MAIN : is_job(name[i]) ? R_JOBS : R_GUEST;
-        snprintf(lv[n].name, sizeof lv[n].name, "%.31s", kind[i] == 1 ? "main" : name[i]); n++;
+        snprintf(lv[n].name, sizeof lv[n].name, "%.31s", kind[i] == 1 ? "main" : name[i]);
+        // The guest threads' host names were the process name's tail ("rg.diablo3.port"): give each its guest name once (15 chars, the
+        // kernel's limit) so boot.log, top and perfetto tell them apart. Done here because the game names its threads after creating them.
+        { static int32_t named[256]; static int nnamed; int done = 0;
+          for (int k = 0; k < nnamed && !done; k++) done = named[k] == tid[i];
+          if (!done && (kind[i] == 1 || name[i][0]) && nnamed < 256) {
+              char p[64], nm[16]; snprintf(p, sizeof p, "/proc/self/task/%d/comm", tid[i]); snprintf(nm, sizeof nm, "%.15s", kind[i] == 1 ? "guest-main" : name[i]);
+              FILE *f = fopen(p, "w"); if (f) { fputs(nm, f); fclose(f); }
+              named[nnamed++] = tid[i];
+          } }
+        n++;
     }
+    { static int listed, last_ng; if (listed < 3 && ng >= last_ng + 5) { listed++; last_ng = ng; char l[1500]; size_t o = (size_t)snprintf(l, sizeof l, "[cpu] guest threads (%d):", ng);
+        for (int i = 0; i < ng && o + 40 < sizeof l; i++) o += (size_t)snprintf(l + o, sizeof l - o, " %d:%s%s", tid[i], kind[i] == 1 ? "MAIN" : name[i][0] ? name[i] : "-", is_job(name[i]) ? "(job)" : "");
+        LOG("%s", l); } }
     return n;
 }
 
