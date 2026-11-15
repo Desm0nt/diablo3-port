@@ -2,6 +2,9 @@
 // uvec4 / ivec4 input whose loads are bitcast back under their original ids; uses it does not understand leave the module alone.
 // With arguments: rewrite each given SPIR-V file (all inputs to uint, then all to sint) and write <file>.u.spv / <file>.s.spv for
 // spirv-val.
+// [vtxscaled] Conversion variants (want 3 / 4 = a *_SSCALED / *_USCALED attribute bound as *_SINT / *_UINT): inputs of 1..4 components
+// declared float, sint or uint become ivec / uvec inputs whose loads go through OpConvertSToF / OpConvertUToF. `--emit <dir>` writes
+// every synthetic module and its variants there for spirv-val --target-env vulkan1.1 (tests/vertex_scaled_test.py runs both).
 #include "../xbg_vertex_retype.h"
 #include <cstdint>
 #include <cstring>
@@ -66,6 +69,72 @@ void check_noop_and_refusal(){
     require(!xbg_vertex_retype(esc,loc,2,want,untouched,&why) && !why.empty(),"store into an input accepted");
     const uint32_t missing[1]={7},w1[1]={2};require(!xbg_vertex_retype(in,missing,1,w1,untouched),"missing location accepted");
 }
+// [vtxscaled] One input at location 3 with `count` components declared with scalar class `cls` (0 float, 1 sint, 2 uint), read whole
+// and (vectors) per component; the position is built from the first component, bitcast to float when the shader declared an integer
+// (what the translator emits for a register it reads as integer). A second float vec4 input at location 1 stays untouched.
+enum : uint32_t {sVoid=1,sFn=2,sFloat=3,sVec4=4,sInt=5,sUint=6,sBlock=7,sIn=8,sInPtr=9,sInCompPtr=10,sPtrOutBlock=11,sPtrOutV4=12,sPtrInV4=13,
+    sI0=20,sIn0=30,sIn1=31,sOut=32,sMain=40,sEntry=41,sLdAll=50,sAcc=51,sLdX=52,sF=53,sPos=54,sOutPtr=55,sLdB=56,sSum=57};
+Module scaled_vertex(uint32_t count,uint32_t cls){
+    Module m{0x07230203,0x00010300,0,100,0};
+    const uint32_t comp=cls==0?sFloat:cls==1?sInt:sUint,value=count>1?sIn:comp;
+    op(m,17,{1});op(m,14,{0,1});
+    op(m,15,{0,sMain,0x6e69616d,0,sIn0,sIn1,sOut});
+    op(m,71,{sIn0,30,3});op(m,71,{sIn1,30,1});
+    op(m,71,{sBlock,2});op(m,72,{sBlock,0,11,0});
+    op(m,19,{sVoid});op(m,33,{sFn,sVoid});op(m,22,{sFloat,32});op(m,23,{sVec4,sFloat,4});op(m,21,{sInt,32,1});op(m,21,{sUint,32,0});
+    if(count>1 && !(count==4 && cls==0))op(m,23,{sIn,comp,count});
+    const uint32_t in_type=count==4 && cls==0?uint32_t(sVec4):value;
+    op(m,30,{sBlock,sVec4});
+    op(m,32,{sInPtr,1,in_type});if(count>1)op(m,32,{sInCompPtr,1,comp});
+    op(m,32,{sPtrOutBlock,3,sBlock});op(m,32,{sPtrOutV4,3,sVec4});op(m,32,{sPtrInV4,1,sVec4});
+    op(m,43,{sInt,sI0,0});
+    op(m,59,{sInPtr,sIn0,1});op(m,59,{sPtrInV4,sIn1,1});op(m,59,{sPtrOutBlock,sOut,3});
+    op(m,54,{sVoid,sMain,0,sFn});op(m,248,{sEntry});
+    op(m,61,{in_type,sLdAll,sIn0});
+    uint32_t x=sLdAll;if(count>1){op(m,65,{sInCompPtr,sAcc,sIn0,sI0});op(m,61,{comp,sLdX,sAcc});x=sLdX;}
+    uint32_t f=x;if(cls){op(m,124,{sFloat,sF,x});f=sF;}
+    op(m,61,{sVec4,sLdB,sIn1});op(m,142,{sVec4,sSum,sLdB,f});   // OpVectorTimesScalar
+    op(m,65,{sPtrOutV4,sOutPtr,sOut,sI0});op(m,62,{sOutPtr,sSum});
+    op(m,253,{});op(m,56,{});
+    return m;
+}
+size_t count_ops(const Module &m,uint32_t opcode){size_t n=0;for(size_t p=5;p<m.size();p+=m[p]>>16)if((m[p]&65535)==opcode)++n;return n;}
+// kind 1 = sint -> float (SSCALED), 2 = uint -> float (USCALED)
+Module check_convert(uint32_t count,uint32_t cls,uint32_t kind){
+    const Module in=scaled_vertex(count,cls);Module out;std::string why;
+    const uint32_t loc[2]={3,1},want[2]={2+kind,255};const uint32_t conv=kind==1?111u:112u,other=kind==1?112u:111u;
+    require(xbg_vertex_retype(in,loc,2,want,out,&why),"conversion refused");
+    for(size_t p=5;p<out.size();){const size_t z=out[p]>>16;require(z && z<=out.size()-p,"bad instruction length in the output");p+=z;}
+    // the input is an integer scalar / vector of the format's signedness and the shader's component count
+    const size_t var=find(out,59,2,sIn0);require(var>0 && var<find(out,54,2,sMain),"input variable missing or inside the function");
+    const size_t pt=find(out,32,1,out[var+1]);require(pt>0 && out[pt+2]==1,"input pointer type missing");
+    uint32_t comp=out[pt+3];if(count>1){const size_t vt=find(out,23,1,comp);require(vt>0 && out[vt+3]==count,"component count changed");comp=out[vt+2];}
+    const size_t it=find(out,21,1,comp);require(it>0 && out[it+2]==32 && out[it+3]==(kind==1?1u:0u),"input is not a 32-bit integer of the format's signedness");
+    // every load converts: the whole value and (vectors) the component
+    const size_t loads=count>1?2:1;
+    require(count_ops(out,conv)==loads && count_ops(out,other)==0,"wrong number of conversions");
+    require(count_ops(out,124)==(cls?loads+1:0),"wrong number of bitcasts");   // + the shader's own bitcast of an integer input
+    const uint32_t in_type=count==4 && cls==0?uint32_t(sVec4):count>1?uint32_t(sIn):cls==0?uint32_t(sFloat):cls==1?uint32_t(sInt):uint32_t(sUint);
+    const uint32_t comp_type=cls==0?sFloat:cls==1?sInt:sUint;
+    auto scalar_of=[&](uint32_t type){const size_t v=find(out,23,1,type);return v?out[v+2]:type;};
+    for(uint32_t id:{uint32_t(sLdAll),uint32_t(count>1?sLdX:sLdAll)}){
+        const uint32_t type=id==sLdAll?in_type:comp_type;
+        size_t c=find(out,cls?124u:conv,2,id);require(c>0 && out[c+1]==type,"the load's id does not carry the converted value in the shader's type");
+        if(cls){c=find(out,conv,2,out[c+3]);require(c>0,"bitcast operand is not the conversion");}
+        require(find(out,22,1,scalar_of(out[c+1]))>0,"conversion result is not float");
+        const size_t ld=find(out,61,2,out[c+3]);require(ld>0,"conversion operand is not a load");
+        require(scalar_of(out[ld+1])==comp,"load is not a load of the integer input type");
+    }
+    require(find(out,59,2,sIn1)>0 && out[find(out,59,2,sIn1)+1]==sPtrInV4 && find(out,61,2,sLdB)>0,"untouched input changed");
+    return out;
+}
+void check_mixed(){   // one call: location 2 bitcast-retyped to uint, location 0 converted from uint -> both rules in one module
+    const Module in=vertex(false);Module out;std::string why;const uint32_t loc[2]={2,0},want[2]={2,4};
+    require(xbg_vertex_retype(in,loc,2,want,out,&why),"mixed rewrite refused");
+    require(count_ops(out,112)==2 && count_ops(out,124)==3,"mixed rewrite: one conversion (+ the shader's own OpConvertUToF) and two bitcasts (+ the shader's own) expected");
+    const size_t cb=find(out,112,2,ldB);require(cb>0 && out[cb+1]==tVec4,"position load not converted under its id");
+}
+void write_words(const std::string &path,const Module &m){std::ofstream(path,std::ios::binary).write(reinterpret_cast<const char*>(m.data()),m.size()*4);}
 std::vector<uint32_t> read_words(const char *path){
     std::ifstream f(path,std::ios::binary);std::vector<char> b((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
     std::vector<uint32_t> w(b.size()/4);memcpy(w.data(),b.data(),w.size()*4);return w;}
@@ -73,6 +142,16 @@ std::vector<uint32_t> read_words(const char *path){
 
 int main(int argc,char **argv){
     try{
+        if(argc>2 && !strcmp(argv[1],"--emit")){   // [vtxscaled] synthetic modules and their variants for spirv-val
+            const std::string dir=argv[2];int n=0;static const char *const cn[3]={"f","i","u"};
+            for(uint32_t count=1;count<=4;count++)for(uint32_t cls=0;cls<3;cls++){
+                const std::string base=dir+"/scaled_"+cn[cls]+std::to_string(count);
+                write_words(base+".spv",scaled_vertex(count,cls));++n;
+                write_words(base+".s2f.spv",check_convert(count,cls,1));++n;write_words(base+".u2f.spv",check_convert(count,cls,2));++n;}
+            {const Module in=vertex(false);Module out;const uint32_t loc[2]={2,0},want[2]={2,4};require(xbg_vertex_retype(in,loc,2,want,out),"mixed rewrite refused");
+             write_words(dir+"/mixed.spv",in);write_words(dir+"/mixed.out.spv",out);n+=2;}
+            std::cout<<"vertex_retype emit: "<<n<<" modules\n";return 0;
+        }
         if(argc>1){
             int ok=0,refused=0;
             for(int a=1;a<argc;a++){
@@ -91,6 +170,9 @@ int main(int argc,char **argv){
             std::cout<<"vertex_retype files: written="<<ok<<" refused="<<refused<<"\n";return 0;
         }
         check_rewrite(2);check_rewrite(1);check_noop_and_refusal();
+        for(uint32_t count=1;count<=4;count++)for(uint32_t cls=0;cls<3;cls++)for(uint32_t kind=1;kind<=2;kind++)check_convert(count,cls,kind);
+        check_mixed();
+        {uint32_t k=0;require(xbg_vertex_scaled_int(66,&k)==68 && k==2 && xbg_vertex_scaled_int(67,&k)==69 && k==1 && xbg_vertex_scaled_int(68,&k)==0 && k==0 && xbg_vertex_scaled_int(90)==0,"scaled -> integer format");}
         require(xbg_vertex_format_class(41)==2 && xbg_vertex_format_class(42)==1 && xbg_vertex_format_class(37)==0 && xbg_vertex_format_class(109)==0,"format class");
         std::cout<<"vertex_retype_test: ok\n";return 0;
     }catch(const std::exception &e){std::cerr<<"vertex_retype_test: "<<e.what()<<"\n";return 1;}

@@ -488,7 +488,18 @@ const VkFormatProperties &format_properties(VkFormat f){
 // [nonadreno] A vertex format without VERTEX_BUFFER support (formerly fatal "Vertex format unsupported"): a 3-component one widens to
 // 4 components (xbg_vertex_widen; the fourth channel reads the following bytes instead of 1), logged once per format. Never reached
 // where the format is supported, i.e. on Adreno, Mali and PowerVR for every format DOOM uses (vk 37/78/85/91/103/106).
-VkFormat vertex_format_fallback(VkFormat f,uint32_t loc,uint32_t offset,uint32_t stride){
+// [vtxscaled] A *_USCALED / *_SSCALED format without VERTEX_BUFFER support (AMD-style GPUs: stock Xclipse, RADV; DM_GFX_SIM_GPU=noscaled /
+// xclipse) is bound as the *_UINT / *_SINT format of the same layout (a 3-component one widened when that lacks support too) and *conv
+// tells draw() to use the vertex module that converts the integer to float (vtx_retype_module): 1 = sint -> float, 2 = uint -> float.
+// Exactly the scaled fetch, done in the shader; no CPU pass over the vertex data. Logged once per format.
+VkFormat vertex_format_fallback(VkFormat f,uint32_t loc,uint32_t offset,uint32_t stride,uint32_t *conv){
+    uint32_t kind=0;const int integer=xbg_vertex_scaled_int(int(f),&kind);
+    if(integer){
+        auto usable=[](VkFormat x){return x!=VK_FORMAT_UNDEFINED && (format_properties(x).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)!=0;};
+        VkFormat t=VkFormat(integer);const bool widened=!usable(t);if(widened)t=xbg_vertex_widen(t);
+        if(!usable(t))return f;   // no integer stand-in either: the caller stops ("Vertex format unsupported")
+        static std::set<int> told_scaled;if(told_scaled.insert(int(f)).second)xbg_logf("NVN vertex format %u (%s) has no VERTEX_BUFFER support: bound as %u, the vertex shader converts %s -> float (location=%u offset=%u stride=%u%s)",unsigned(f),kind==2?"USCALED":"SSCALED",unsigned(t),kind==2?"uint":"sint",loc,offset,stride,widened?"; widened, the 4th channel is not 1":"");
+        *conv=kind;return t;}
     const VkFormat w=xbg_vertex_widen(f);if(w==VK_FORMAT_UNDEFINED || !(format_properties(w).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT))return f;
     static std::set<int> told;if(told.insert(int(f)).second)xbg_logf("NVN vertex format %u has no VERTEX_BUFFER support: read as %u (location=%u offset=%u stride=%u; the 4th channel is not 1)",unsigned(f),unsigned(w),loc,offset,stride);
     return w;}
@@ -1711,6 +1722,16 @@ VkFormat format(int f) {
     if(f>=0x41 && f<=0x50){static const VkFormat bc[16]={VK_FORMAT_BC1_RGB_UNORM_BLOCK,VK_FORMAT_BC1_RGBA_UNORM_BLOCK,VK_FORMAT_BC2_UNORM_BLOCK,VK_FORMAT_BC3_UNORM_BLOCK,
         VK_FORMAT_BC1_RGB_SRGB_BLOCK,VK_FORMAT_BC1_RGBA_SRGB_BLOCK,VK_FORMAT_BC2_SRGB_BLOCK,VK_FORMAT_BC3_SRGB_BLOCK,VK_FORMAT_BC4_UNORM_BLOCK,VK_FORMAT_BC4_SNORM_BLOCK,
         VK_FORMAT_BC5_UNORM_BLOCK,VK_FORMAT_BC5_SNORM_BLOCK,VK_FORMAT_BC7_UNORM_BLOCK,VK_FORMAT_BC7_SRGB_BLOCK,VK_FORMAT_BC6H_SFLOAT_BLOCK,VK_FORMAT_BC6H_UFLOAT_BLOCK};return bc[f-0x41];}
+    // [vtxscaled] NVN vertex formats 0x51-0x68 (*_UI2F / *_I2F: integers fetched as unnormalized floats) = Vulkan *_USCALED / *_SSCALED, and
+    // RGB10A2 SN / I / UI2F / I2F (0x69-0x6c). The 32-bit *_UI2F / *_I2F ones have no Vulkan format (still unsupported). A device without
+    // VERTEX_BUFFER on a scaled format (AMD-style: stock Xclipse, RADV) reads it as integer + shader conversion (vertex_format_fallback).
+    if(f>=0x51 && f<=0x6c){static const VkFormat scaled[28]={
+        VK_FORMAT_R8_USCALED,VK_FORMAT_R8_SSCALED,VK_FORMAT_R16_USCALED,VK_FORMAT_R16_SSCALED,VK_FORMAT_UNDEFINED,VK_FORMAT_UNDEFINED,
+        VK_FORMAT_R8G8_USCALED,VK_FORMAT_R8G8_SSCALED,VK_FORMAT_R16G16_USCALED,VK_FORMAT_R16G16_SSCALED,VK_FORMAT_UNDEFINED,VK_FORMAT_UNDEFINED,
+        VK_FORMAT_R8G8B8_USCALED,VK_FORMAT_R8G8B8_SSCALED,VK_FORMAT_R16G16B16_USCALED,VK_FORMAT_R16G16B16_SSCALED,VK_FORMAT_UNDEFINED,VK_FORMAT_UNDEFINED,
+        VK_FORMAT_R8G8B8A8_USCALED,VK_FORMAT_R8G8B8A8_SSCALED,VK_FORMAT_R16G16B16A16_USCALED,VK_FORMAT_R16G16B16A16_SSCALED,VK_FORMAT_UNDEFINED,VK_FORMAT_UNDEFINED,
+        VK_FORMAT_A2B10G10R10_SNORM_PACK32,VK_FORMAT_A2B10G10R10_SINT_PACK32,VK_FORMAT_A2B10G10R10_USCALED_PACK32,VK_FORMAT_A2B10G10R10_SSCALED_PACK32};
+        if(scaled[f-0x51]!=VK_FORMAT_UNDEFINED)return scaled[f-0x51];}
     switch(f){case 0x37:case 0x38:return VK_FORMAT_R8G8B8A8_SRGB;case 0x3d:return VK_FORMAT_A2B10G10R10_UNORM_PACK32;case 0x3e:return VK_FORMAT_A2B10G10R10_UINT_PACK32;case 0x3f:return VK_FORMAT_B10G11R11_UFLOAT_PACK32;case 0x40:return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;case 0x6d:return VK_FORMAT_R8G8B8A8_UNORM;case 0x9a:return VK_FORMAT_B8G8R8A8_UNORM;default:xbg_fatalf("Unsupported NVN format %#x",f);}
 }
 VkImageAspectFlags aspect(int f){if(f==0x31)return VK_IMAGE_ASPECT_STENCIL_BIT;if(f>=0x32 && f<=0x34)return VK_IMAGE_ASPECT_DEPTH_BIT;if(f==0x35 || f==0x36)return VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT;return VK_IMAGE_ASPECT_COLOR_BIT;}
@@ -1899,6 +1920,16 @@ uint64_t read_break_why[8],depth_feedback_reads=0;int depth_feedback_on=-1;
 // input over UINT data, ...) is declared with the format's type and bitcast back. Default on off Adreno: Mali converts the value
 // to the declared type (0.2.3-debug, Mali-G57: black level), Adreno passes the bits, so it stays as it was there.
 int vtx_retype_on=-1;uint64_t vtx_retype_variants=0,vtx_retype_refused=0;
+// [vtxscaled] true when the device (or DM_GFX_SIM_GPU=noscaled / xclipse) has no VERTEX_BUFFER on some *_USCALED / *_SSCALED format: a
+// draw may then need the converting vertex module (vtx_retype_module), so the shader load keeps the vertex SPIR-V (Shader::words) also
+// while DM_GFX_VTX_RETYPE is off. This tree has no bundle reload (DOS2's warm::bundle_words). Checked once, logged when true.
+int vtx_scaled_missing_on=-1;
+bool vtx_scaled_missing(){
+    if(vtx_scaled_missing_on<0){unsigned n=0;int first=-1;
+        for(int v=1;v<256;v++)if(xbg_vk_format_scaled(VkFormat(v)) && !(format_properties(VkFormat(v)).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)){++n;if(first<0)first=v;}
+        vtx_scaled_missing_on=n?1:0;
+        if(n)xbg_logf("NVN %u scaled vertex formats have no VERTEX_BUFFER support (first: %d): vertex shader SPIR-V is kept for the integer + convert fallback",n,first);}
+    return vtx_scaled_missing_on!=0;}
 bool vtx_retype_mode(){if(vtx_retype_on<0){const char *e=getenv("DM_GFX_VTX_RETYPE");vtx_retype_on=e && *e?atoi(e)!=0:properties.vendorID!=0x5143;xbg_logf("NVN DM_GFX_VTX_RETYPE=%d%s",vtx_retype_on,e && *e?"":properties.vendorID==0x5143?" (default off on Adreno)":" (default on off Adreno: vertex inputs take their attribute format's type)");}return vtx_retype_on!=0;}
 int depth_feedback_mode(){if(depth_feedback_on<0){const char *e=getenv("DM_GFX_DEPTH_FEEDBACK");depth_feedback_on=e && *e?atoi(e):properties.vendorID==0x5143?2:0;if(depth_feedback_on!=2)xbg_logf("NVN DM_GFX_DEPTH_FEEDBACK=%d%s",depth_feedback_on,e && *e?"":" (default off Adreno: open-pass depth reads end the pass)");}return depth_feedback_on;}
 bool depth_feedback(){return depth_feedback_mode()>0;}
@@ -2934,7 +2965,7 @@ struct Shader {std::string key;uint32_t stage;VkShaderModule module{};std::vecto
     uint32_t pool_mask=0; // [ETERNAL] set-1 bindless pool arrays it reads (bindless::TEX2D/TEX3D/SAMP bits); stripped from bindings
     std::shared_ptr<const XbgPoolIdxProgram> pool_index; // [ETERNAL] how its pool indices are computed (bindless::analyze; null: none / not analysable)
     std::vector<uint32_t> words; // [nonadreno] final SPIR-V of a vertex shader, kept while DM_GFX_VTX_RETYPE is on (vtx_retype_module)
-    std::map<uint32_t,VkShaderModule> retyped; // [nonadreno] retype code (2 bits per location) -> module; the base module when refused
+    std::map<uint64_t,VkShaderModule> retyped; // [nonadreno] retype code (low 32 bits: 2 bits per location; [vtxscaled] high 32 bits: conversion, 2 bits per location) -> module; the base module when refused
     ~Shader(){for(auto &r:retyped)if(r.second && r.second!=module)vkDestroyShaderModule(cfg.device,r.second,nullptr);if(module)vkDestroyShaderModule(cfg.device,module,nullptr);}};
 // Storage buffers written by a shader. Pointers rooted at a storage-buffer
 // variable that reach OpStore/OpCopyMemory/atomics, function calls, phis or
@@ -3422,7 +3453,7 @@ Shader *load_shader(const void *control,const void *code=nullptr){
     p->raster=xbg_spirv_raster_facts(words.data(),words.size(),h.stage);
     {bool unknown=false;p->storage_writes=spirv_storage_writes(words,unknown);if(unknown){for(auto &b:p->bindings)if(b.type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)p->storage_writes.insert(b.binding);}}
     if(h.stage==0){p->input_classes.resize(p->inputs.size());need(xbg_vertex_input_classes(words.data(),words.size(),p->inputs.data(),p->inputs.size(),p->input_classes.data())==0,"Unsupported vertex input scalar interface");
-        if(vtx_retype_mode())p->words=words;}
+        if(vtx_retype_mode() || vtx_scaled_missing())p->words=words;}   // [vtxscaled] also for the integer + convert fallback
     load_t3=timing_clock();
     if(p->unusable.empty()){VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};ci.codeSize=words.size()*4;ci.pCode=words.data();VK(vkCreateShaderModule(cfg.device,&ci,nullptr,&p->module));warm::register_module(p->module,key);}Shader *out=p.get();shaders.emplace(key,std::move(p));++stats.shader_loads;++hud::shaders;const uint64_t load_t4=timing_clock();hud::shader_ns+=load_t4-load_t0;
     xbg_logf("NVN shader %s stage=%u loaded words=%zu ms read=%.2f rewrite=%.2f analyse=%.2f module=%.2f reused=%d",key.c_str(),h.stage,words.size(),(load_t1-load_t0)/1e6,(load_t2-load_t1)/1e6,(load_t3-load_t2)/1e6,(load_t4-load_t3)/1e6,int(have_reused));return out;
@@ -5717,21 +5748,31 @@ Descriptors &descriptors_stable(Commands &c,bool compute){
 }
 // [nonadreno] DM_GFX_VTX_RETYPE: the vertex module for one retype code (2 bits per location: 0 keep, 1 float, 2 sint, 3 uint),
 // built once per shader and code; a refused rewrite keeps the base module (logged).
-VkShaderModule vtx_retype_module(Shader &s,uint32_t code){
-    auto it=s.retyped.find(code);if(it!=s.retyped.end())return it->second;
-    static const char *const names[3]={"float","sint","uint"};
+// [vtxscaled] The high 32 bits of the code are the conversion mask (2 bits per location: 1 = the attribute is a *_SSCALED format bound
+// as *_SINT, 2 = *_USCALED bound as *_UINT; vertex_format_fallback): that input is declared ivec / uvec and converted to float after
+// each load. Not a policy: it is taken on every vendor whenever the fallback was, DM_GFX_VTX_RETYPE on or off (the shader's words
+// are then kept at load because vtx_scaled_missing() is true). Module / warm-up / pipeguard key: "<shader>#vi<code>" as before when
+// no input converts, "<shader>#vi<code>c<conversion mask>" otherwise.
+VkShaderModule vtx_retype_module(Shader &s,uint64_t code64){
+    auto it=s.retyped.find(code64);if(it!=s.retyped.end())return it->second;
+    const uint32_t code=uint32_t(code64),conv=uint32_t(code64>>32);
+    static const char *const names[5]={"float","sint","uint","sint, converted to float","uint, converted to float"};
     std::vector<uint32_t> loc,want;std::string desc;
-    for(uint32_t l=0;l<16;l++)if((code>>(2*l))&3){loc.push_back(l);want.push_back(((code>>(2*l))&3)-1);
+    for(uint32_t l=0;l<16;l++){const uint32_t cv=(conv>>(2*l))&3,rc=(code>>(2*l))&3;if(!cv && !rc)continue;
+        loc.push_back(l);want.push_back(cv==1?XBG_VTX_WANT_SINT_TO_FLOAT:cv?XBG_VTX_WANT_UINT_TO_FLOAT:rc-1);
         uint32_t had=3;for(size_t i=0;i<s.inputs.size();i++)if(s.inputs[i]==l)had=s.input_classes[i];
-        char b[48];snprintf(b,sizeof b,"%sloc%u %s->%s",desc.empty()?"":" ",l,had<3?names[had]:"?",names[want.back()]);desc+=b;}
+        char b[64];snprintf(b,sizeof b,"%sloc%u %s->%s",desc.empty()?"":" ",l,had<3?names[had]:"?",names[want.back()]);desc+=b;}
     std::vector<uint32_t> out;std::string why;VkShaderModule m=s.module;
-    if(xbg_vertex_retype(s.words,loc.data(),loc.size(),want.data(),out,&why)){
+    char tag[32];if(conv)snprintf(tag,sizeof tag,"#vi%08xc%08x",code,conv);else snprintf(tag,sizeof tag,"#vi%08x",code);
+    // [vtxscaled] no bundle reload in this tree: Shader::words is kept while DM_GFX_VTX_RETYPE is on or the device lacks a scaled format
+    if(s.words.empty())why="the shader's SPIR-V was not kept (vtx_scaled_missing() said every scaled format has VERTEX_BUFFER)";
+    else if(xbg_vertex_retype(s.words,loc.data(),loc.size(),want.data(),out,&why)){
         VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};ci.codeSize=out.size()*4;ci.pCode=out.data();VkShaderModule v=VK_NULL_HANDLE;
-        if(vkCreateShaderModule(cfg.device,&ci,nullptr,&v)==VK_SUCCESS){m=v;char tag[16];snprintf(tag,sizeof tag,"#vi%08x",code);warm::register_module(m,s.key+tag);
-            if(++vtx_retype_variants<=32)xbg_logf("NVN vertex input retype %s code=%#x: %s",s.key.c_str(),code,desc.c_str());}
+        if(vkCreateShaderModule(cfg.device,&ci,nullptr,&v)==VK_SUCCESS){m=v;warm::register_module(m,s.key+tag);
+            if(++vtx_retype_variants<=32 || conv)xbg_logf("NVN vertex input retype %s code=%s: %s",s.key.c_str(),tag+3,desc.c_str());}
         else why="vkCreateShaderModule failed";}
-    if(m==s.module){++vtx_retype_refused;xbg_logf("NVN vertex input retype %s code=%#x (%s) refused: %s; the base module is kept",s.key.c_str(),code,desc.c_str(),why.c_str());}
-    s.retyped.emplace(code,m);return m;}
+    if(m==s.module){++vtx_retype_refused;xbg_logf("NVN vertex input retype %s code=%s (%s) refused: %s; the base module is kept%s",s.key.c_str(),tag+3,desc.c_str(),why.c_str(),conv?" (WRONG PICTURE: an integer attribute feeds a float input)":"");}
+    s.retyped.emplace(code64,m);return m;}
 bool skip_unusable(const char *what){   // [nonadreno] (from the DOOM 2016 port) a bound module lacks a device capability (Shader::unusable): skip, logged per module
     for(unsigned st=0;st<6;st++){Shader *sh=state.shader[st];if(what[0]=='d' && st==5)continue;if(what[0]=='c' && st!=5)continue;
         if(sh && !sh->unusable.empty()){static std::unordered_set<std::string> told;if(told.insert(sh->key).second)xbg_logf("NVN %s skipped: shader %s stage %u needs %s",what,sh->key.c_str(),st,sh->unusable.c_str());return true;}}
@@ -5812,7 +5853,7 @@ void draw(int prim,int first,int count,const p_draw_idx *indexed,uint32_t instan
     {VkCommandBuffer now=recording_slot().cmd;if(now!=c.command){static unsigned n=0;if(n++<8)xbg_logf("NVN draw: descriptors() ended the submission (cb %p -> %p); recording into the new one",(void*)c.command,(void*)now);c.command=now;}}
 #endif
 Pass p;create_pass(p,c);
-    static std::vector<VkVertexInputAttributeDescription> attributes;attributes.clear();VkVertexInputBindingDescription binding_slots[16];uint32_t binding_used=0;
+    static std::vector<VkVertexInputAttributeDescription> attributes;attributes.clear();VkVertexInputBindingDescription binding_slots[16];uint32_t binding_used=0,vtx_conv=0;
     int zero_binding=-1;
     for(size_t input=0;input<state.shader[0]->inputs.size();input++){
         uint32_t loc=state.shader[0]->inputs[input];need(loc<16,"Vertex input location out of bounds");va_st a;memcpy(&a,&state.attrib[loc],4);
@@ -5826,13 +5867,15 @@ Pass p;create_pass(p,c);
             if(capture.active)capture_log("ATTRIBUTE location=%u constant=zero class=%u binding=%d",loc,cls,zero_binding);
             continue;
         }
-        need(a.stream<16,"Vertex stream out of bounds");VkFormat fmt=format(a.fmt);if(!(format_properties(fmt).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT))fmt=vertex_format_fallback(fmt,loc,a.offset,state.stream[a.stream].stride);const VkFormatProperties &fp=format_properties(fmt);need(fp.bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT,"Vertex format unsupported");need(state.stream[a.stream].divisor<=1,"Instance divisor >1 unsupported");attributes.push_back({loc,a.stream,fmt,a.offset});binding_slots[a.stream]={a.stream,state.stream[a.stream].stride,state.stream[a.stream].divisor?VK_VERTEX_INPUT_RATE_INSTANCE:VK_VERTEX_INPUT_RATE_VERTEX};binding_used|=1u<<a.stream;if(capture.active)capture_log("ATTRIBUTE location=%u stream=%u format=%u vk=%u offset=%u stride=%u divisor=%u",loc,a.stream,a.fmt,unsigned(fmt),a.offset,state.stream[a.stream].stride,state.stream[a.stream].divisor);
+        need(a.stream<16,"Vertex stream out of bounds");VkFormat fmt=format(a.fmt);if(!(format_properties(fmt).bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)){uint32_t scaled_kind=0;fmt=vertex_format_fallback(fmt,loc,a.offset,state.stream[a.stream].stride,&scaled_kind);vtx_conv|=scaled_kind<<(2*loc);}const VkFormatProperties &fp=format_properties(fmt);need(fp.bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT,"Vertex format unsupported");need(state.stream[a.stream].divisor<=1,"Instance divisor >1 unsupported");attributes.push_back({loc,a.stream,fmt,a.offset});binding_slots[a.stream]={a.stream,state.stream[a.stream].stride,state.stream[a.stream].divisor?VK_VERTEX_INPUT_RATE_INSTANCE:VK_VERTEX_INPUT_RATE_VERTEX};binding_used|=1u<<a.stream;if(capture.active)capture_log("ATTRIBUTE location=%u stream=%u format=%u vk=%u offset=%u stride=%u divisor=%u",loc,a.stream,a.fmt,unsigned(fmt),a.offset,state.stream[a.stream].stride,state.stream[a.stream].divisor);
     }
     // [nonadreno] DM_GFX_VTX_RETYPE: a vertex input whose class differs from its attribute format's gets the retyped module
-    if(vtx_retype_mode() && !state.shader[0]->words.empty()){const Shader &vs=*state.shader[0];uint32_t code=0;
-        for(auto &a:attributes)for(size_t i=0;i<vs.inputs.size();i++)if(vs.inputs[i]==a.location){
+    // [vtxscaled] vtx_conv (scaled formats bound as integer, vertex_format_fallback): those inputs convert instead, on every vendor
+    if(vtx_conv || (vtx_retype_mode() && !state.shader[0]->words.empty())){const Shader &vs=*state.shader[0];uint32_t code=0;
+        if(vtx_retype_mode() && !vs.words.empty())for(auto &a:attributes)for(size_t i=0;i<vs.inputs.size();i++)if(vs.inputs[i]==a.location){
+            if((vtx_conv>>(2*a.location))&3)break;   // converted, not bitcast
             const uint32_t want=xbg_vertex_format_class(int(a.format));if(want!=vs.input_classes[i])code|=(want+1)<<(2*a.location);break;}
-        if(code){VkShaderModule m=vtx_retype_module(*state.shader[0],code);for(auto &st:stages)if(st.stage==VK_SHADER_STAGE_VERTEX_BIT)st.module=m;}}
+        if(code || vtx_conv){VkShaderModule m=vtx_retype_module(*state.shader[0],code|(uint64_t(vtx_conv)<<32));for(auto &st:stages)if(st.stage==VK_SHADER_STAGE_VERTEX_BIT)st.module=m;}}
     static std::vector<VkVertexInputBindingDescription> bindings;bindings.clear();for(uint32_t i=0;i<16;i++)if(binding_used&(1u<<i))bindings.push_back(binding_slots[i]);   // ascending binding order, as the former std::map
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};vi.vertexBindingDescriptionCount=bindings.size();vi.pVertexBindingDescriptions=bindings.data();vi.vertexAttributeDescriptionCount=attributes.size();vi.pVertexAttributeDescriptions=attributes.data();
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};ia.topology=topology(prim);

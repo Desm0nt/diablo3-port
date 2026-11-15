@@ -2,6 +2,7 @@
 // directly; integer / struct work only, no device. Build (WSL or any host with the Vulkan headers, e.g. the NDK sysroot):
 //   g++ -std=c++17 -Wall -idirafter <ndk>/toolchains/llvm/prebuilt/<host>/sysroot/usr/include -o vendor_policy_test vendor_policy_test.cpp
 #include "../xbg_vendor_policy.h"
+#include "../xbg_vertex_retype.h"
 #include <stdio.h>
 
 static int failures;
@@ -108,6 +109,29 @@ int main(){
     p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_XCLIPSE,VK_FORMAT_R32G32B32_SFLOAT,&p);CHECK(p.bufferFeatures==all);
     p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_MALI,VK_FORMAT_R16G16B16_SNORM,&p);CHECK(p.bufferFeatures==all);
     CHECK(xbg_sim_parse("novertex3")==XBG_SIM_NOVERTEX3);
+
+    // [vtxscaled] scaled vertex formats: the simulation takes VERTEX_BUFFER off every *_USCALED / *_SSCALED format and nothing else;
+    // the integer stand-in (xbg_vertex_scaled_int) is the *_UINT / *_SINT format of the same layout.
+    CHECK(xbg_sim_parse("noscaled")==XBG_SIM_NOSCALED && (XBG_SIM_PROFILE_XCLIPSE&XBG_SIM_NOSCALED) && !(XBG_SIM_PROFILE_MALI&XBG_SIM_NOSCALED) && !(XBG_SIM_PROFILE_POWERVR&XBG_SIM_NOSCALED));
+    {static const struct {VkFormat scaled,integer;uint32_t kind;} pairs[]={
+        {VK_FORMAT_R8_USCALED,VK_FORMAT_R8_UINT,2},{VK_FORMAT_R8_SSCALED,VK_FORMAT_R8_SINT,1},{VK_FORMAT_R8G8_USCALED,VK_FORMAT_R8G8_UINT,2},{VK_FORMAT_R8G8_SSCALED,VK_FORMAT_R8G8_SINT,1},
+        {VK_FORMAT_R8G8B8_USCALED,VK_FORMAT_R8G8B8_UINT,2},{VK_FORMAT_R8G8B8_SSCALED,VK_FORMAT_R8G8B8_SINT,1},{VK_FORMAT_B8G8R8_USCALED,VK_FORMAT_B8G8R8_UINT,2},{VK_FORMAT_B8G8R8_SSCALED,VK_FORMAT_B8G8R8_SINT,1},
+        {VK_FORMAT_R8G8B8A8_USCALED,VK_FORMAT_R8G8B8A8_UINT,2},{VK_FORMAT_R8G8B8A8_SSCALED,VK_FORMAT_R8G8B8A8_SINT,1},{VK_FORMAT_B8G8R8A8_USCALED,VK_FORMAT_B8G8R8A8_UINT,2},{VK_FORMAT_B8G8R8A8_SSCALED,VK_FORMAT_B8G8R8A8_SINT,1},
+        {VK_FORMAT_A8B8G8R8_USCALED_PACK32,VK_FORMAT_A8B8G8R8_UINT_PACK32,2},{VK_FORMAT_A8B8G8R8_SSCALED_PACK32,VK_FORMAT_A8B8G8R8_SINT_PACK32,1},
+        {VK_FORMAT_A2R10G10B10_USCALED_PACK32,VK_FORMAT_A2R10G10B10_UINT_PACK32,2},{VK_FORMAT_A2R10G10B10_SSCALED_PACK32,VK_FORMAT_A2R10G10B10_SINT_PACK32,1},
+        {VK_FORMAT_A2B10G10R10_USCALED_PACK32,VK_FORMAT_A2B10G10R10_UINT_PACK32,2},{VK_FORMAT_A2B10G10R10_SSCALED_PACK32,VK_FORMAT_A2B10G10R10_SINT_PACK32,1},
+        {VK_FORMAT_R16_USCALED,VK_FORMAT_R16_UINT,2},{VK_FORMAT_R16_SSCALED,VK_FORMAT_R16_SINT,1},{VK_FORMAT_R16G16_USCALED,VK_FORMAT_R16G16_UINT,2},{VK_FORMAT_R16G16_SSCALED,VK_FORMAT_R16G16_SINT,1},
+        {VK_FORMAT_R16G16B16_USCALED,VK_FORMAT_R16G16B16_UINT,2},{VK_FORMAT_R16G16B16_SSCALED,VK_FORMAT_R16G16B16_SINT,1},{VK_FORMAT_R16G16B16A16_USCALED,VK_FORMAT_R16G16B16A16_UINT,2},{VK_FORMAT_R16G16B16A16_SSCALED,VK_FORMAT_R16G16B16A16_SINT,1}};
+     unsigned scaled=0;for(int v=0;v<256;v++)if(xbg_vk_format_scaled(VkFormat(v))){++scaled;CHECK(xbg_vertex_scaled_int(v)!=0);}else CHECK(xbg_vertex_scaled_int(v)==0);
+     CHECK(scaled==sizeof pairs/sizeof *pairs);
+     for(const auto &k:pairs){uint32_t kind=9;
+        CHECK(xbg_vertex_scaled_int(int(k.scaled),&kind)==int(k.integer) && kind==k.kind && xbg_vk_format_scaled(k.scaled)==k.kind);
+        CHECK(xbg_vertex_format_class(int(k.integer))==k.kind && xbg_vertex_format_class(int(k.scaled))==0);   // the stand-in is an integer-class format
+        p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_XCLIPSE,k.scaled,&p);CHECK(!(p.bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) && p.optimalTilingFeatures==all);
+        p={all,all,all};xbg_sim_format_features(XBG_SIM_NOSCALED,k.integer,&p);CHECK(p.bufferFeatures==all);
+        p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_MALI,k.scaled,&p);CHECK(p.bufferFeatures==all);}
+     // the widened integer stand-in of a 3-component scaled format (AMD lacks the 3-component integer ones too)
+     CHECK(xbg_vertex_widen(VkFormat(xbg_vertex_scaled_int(int(VK_FORMAT_R16G16B16_SSCALED))))==VK_FORMAT_R16G16B16A16_SINT);}
 
     if(failures){printf("%d failure(s)\n",failures);return 1;}
     printf("vendor_policy_test: all checks passed\n");return 0;

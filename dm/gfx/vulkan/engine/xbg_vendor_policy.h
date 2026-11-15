@@ -64,13 +64,14 @@ enum : uint32_t {
     XBG_SIM_NOANISO       =1u<<13,  // samplerAnisotropy=0 (PowerVR BXM driver 1.15)
     XBG_SIM_TEXEL64K      =1u<<14,  // maxTexelBufferElements=65536 (PowerVR)
     XBG_SIM_NOVERTEX3     =1u<<15,  // no VERTEX_BUFFER on 3-component 8/16-bit formats (AMD-style hardware: RADV / Xclipse)
+    XBG_SIM_NOSCALED      =1u<<16,  // no VERTEX_BUFFER on any *_USCALED / *_SSCALED format (AMD-style hardware: RADV / stock Xclipse) [vtxscaled]
     XBG_SIM_FAMILY_MALI   =1u<<24,  // the per-family defaults below act as on that family
     XBG_SIM_FAMILY_POWERVR=1u<<25,
     XBG_SIM_FAMILY_XCLIPSE=1u<<26,
 };
 constexpr uint32_t XBG_SIM_PROFILE_MALI=XBG_SIM_NOBC|XBG_SIM_NOFILTER16|XBG_SIM_SUBGROUP16|XBG_SIM_NODEPTHBOUNDS|XBG_SIM_NOFILLMODE|XBG_SIM_NOCLIP|XBG_SIM_FAMILY_MALI;
 constexpr uint32_t XBG_SIM_PROFILE_POWERVR=XBG_SIM_NOBC|XBG_SIM_DEPTHNOLINEAR|XBG_SIM_PVRFORMATS|XBG_SIM_SUBGROUP1|XBG_SIM_NODEPTHBOUNDS|XBG_SIM_NOFILLMODE|XBG_SIM_TEXEL64K|XBG_SIM_FAMILY_POWERVR;
-constexpr uint32_t XBG_SIM_PROFILE_XCLIPSE=XBG_SIM_NOBC47|XBG_SIM_NOD24|XBG_SIM_NOVERTEX3|XBG_SIM_FAMILY_XCLIPSE;
+constexpr uint32_t XBG_SIM_PROFILE_XCLIPSE=XBG_SIM_NOBC47|XBG_SIM_NOD24|XBG_SIM_NOVERTEX3|XBG_SIM_NOSCALED|XBG_SIM_FAMILY_XCLIPSE;
 
 inline uint32_t xbg_sim_parse(const char *text,char *unknown=nullptr,size_t unknown_bytes=0){
     if(unknown && unknown_bytes)*unknown=0;
@@ -80,7 +81,7 @@ inline uint32_t xbg_sim_parse(const char *text,char *unknown=nullptr,size_t unkn
         {"nobc",XBG_SIM_NOBC},{"nobc47",XBG_SIM_NOBC47},{"nofilter16",XBG_SIM_NOFILTER16},{"depthnolinear",XBG_SIM_DEPTHNOLINEAR},
         {"nod24",XBG_SIM_NOD24},{"pvrformats",XBG_SIM_PVRFORMATS},{"subgroup16",XBG_SIM_SUBGROUP16},{"subgroup1",XBG_SIM_SUBGROUP1},
         {"nogs",XBG_SIM_NOGS},{"nodepthbounds",XBG_SIM_NODEPTHBOUNDS},{"nofillmode",XBG_SIM_NOFILLMODE},{"noclip",XBG_SIM_NOCLIP},
-        {"nogather",XBG_SIM_NOGATHER},{"noaniso",XBG_SIM_NOANISO},{"texel64k",XBG_SIM_TEXEL64K},{"novertex3",XBG_SIM_NOVERTEX3},
+        {"nogather",XBG_SIM_NOGATHER},{"noaniso",XBG_SIM_NOANISO},{"texel64k",XBG_SIM_TEXEL64K},{"novertex3",XBG_SIM_NOVERTEX3},{"noscaled",XBG_SIM_NOSCALED},
         {"family-mali",XBG_SIM_FAMILY_MALI},{"family-powervr",XBG_SIM_FAMILY_POWERVR},{"family-xclipse",XBG_SIM_FAMILY_XCLIPSE}};
     uint32_t bits=0;const char *p=text;
     while(*p){
@@ -128,6 +129,17 @@ inline bool xbg_ubo_dynamic_default(XbgGpuFamily f){return f!=XBG_GPU_POWERVR;}
 // but Adreno (whose pipelines stay as they were). DM_GFX_NOOUT_MASK.
 inline bool xbg_noout_mask_default(XbgGpuFamily f){return f!=XBG_GPU_ADRENO;}
 
+// [vtxscaled] 1 = a *_SSCALED format, 2 = a *_USCALED one, 0 = neither (vertex-only formats: integer data fetched as float).
+inline uint32_t xbg_vk_format_scaled(VkFormat f){
+    switch(f){
+    case VK_FORMAT_R8_USCALED:case VK_FORMAT_R8G8_USCALED:case VK_FORMAT_R8G8B8_USCALED:case VK_FORMAT_B8G8R8_USCALED:case VK_FORMAT_R8G8B8A8_USCALED:
+    case VK_FORMAT_B8G8R8A8_USCALED:case VK_FORMAT_A8B8G8R8_USCALED_PACK32:case VK_FORMAT_A2R10G10B10_USCALED_PACK32:case VK_FORMAT_A2B10G10R10_USCALED_PACK32:
+    case VK_FORMAT_R16_USCALED:case VK_FORMAT_R16G16_USCALED:case VK_FORMAT_R16G16B16_USCALED:case VK_FORMAT_R16G16B16A16_USCALED:return 2;
+    case VK_FORMAT_R8_SSCALED:case VK_FORMAT_R8G8_SSCALED:case VK_FORMAT_R8G8B8_SSCALED:case VK_FORMAT_B8G8R8_SSCALED:case VK_FORMAT_R8G8B8A8_SSCALED:
+    case VK_FORMAT_B8G8R8A8_SSCALED:case VK_FORMAT_A8B8G8R8_SSCALED_PACK32:case VK_FORMAT_A2R10G10B10_SSCALED_PACK32:case VK_FORMAT_A2B10G10R10_SSCALED_PACK32:
+    case VK_FORMAT_R16_SSCALED:case VK_FORMAT_R16G16_SSCALED:case VK_FORMAT_R16G16B16_SSCALED:case VK_FORMAT_R16G16B16A16_SSCALED:return 1;
+    default:return 0;}
+}
 inline bool xbg_sim_format_in(VkFormat f,VkFormat lo,VkFormat hi){return int(f)>=int(lo) && int(f)<=int(hi);}
 // Narrow the format features the driver reported to what the simulated device reports.
 inline void xbg_sim_format_features(uint32_t sim,VkFormat f,VkFormatProperties *p){
@@ -141,6 +153,7 @@ inline void xbg_sim_format_features(uint32_t sim,VkFormat f,VkFormatProperties *
     if((sim&XBG_SIM_NOD24) && (f==VK_FORMAT_X8_D24_UNORM_PACK32 || f==VK_FORMAT_D24_UNORM_S8_UINT))*p=VkFormatProperties{};
     if((sim&XBG_SIM_NOVERTEX3) && (xbg_sim_format_in(f,VK_FORMAT_R8G8B8_UNORM,VK_FORMAT_R8G8B8_SRGB) || xbg_sim_format_in(f,VK_FORMAT_R16G16B16_UNORM,VK_FORMAT_R16G16B16_SFLOAT)))
         p->bufferFeatures&=~VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
+    if((sim&XBG_SIM_NOSCALED) && xbg_vk_format_scaled(f))p->bufferFeatures&=~VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
     if(sim&XBG_SIM_PVRFORMATS){
         if(f==VK_FORMAT_R8G8B8A8_SRGB)p->optimalTilingFeatures&=~(VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT|VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT);
         if(f==VK_FORMAT_E5B9G9R9_UFLOAT_PACK32)p->optimalTilingFeatures&=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_TRANSFER_SRC_BIT|VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
