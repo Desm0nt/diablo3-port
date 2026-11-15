@@ -229,12 +229,37 @@ static void ls_install(module_t *m) {
     LOG("[wide] loading screens: the 16:9 act art (main 0x32ec60, UI -160.2..1120.2) is presented alone and stretched to the screen "
         "while st+0x6c (loading screen up) && !st+0x70 (art mode); DM_D3_WIDE_STRETCH_LOADING=0 turns it off");
 }
+// ---- Render height (DM_D3_HEIGHT, gear "Native screen resolution", experimental; default 900 = the Switch's docked window)
+// The same init site holds the height: 0xe7860 movk x8,#900,lsl#32 (docked) / 0xe7864 movk x9,#720,lsl#32 (handheld). Everything that
+// follows the window size (swap textures, crop, DisplayMode, the 3D cameras' aspect, the UI's centred 4:3 region and its scale) reads
+// the struct, so a taller window only means more pixels: the UI keeps its 960x720 virtual space scaled by height / 720, touch and the
+// cursor work in screen fractions (dm_cursor.c), the HUD icon copies take the UI map (hle_d3_icons.c).
+//   DM_D3_HEIGHT=native  the screen's short side (front_screen_size: 1080 on a 2400x1080 phone, 1440 on QHD)
+//   DM_D3_HEIGHT=<n>     explicit docked height (720..2160)
+//   unset / 900          as before
+// The width keeps the picture shape at that height: 16:9 (H x 16/9) or, with DM_D3_WIDE, H x the shape's aspect (the 900-high width
+// x H / 900: 2000x900 -> 2400x1080); rounded to 16, at most 4096. Handheld = docked x 4/5 as before (rounded to 16 / 8).
+// GPU cost ~ pixels: 2400x1080 is 1.44x the 2000x900 of widescreen (the owner's "~+40 %"); 3200x1440 is 2.56x.
+static unsigned d3_height(void) {
+    const char *e = getenv("DM_D3_HEIGHT");
+    if (!e || !*e) return 900;
+    long h = 0;
+    if (!strcmp(e, "native")) {
+        uint64_t s = front_screen_size ? front_screen_size() : 0; h = (long)(uint32_t)(s >> 32);
+        if (h <= 0) { LOG("[wide] DM_D3_HEIGHT=native: screen size unknown, height stays 900"); return 900; }
+    } else h = atol(e);
+    if (h < 720 || h > 2160) { LOG("【红】[wide] DM_D3_HEIGHT=%s out of 720..2160: height stays 900", e); return 900; }
+    return (unsigned)(h & ~1L);
+}
 void dm_d3_wide_install(void);   // main.c host_preload, right after load_modules (before any guest code runs)
 void dm_d3_wide_install(void) {
     const char *e = getenv("DM_D3_WIDE");
-    if (!e || !*e || (*e == '0' && !e[1])) { LOG("[wide] DM_D3_WIDE off: window 1600x900 (handheld 1280x720)"); return; }
-    long want = atol(e); unsigned w;
-    if (!strcmp(e, "4:3")) w = 1200;
+    const unsigned H = d3_height();
+    if ((!e || !*e || (*e == '0' && !e[1])) && H == 900) { LOG("[wide] DM_D3_WIDE off: window 1600x900 (handheld 1280x720)"); return; }
+    if (!e || !*e || (*e == '0' && !e[1])) e = NULL;
+    long want = e ? atol(e) : 0; unsigned w;
+    if (!e) w = 1600;   // DM_D3_HEIGHT alone: 16:9
+    else if (!strcmp(e, "4:3")) w = 1200;
     else if (want >= 1200) w = (unsigned)want;
     else {
         uint64_t r = front_game_res(1); w = (uint32_t)(r >> 32) == 900 ? (uint32_t)r : 1600;
@@ -246,20 +271,25 @@ void dm_d3_wide_install(void) {
         }
     }
     w = (w + 8) / 16 * 16; if (w > 3200) w = 3200; if (w < 1200) w = 1200;
-    if (w == 1600) { LOG("[wide] DM_D3_WIDE=%s: screen 16:9 (or unknown): window stays 1600x900", e); return; }
+    if (w == 1600 && H == 900) { LOG("[wide] DM_D3_WIDE=%s: screen 16:9 (or unknown): window stays 1600x900", e); return; }
+    const unsigned w900 = w;   // the width at 900 lines: its aspect is the picture shape
+    if (H != 900) { w = (unsigned)(llround((double)w900 * H / 900.0 / 16) * 16); if (w > 4096) w = 4096; }
+    const unsigned hh = (H * 4 / 5 + 4) / 8 * 8;   // handheld height (720 at 900)
     unsigned wh = (w * 4 / 5 + 8) / 16 * 16;
     module_t *m = NULL;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
     if (!m || m->text_end < DW_LBOX + sizeof k_dw_lbox || memcmp(m->base + DW_INIT, k_dw_init, sizeof k_dw_init) ||
         memcmp(m->base + DW_LBOX, k_dw_lbox, sizeof k_dw_lbox)) {
         LOG("【红】[wide] main is not D3 update 2.7.7 (build 2607a74f): window size site not found, stays 1600x900"); return; }
-    float a = (float)w / 900.0f; uint32_t ab; memcpy(&ab, &a, 4);
-    const uint32_t init[6] = {0xd2800008u | w << 5 /* mov x8,#W */, 0xd2800009u | wh << 5 /* mov x9,#Wh */, k_dw_init[4], k_dw_init[5],
+    float a = (float)w / (float)H; uint32_t ab; memcpy(&ab, &a, 4);
+    const uint32_t init[6] = {0xd2800008u | w << 5 /* mov x8,#W */, 0xd2800009u | wh << 5 /* mov x9,#Wh */,
+                              0xf2c00008u | H << 5 /* movk x8,#H,lsl#32 */, 0xf2c00009u | hh << 5 /* movk x9,#Hh,lsl#32 */,
                               0x5280000au | (ab & 0xffff) << 5 /* mov w10,#lo */, 0x72a0000au | (ab >> 16) << 5 /* movk w10,#hi,lsl#16 */};
     const uint32_t lbox[2] = {0x2a1f03e0 /* mov w0,wzr */, 0xd65f03c0 /* ret */};
     if (dw_poke(m, DW_INIT + 8, init, 6) || dw_poke(m, DW_LBOX, lbox, 2)) { LOG("【红】[wide] mprotect RW failed: window stays 1600x900"); return; }
-    LOG("[wide] main+%#x window 1600x900 -> %ux900, handheld 1280x720 -> %ux720, aspect %.4f (%s 3D, UI edge-anchored); letterbox check main+%#x off",
-        DW_INIT + 8, w, wh, a, w > 1600 ? "Hor+" : "Hor-, vertical FOV kept", DW_LBOX);
-    if (w > 1600) ls_install(m);
+    LOG("[wide] main+%#x window 1600x900 -> %ux%u, handheld 1280x720 -> %ux%u, aspect %.4f (%s 3D, UI edge-anchored)%s; letterbox check main+%#x off",
+        DW_INIT + 8, w, H, wh, hh, a, (uint64_t)w * 9 > (uint64_t)H * 16 ? "Hor+" : (uint64_t)w * 9 == (uint64_t)H * 16 ? "16:9" : "Hor-, vertical FOV kept",
+        H != 900 ? " [DM_D3_HEIGHT: render height, experimental]" : "", DW_LBOX);
+    if ((uint64_t)w * 9 > (uint64_t)H * 16 + H / 8) ls_install(m);   // wider than 16:9 (the 16-pixel rounding of a 16:9 width is not)
 }
 #endif

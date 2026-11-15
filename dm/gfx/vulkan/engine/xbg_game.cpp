@@ -3998,6 +3998,28 @@ bool desc_abandon(Descriptors &out){
 #else
 #define DESC_ABANDON(out) false
 #endif
+// [D3] Forced anisotropic filtering (gear "Anisotropic filtering", DM_GFX_ANISO = 0 off (default) | 2 | 4 | 8 | 16; live through
+// xbg_set_aniso). D3 never calls nvnSamplerBuilderSetMaxAnisotropy: its sampler table (main+0xee4a0) only picks min filters 2 / 3 /
+// trilinear 5, LOD bias 0..-3, so ground and walls at the isometric camera's grazing angle blur into the low mips. With a level,
+// every sampler that minifies linearly from mipmaps (NVN min filter 3 / 5), without depth compare and not on an integer view gets
+// maxAnisotropy = min(level, maxSamplerAnisotropy); everything else is created as before. Only when the device's samplerAnisotropy
+// feature is enabled (vulkan_present.cpp enables every supported feature; PowerVR BXM drivers without it, KB PVR-04, and
+// DM_GFX_SIM_GPU=...noaniso stay off). A change takes effect at the next present (aniso_poll): the derived-sampler lookup is cleared
+// and memo_epoch bumped, so memoized descriptor sets are built again with the new samplers; the old VkSamplers stay in sampler_cache
+// (sets still in flight use them). One log line per change: "NVN anisotropic filtering ...".
+namespace aniso {
+std::atomic<int> requested{-1};int applied=-1;   // requested: -1 = DM_GFX_ANISO not read yet; applied: the level the samplers use (0 = off)
+int clamp_level(int v){return v<=1?0:v>=16?16:v>=8?8:v>=4?4:2;}
+int level(){
+    if(applied<0){int u=-1;const char *e=getenv("DM_GFX_ANISO");requested.compare_exchange_strong(u,clamp_level(e?atoi(e):0));
+        applied=clamp_level(requested.load());const bool feat=cfg.enabled_core.samplerAnisotropy;
+        if(applied && !feat){xbg_logf("NVN anisotropic filtering x%d requested (DM_GFX_ANISO / gear) but the device has no samplerAnisotropy: off",applied);}
+        else xbg_logf("NVN anisotropic filtering %s%d (DM_GFX_ANISO / gear; device samplerAnisotropy=%u max=%g): %s",applied?"x":"off ",applied,unsigned(feat),double(properties.limits.maxSamplerAnisotropy),
+            applied?"forced on samplers that minify linearly from mipmaps (NVN min filter 3 / 5), no compare":"samplers as the game sets them (no anisotropy)");}
+    return cfg.enabled_core.samplerAnisotropy?applied:0;
+}
+}
+extern "C" void xbg_set_aniso(int level){aniso::requested.store(aniso::clamp_level(level),std::memory_order_relaxed);}   // [D3] gear, live (aniso_poll)
 // Fast path (iOS: samplers fetched directly instead of re-deriving per draw): raw NVN parameters +
 // view format -> VkSampler, before the full conversion/validation below.
 VkSampler sampler_slow(const samp_par &p,Image &im,VkFormat viewed,bool integer_border);
@@ -4028,6 +4050,9 @@ VkSampler sampler_slow(const samp_par &p,Image &im,VkFormat viewed,bool integer_
         static const bool strict=xbg_env_or(getenv("DM_GFX_SAMPLER_STRICT"),false);
         if(!strict){static std::set<int> told;if(told.insert(int(viewed)).second)xbg_logf("NVN sampler: format %u (NVN %#x) has no linear filtering on this device: its samplers use NEAREST (min=%u mag=%u mip=%u compare=%u)",unsigned(viewed),im.source.d.format,p.minf,p.magf,unsigned(s.mipmapMode),p.cmp_mode);
             s.minFilter=s.magFilter=VK_FILTER_NEAREST;s.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;s.anisotropyEnable=VK_FALSE;s.maxAnisotropy=1;}}
+    // [D3] forced anisotropy (namespace aniso above): linear minification from mipmaps (NVN min 3 / 5), no compare, not an integer view
+    if(const int lv=aniso::level();lv>1 && !s.anisotropyEnable && s.minFilter==VK_FILTER_LINEAR && p.minf>=2 && !s.compareEnable && !integer_border &&
+       properties.limits.maxSamplerAnisotropy>1){s.anisotropyEnable=VK_TRUE;s.maxAnisotropy=std::min(float(lv),properties.limits.maxSamplerAnisotropy);}
     if((s.minFilter==VK_FILTER_LINEAR || s.magFilter==VK_FILTER_LINEAR) && !(fp.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))xbg_fatalf("NVN sampler linear filtering unsupported min=%u mag=%u compare=%u/%u format=%#x vk=%u optimalFeatures=%#x texture=%llu decoded=%d imfmt=%u",p.minf,p.magf,p.cmp_mode,p.cmp_func,im.source.d.format,unsigned(viewed),fp.optimalTilingFeatures,(unsigned long long)im.source.serial,int(im.decoded),unsigned(im.fmt));
     need(s.pNext==nullptr,"Unexpected sampler extension chain");
 #if defined(DM_GAME_XC2) || defined(DM_GAME_D3)
@@ -4233,6 +4258,18 @@ void desc_memo_reset(){img_cache.clear();
     // none was ~1% of the D2R camp's render thread on the Redmi K50 Ultra.
     if(!desc_memo_local[slot_index])return;
     auto &m=desc_memo_slot[slot_index];for(auto it=m.begin();it!=m.end();){if(it->second.persistent)++it;else it=m.erase(it);}desc_memo_local[slot_index]=0;++memo_mod_gen;}
+// [D3] The gear changed the anisotropy (xbg_set_aniso): at a present (no descriptor build in progress) the derived samplers are looked
+// up again and every memoized set / cached image binding is rebuilt with them (memo_epoch, img_cache). Old samplers stay alive.
+void aniso_poll(){
+    if(aniso::applied<0)return;   // no sampler made yet: level() reads the request when it is first needed
+    const int want=aniso::requested.load(std::memory_order_relaxed);if(want==aniso::applied)return;
+    const int was=aniso::applied;aniso::applied=want;sampler_fast.clear();img_cache.clear();++memo_epoch;++memo_bump[1];
+#ifdef DM_GAME_ETERNAL
+    bindless::invalidate();
+#endif
+    xbg_logf("NVN anisotropic filtering %d -> %d (gear, live; device samplerAnisotropy=%u max=%g)%s",was,want,unsigned(cfg.enabled_core.samplerAnisotropy),double(properties.limits.maxSamplerAnisotropy),
+        want && !cfg.enabled_core.samplerAnisotropy?": the device has no anisotropy, stays off":": samplers made again, descriptor memo dropped");
+}
 Buffer &support_block(){size_t n=1392;auto k=std::make_pair(state.viewport.width,state.viewport.height);
     auto it=support_static.find(k);if(it!=support_static.end())return it->second;
     Buffer s=static_arena.alloc(uniform_range(n));xbg_support_defaults(s.mapped,state.viewport.width,state.viewport.height);s.flush();return support_static.emplace(k,s).first->second;}
@@ -7315,7 +7352,7 @@ extern "C" void xbg_legacy_finish(){gfx_drain();std::lock_guard<std::recursive_m
     ++perf.why_finish;complete_all();VK(vkQueueWaitIdle(cfg.queue));}
 static void xbg_present_texture_now(const win_t *window,const tex_t *texture){std::lock_guard<std::recursive_mutex> lock(mutex);preflight_cpu_reads();cpu_visible_flush();debug_dump_frame(texture);{SiteScope site(SITE_PRESENT);cur_op=61;TimingRoot timing_root;CPU_SCOPE(Other);need(initialized&&cfg.present,"Game presentation callback not installed");uint64_t present_begin=timing_clock();Image &im=get_image(texture,false);need(im.gpu_written,"Game tried to present a texture never rendered");Commands c;im.transition(c.command,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     const VkImage shown=taafix::viewport_ll()?taafix::flip(c.command,im):im.image;   // DM_GFX_TAA_FIX 2: the lower-left window is stored bottom-up
-    c.finish();submit_slots(false);int r;{CPU_SCOPE(Present);r=cfg.present(cfg.userdata,window->native,shown,im.fmt,im.width,im.height,window->crop,window->interval);}if(r)xbg_fatalf("Game presentation failed: %d",r);++stats.presents;zcubo::frame();if(pass_prof_enabled && stats.presents.load()==pass_prof_frame)xbg_logf("NVN GPASS boundary frame=%llu slots=%u skipped_slots=%u reserved_queries=%u max_queries=%u max_slots=%u",(unsigned long long)pass_prof_frame,pass_prof_slots,pass_prof_skipped_slots,pass_prof_queries,pass_prof_query_limit,pass_prof_slot_limit);if(pass_prof_enabled && stats.presents.load()==pass_prof_frame && passval::on())xbg_logf("NVN GVAL frame=%llu kind=present serial=%llu fmt=%u %ux%u",(unsigned long long)pass_prof_frame,(unsigned long long)texture->serial,unsigned(im.fmt),im.width,im.height);/* the presented image: its values are in the GVAL line of the last pass with this serial */perf.present_cpu_ns+=timing_clock()-present_begin;perf_frame();if(provenance_file && stats.presents.load()>=provenance.target)provenance_close("END");if(capture.trace && stats.presents==capture.frame){capture_log("END frame=%llu events=%u bytes=%llu presentedSerial=%llu image=%p",(unsigned long long)capture.frame,capture.events,(unsigned long long)capture.bytes,(unsigned long long)texture->serial,(void*)im.image);fclose(capture.trace);capture.trace=nullptr;capture.active=false;xbg_logf("NVN one-frame capture complete frame=%llu events=%u bytes=%llu",(unsigned long long)capture.frame,capture.events,(unsigned long long)capture.bytes);}}timing_boundary();}
+    c.finish();submit_slots(false);int r;{CPU_SCOPE(Present);r=cfg.present(cfg.userdata,window->native,shown,im.fmt,im.width,im.height,window->crop,window->interval);}if(r)xbg_fatalf("Game presentation failed: %d",r);++stats.presents;zcubo::frame();aniso_poll();if(pass_prof_enabled && stats.presents.load()==pass_prof_frame)xbg_logf("NVN GPASS boundary frame=%llu slots=%u skipped_slots=%u reserved_queries=%u max_queries=%u max_slots=%u",(unsigned long long)pass_prof_frame,pass_prof_slots,pass_prof_skipped_slots,pass_prof_queries,pass_prof_query_limit,pass_prof_slot_limit);if(pass_prof_enabled && stats.presents.load()==pass_prof_frame && passval::on())xbg_logf("NVN GVAL frame=%llu kind=present serial=%llu fmt=%u %ux%u",(unsigned long long)pass_prof_frame,(unsigned long long)texture->serial,unsigned(im.fmt),im.width,im.height);/* the presented image: its values are in the GVAL line of the last pass with this serial */perf.present_cpu_ns+=timing_clock()-present_begin;perf_frame();if(provenance_file && stats.presents.load()>=provenance.target)provenance_close("END");if(capture.trace && stats.presents==capture.frame){capture_log("END frame=%llu events=%u bytes=%llu presentedSerial=%llu image=%p",(unsigned long long)capture.frame,capture.events,(unsigned long long)capture.bytes,(unsigned long long)texture->serial,(void*)im.image);fclose(capture.trace);capture.trace=nullptr;capture.active=false;xbg_logf("NVN one-frame capture complete frame=%llu events=%u bytes=%llu",(unsigned long long)capture.frame,capture.events,(unsigned long long)capture.bytes);}}timing_boundary();}
 extern "C" void xbg_legacy_read_texels(const tex_t *t,unsigned level,unsigned layer,const NVNcopyRegion *r,uint8_t *dst,size_t row,size_t image){{static std::map<uint64_t,unsigned> rs;if(alias_log>0 && t && rs[t->serial]++<3)xbg_logf("NVN ReadTexels serial=%llu fmt=%#x",(unsigned long long)t->serial,t->d.format);}gfx_drain();std::lock_guard<std::recursive_mutex> lock(mutex);preflight_cpu_reads();need(t&&r&&dst,"Invalid ReadTexels arguments");auto found=images.find(t->serial);if(found==images.end() || !found->second->gpu_written){int bw,bh,bpp=nvn_fmt_bpb(t->d.format,&bw,&bh);need(bpp && r->xoffset==0 && r->yoffset==0 && r->zoffset==0 && r->depth==1 && uint32_t(r->width)==std::max(1u,t->d.width>>level) && uint32_t(r->height)==std::max(1u,t->d.height>>level),"CPU ReadTexels partial region unsupported");need(!(t->d.flags&0x10),"Linear CPU ReadTexels not implemented");need(nvn_deswizzle(&t->d,level,layer,t->mem,dst,row)==0,"ReadTexels deswizzle failed");}
     else{p_copy_b2t p{};p.src=uint64_t(dst);p.tex=t;p.has_view=1;p.view.set_levels=p.view.set_layers=1;p.view.base_level=level;p.view.nlevels=1;p.view.min_layer=layer;p.view.nlayers=1;p.r=*r;int64_t old=state.copy_stride,old_image=state.copy_image_stride;state.copy_stride=row;state.copy_image_stride=image;copy_texture_buffer(p,true);state.copy_stride=old;state.copy_image_stride=old_image;}}
 

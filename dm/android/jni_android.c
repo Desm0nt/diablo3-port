@@ -903,6 +903,12 @@ JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeLogPath(JNIEnv
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeQuit(JNIEnv *env, jclass cls) { (void)env; (void)cls; LOG("[java] the app ends (pause menu)"); dm_host_shutdown("pause menu: quit"); }
 // [cpu-place] Gear "CPU cores" (0 auto, 1 big cores, 2 all cores), live; the next start reads DM_CPU_CORES (DmActivity.applyDoomSettings).
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeCpuCores(JNIEnv *env, jclass cls, jint mode) { (void)env; (void)cls; dm_cpu_place_set_mode(mode); }
+// [D3] Gear "Anisotropic filtering" (0 off / 4 = x4; xbg_game.cpp namespace aniso) and "Upscale" (0 off / 1 auto; vulkan_present.cpp
+// namespace upscale), both live: the engine applies the level at its next present, the presenter rebuilds its swapchain at the next
+// present; the next start reads DM_GFX_ANISO / DM_GFX_UPSCALE (DmActivity.applyDoomSettings).
+void xbg_set_aniso(int level); void dm_present_set_upscale(int mode);
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetAniso(JNIEnv *env, jclass cls, jint level) { (void)env; (void)cls; LOG("[java] gear: anisotropic filtering %d", (int)level); xbg_set_aniso(level); }
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetUpscale(JNIEnv *env, jclass cls, jint mode) { (void)env; (void)cls; LOG("[java] gear: upscale %d", (int)mode); dm_present_set_upscale(mode); }
 JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeOpmode(JNIEnv *env, jclass cls) { (void)env; (void)cls; return dm_opmode(); }
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetOpmode(JNIEnv *env, jclass cls, jint m) { (void)env; (void)cls; dm_set_opmode(m ? 1 : 0); }
 

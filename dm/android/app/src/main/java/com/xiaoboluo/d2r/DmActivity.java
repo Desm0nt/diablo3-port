@@ -88,6 +88,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native int nativeOpmode();
     static native void nativeSetOpmode(int mode);
     static native void nativeCpuCores(int mode);        // [cpu-place] gear "CPU cores": 0 auto, 1 big cores, 2 all cores (live; hle_cpu_place.c)
+    static native void nativeSetAniso(int level);       // [D3] gear "Anisotropic filtering": 0 off, 4 = x4 (live; xbg_game.cpp namespace aniso)
+    static native void nativeSetUpscale(int mode);      // [D3] gear "Upscale": 0 off, 1 auto (live; vulkan_present.cpp namespace upscale)
     static final String FRONT_DATA_DIR = "Diablo3Mobile";   // Download/<this>: the player's data folder; save exports go to its saves/
     private FrontMenu front;
     private SaveTransfer saves;
@@ -453,6 +455,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final int ASPECT_DEFAULT = 2;
     private int startedAspect = -1;   // the aspect mode the running game was started with (widened needs a restart)
     private boolean startedHandheld;  // [D3] the Switch mode the running game was started with (DM_OPMODE 0)
+    private boolean startedNative;    // [D3] native screen resolution the running game was started with (DM_D3_HEIGHT=native)
     private int startedMpPads;        // [D3] local co-op controllers mode the running game was started with (DM_MP_PADS): 2 keeps the touch pad for player 1
     static final float[] LOOK_GAINS = {0.6f, 0.8f, 1.0f, 1.3f, 1.7f};
     static final String[] LOOK_LABELS = {"0.6", "0.8", "1.0", "1.3", "1.7"};
@@ -484,6 +487,15 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 // to 4:3 on narrower ones), 3 = 4:3 (DM_D3_WIDE=4:3, 1200x900 with bars); next launch
                 startedAspect = p.getInt("aspect", 0);
                 if (startedAspect == 2) Os.setenv("DM_D3_WIDE", "1", true); else if (startedAspect == 3) Os.setenv("DM_D3_WIDE", "4:3", true); else Os.unsetenv("DM_D3_WIDE");
+                // Native screen resolution (experimental, gear checkbox "d3_native_res"): the game window's height = the screen's short side, the
+                // width keeps the picture shape (hle_d3.c DM_D3_HEIGHT=native); next launch
+                startedNative = p.getBoolean("d3_native_res", false);
+                if (startedNative) Os.setenv("DM_D3_HEIGHT", "native", true); else Os.unsetenv("DM_D3_HEIGHT");
+                // Anisotropic filtering x4 (xbg_game.cpp namespace aniso, off by default: more texture reads, PowerVR drivers without it stay off) and
+                // upscale to the screen (vulkan_present.cpp namespace upscale: 0 = the compositor stretch, auto = GSR on Adreno / FSR 1 elsewhere);
+                // both also switched live from the gear (nativeSetAniso / nativeSetUpscale)
+                Os.setenv("DM_GFX_ANISO", p.getBoolean("d3_aniso", false) ? "4" : "0", true);
+                Os.setenv("DM_GFX_UPSCALE", p.getInt("d3_upscale", 0) == 1 ? "auto" : "0", true);
                 // Widescreen only: loading screens' 16:9 art presented alone, stretched to the screen (hle_d3.c ls_present_crop)
                 Os.setenv("DM_D3_WIDE_STRETCH_LOADING", p.getBoolean("d3_stretch_loading", true) ? "1" : "0", true);
                 // Gear "Write logs" (issue #19, CrashLog.logsOn): off keeps boot.log in the private runtime dir (jni_android.c log_init)
@@ -821,7 +833,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     //   next launch (SharedPreferences "doom_graphics" -> environment before the library loads, applyDoomSettings; dm/env still wins):
     //     game language (DM_LANG -> hle_oe.c GetDesiredLanguage), resolution = Switch mode (DM_OPMODE 1 docked 1600x900 / 0 handheld
     //     720p; the labels show the size for the picked picture shape, widescreen W x 900 / W*4/5 x 720: d3RenderSize), frame rate limit (DM_PRESENT_MAX_HZ 30 / 60 -> hle_nvn.c), sharpening (DM_GFX_SHARPEN -> RCAS in vulkan_present.cpp),
-    //     Vulkan driver (DM_VK_DRIVER -> vk_driver.c), vibration (DM_RUMBLE);
+    //     Vulkan driver (DM_VK_DRIVER -> vk_driver.c), vibration (DM_RUMBLE), native screen resolution (experimental, DM_D3_HEIGHT=native -> hle_d3.c);
+    //   live and at the next launch: upscale off / auto (DM_GFX_UPSCALE, nativeSetUpscale -> vulkan_present.cpp), anisotropic filtering x4
+    //     (DM_GFX_ANISO, nativeSetAniso -> xbg_game.cpp), CPU cores (DM_CPU_CORES, nativeCpuCores);
     //   immediately: picture shape (16:9 bars / stretched: the SurfaceView size, applyAspectLayout), and "doom_controls" read by
     //     D3PadView.reloadSettings: FPS counter, stick dead-zone compensation, settings button look (normal / faded + opacity),
     //     control layout ("d3_layout" touch / gamepad, on pick), skill icons on the buttons ("d3_icons", hle_d3_icons.c via nativeD3Icons), layout opacity / size ("d3_opacity" / "d3_scale" %, live sliders),
@@ -843,15 +857,19 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // hle_d3.c dm_d3_wide_install) W x 900 with W = front_game_res(1) (front_android.c: 900 x screen aspect, rounded to 8, max 4096)
     // rounded to 16 (max 3200), or for a screen narrower than 16:9 900 x its aspect rounded to 16, at least 1200 (4:3); 4:3 (aspect 3,
     // DM_D3_WIDE=4:3) 1200x900; handheld (W x 4/5 rounded to 16) x 720. 2400x1080 -> 2000x900 / 1600x720, 2048x1536 -> 1200x900 / 960x720.
-    static int[] d3RenderSize(int aspect, boolean handheld, int sw, int sh) {
+    // Native screen resolution (native, DM_D3_HEIGHT=native): height = the screen's short side (720..2160, even), width = that 900-high width
+    // x height / 900 rounded to 16 (max 4096): 2400x1080 widescreen -> 2400x1080 / 1920x864, 16:9 -> 1920x1080.
+    static int[] d3RenderSize(int aspect, boolean handheld, int sw, int sh, boolean nativeRes) {
         int w = 1600;
         if (aspect == 3) w = 1200;
         else if (aspect == 2 && sw > 0 && sh > 0 && (long) sw * 9 > (long) sh * 16) {
             long bw = Math.round(900.0 * sw / sh / 8) * 8; if (bw > 4096) bw = 4096;
             w = (int) Math.min(3200, (bw + 8) / 16 * 16);
         } else if (aspect == 2 && sw > 0 && sh > 0 && (long) sw * 9 < (long) sh * 16) w = (int) Math.max(1200, Math.round(900.0 * sw / sh / 16) * 16);
-        if (w == 1600) return handheld ? new int[] {1280, 720} : new int[] {1600, 900};
-        return handheld ? new int[] {(w * 4 / 5 + 8) / 16 * 16, 720} : new int[] {w, 900};
+        int h = 900;
+        if (nativeRes && sh >= 720 && sh <= 2160) { h = sh & ~1; w = (int) Math.min(4096, Math.round((double) w * h / 900.0 / 16) * 16); }
+        if (w == 1600 && h == 900) return handheld ? new int[] {1280, 720} : new int[] {1600, 900};
+        return handheld ? new int[] {(w * 4 / 5 + 8) / 16 * 16, (h * 4 / 5 + 4) / 8 * 8} : new int[] {w, h};
     }
     @SuppressWarnings("deprecation")
     private int[] screenSize() {   // landscape: the long side first (the size the game's surface had at start)
@@ -864,11 +882,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     int[] d3RenderSize() {
         if (startedAspect < 0) return null;
         int[] sc = screenSize();
-        return d3RenderSize(startedAspect, startedHandheld, sc[0], sc[1]);
+        return d3RenderSize(startedAspect, startedHandheld, sc[0], sc[1], startedNative);
     }
     SurfaceView gameSurface() { return view; }
-    private void d3ModeLabels(RadioGroup modeG, android.content.Context ui, int aspect) {
-        int[] sc = screenSize(), dk = d3RenderSize(aspect, false, sc[0], sc[1]), hh = d3RenderSize(aspect, true, sc[0], sc[1]);
+    private void d3ModeLabels(RadioGroup modeG, android.content.Context ui, int aspect, boolean nativeRes) {
+        int[] sc = screenSize(), dk = d3RenderSize(aspect, false, sc[0], sc[1], nativeRes), hh = d3RenderSize(aspect, true, sc[0], sc[1], nativeRes);
         ((RadioButton) modeG.getChildAt(0)).setText(ui.getString(R.string.d3_mode_docked, dk[0] + "×" + dk[1]));
         ((RadioButton) modeG.getChildAt(1)).setText(ui.getString(R.string.d3_mode_handheld, hh[0] + "×" + hh[1]));
     }
@@ -909,15 +927,26 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             note(box, ui.getString(R.string.d3_game_lang_note));
             heading(box, when(ui, R.string.d3_mode, false));
             RadioGroup modeG = radios(box, new String[] {"", ""}, 1000, p.getBoolean("handheld", false) ? 1 : 0, false);
-            d3ModeLabels(modeG, ui, p.getInt("aspect", 0));   // the size the next launch renders at (widescreen: the screen's aspect)
             note(box, ui.getString(R.string.d3_mode_note));
+            // Native screen resolution (experimental, DM_D3_HEIGHT=native): the labels above show the size it gives
+            CheckBox nativeC = new CheckBox(this); nativeC.setText(when(ui, R.string.d3_native_res, false)); nativeC.setChecked(p.getBoolean("d3_native_res", false)); box.addView(nativeC);
+            note(box, ui.getString(R.string.d3_native_res_note));
+            d3ModeLabels(modeG, ui, p.getInt("aspect", 0), nativeC.isChecked());   // the size the next launch renders at (widescreen: the screen's aspect)
             heading(box, when(ui, R.string.d3_aspect, true));
             RadioGroup aspG = radios(box, new String[] {ui.getString(R.string.d3_aspect_bars), ui.getString(R.string.d3_aspect_stretch), ui.getString(R.string.d3_aspect_wide), ui.getString(R.string.d3_aspect_43)}, 8000, p.getInt("aspect", 0), false);
             note(box, ui.getString(R.string.d3_aspect_wide_note));
             CheckBox stretchL = new CheckBox(this); stretchL.setText(when(ui, R.string.d3_stretch_loading, false)); stretchL.setChecked(p.getBoolean("d3_stretch_loading", true)); box.addView(stretchL);
-            aspG.setOnCheckedChangeListener((g, id) -> d3ModeLabels(modeG, ui, id - 8000));
+            aspG.setOnCheckedChangeListener((g, id) -> d3ModeLabels(modeG, ui, id - 8000, nativeC.isChecked()));
+            nativeC.setOnCheckedChangeListener((c, on) -> d3ModeLabels(modeG, ui, picked(aspG, 8000, 4), on));
             heading(box, when(ui, R.string.d3_sharpen, false));
             RadioGroup sh = radios(box, texts(ui, D3_SHARPEN_LABELS), 2000, p.getInt("sharpen", 0), true);
+            // Upscale to the screen (vulkan_present.cpp namespace upscale): off = the compositor stretch, auto = GSR on Adreno / FSR 1 elsewhere; live
+            heading(box, when(ui, R.string.d3_upscale, true));
+            RadioGroup upG = radios(box, new String[] {ui.getString(R.string.d3_off), ui.getString(R.string.d3_upscale_auto)}, 9600, Math.max(0, Math.min(1, p.getInt("d3_upscale", 0))), true);
+            note(box, ui.getString(R.string.d3_upscale_note));
+            // Anisotropic filtering x4 (xbg_game.cpp namespace aniso); live
+            CheckBox anisoC = new CheckBox(this); anisoC.setText(when(ui, R.string.d3_aniso, true)); anisoC.setChecked(p.getBoolean("d3_aniso", false)); box.addView(anisoC);
+            note(box, ui.getString(R.string.d3_aniso_note));
             heading(box, when(ui, R.string.d3_fps_limit, false));
             String[] limLabels = new String[D3_FPS_LIMITS.length]; int limAt = 0;
             for (int i = 0; i < limLabels.length; i++) { limLabels[i] = String.valueOf(D3_FPS_LIMITS[i]); if (D3_FPS_LIMITS[i] == d3FpsLimit()) limAt = i; }
@@ -1012,8 +1041,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
                     .putString("driver", driverPicked(drvNames, drvG)).putBoolean("rumble", rumble.isChecked())
                     .putBoolean("d3_stretch_loading", stretchL.isChecked()).putBoolean("d3_logs", logsC.isChecked())
-                    .putInt("mp_pads", picked(mpG, 9400, 3)).putBoolean("mp_lan", lanC.isChecked()).putInt("cpu_cores", picked(cpuG, 9500, D3_CPU_MODES.length)).apply();
+                    .putInt("mp_pads", picked(mpG, 9400, 3)).putBoolean("mp_lan", lanC.isChecked()).putInt("cpu_cores", picked(cpuG, 9500, D3_CPU_MODES.length))
+                    .putBoolean("d3_native_res", nativeC.isChecked()).putInt("d3_upscale", picked(upG, 9600, 2)).putBoolean("d3_aniso", anisoC.isChecked()).apply();
                 if (libraryLoaded && started) try { nativeCpuCores(d3CpuCores()); } catch (UnsatisfiedLinkError e) { /* a library without the module */ }
+                if (libraryLoaded && started) try { nativeSetAniso(anisoC.isChecked() ? 4 : 0); nativeSetUpscale(picked(upG, 9600, 2)); } catch (UnsatisfiedLinkError e) { /* an older library */ }
                 cp.edit().putBoolean("fps", fps.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putBoolean("d3_hide_sticks", hideSt.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
                     .putInt("gear_mode", picked(gearG, 9000, D3_GEAR_LABELS.length)).putInt("d3_menu_swipe", picked(swG, 9300, 2)).apply();
                 if (d3Pad != null) d3Pad.reloadSettings();
