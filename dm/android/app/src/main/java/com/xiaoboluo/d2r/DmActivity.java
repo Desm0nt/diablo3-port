@@ -498,7 +498,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 startedNative = p.getBoolean("d3_native_res", false);
                 if (startedNative) Os.setenv("DM_D3_HEIGHT", "native", true); else Os.unsetenv("DM_D3_HEIGHT");
                 // Anisotropic filtering x4 (xbg_game.cpp namespace aniso, off by default: more texture reads, PowerVR drivers without it stay off) and
-                // upscale to the screen (vulkan_present.cpp namespace upscale: 0 = the compositor stretch, auto = GSR on Adreno / FSR 1 elsewhere);
+                // upscale to the screen (vulkan_present.cpp namespace upscale: 0 = the compositor stretch, auto = FSR 1 (GSR dropped 15.11));
                 // both also switched live from the gear (nativeSetAniso / nativeSetUpscale)
                 Os.setenv("DM_GFX_ANISO", p.getBoolean("d3_aniso", false) ? "4" : "0", true);
                 Os.setenv("DM_GFX_UPSCALE", p.getInt("d3_upscale", 0) == 1 ? "auto" : "0", true);
@@ -946,7 +946,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             nativeC.setOnCheckedChangeListener((c, on) -> d3ModeLabels(modeG, ui, picked(aspG, 8000, 4), on));
             heading(box, when(ui, R.string.d3_sharpen, false));
             RadioGroup sh = radios(box, texts(ui, D3_SHARPEN_LABELS), 2000, p.getInt("sharpen", 0), true);
-            // Upscale to the screen (vulkan_present.cpp namespace upscale): off = the compositor stretch, auto = GSR on Adreno / FSR 1 elsewhere; live
+            // Upscale to the screen (vulkan_present.cpp namespace upscale): off = the compositor stretch, auto = FSR 1 (GSR dropped 15.11); live
             heading(box, when(ui, R.string.d3_upscale, true));
             RadioGroup upG = radios(box, new String[] {ui.getString(R.string.d3_off), ui.getString(R.string.d3_upscale_auto)}, 9600, Math.max(0, Math.min(1, p.getInt("d3_upscale", 0))), true);
             note(box, ui.getString(R.string.d3_upscale_note));

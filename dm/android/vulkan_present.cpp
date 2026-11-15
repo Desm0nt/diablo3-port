@@ -319,7 +319,9 @@ VkQueryPool queries{};bool stamped[2]{};double tick_ns=0,sum_ns=0,max_ns=0;unsig
 int64_t mono_ns(){timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return int64_t(ts.tv_sec)*1000000000+ts.tv_nsec;}
 const char *name(int m){return m==GSR?"gsr":m==FSR?"fsr":"off";}
 int parse(const char *e){if(!e||!*e||!strcmp(e,"0")||!strcmp(e,"off"))return 0;if(!strcmp(e,"auto")||!strcmp(e,"1"))return 1;if(!strcmp(e,"gsr"))return 2;if(!strcmp(e,"fsr"))return 3;return -2;}
-int resolve(int r){return broken?OFF:r==1?(adreno?GSR:FSR):r==2?GSR:r==3?FSR:OFF;}
+// [D3] 15.11: GSR dropped from the choices (owner, Mi 14 A/B: SGSR 1 "mobile" looked softer than the display hardware's own scaler, ~10 %
+// less fine detail at +2.3 ms GPU); auto and the old "gsr" value both mean FSR 1 now. The GSR pipeline stays built for nothing but a manual A/B.
+int resolve(int r){return broken?OFF:(r==1||r==2||r==3)?FSR:OFF;}
 bool enabled(){return mode!=OFF;}
 // Once per initialization: the GPU vendor (for auto) and, the first time, the request from the environment (the gear sets it at start).
 void decide(){
@@ -328,7 +330,7 @@ void decide(){
     if(r==-2){__android_log_print(ANDROID_LOG_WARN,"dm-vulkan","NVN present upscale: DM_GFX_UPSCALE=%s is not known (0 | auto | gsr | fsr): off",e);r=0;}
     int u=-1;requested.compare_exchange_strong(u,r);r=requested.load();
     __android_log_print(ANDROID_LOG_INFO,"dm-vulkan","NVN present upscale %s (DM_GFX_UPSCALE=%s; %s GPU vendor %#x: auto = %s)%s",r==1?"auto":name(resolve(r)),e&&*e?e:"unset",
-        adreno?"Adreno":"non-Adreno",pp.vendorID,adreno?"gsr":"fsr",resolve(r)?"; the window's buffers take the screen size, our pass scales the game's frame into them":"; the compositor stretches the game's output size");
+        adreno?"Adreno":"non-Adreno",pp.vendorID,"fsr",resolve(r)?"; the window's buffers take the screen size, our pass scales the game's frame into them":"; the compositor stretches the game's output size");
 }
 void fail(const char *what,int r){if(mode!=OFF)__android_log_print(ANDROID_LOG_WARN,"dm-vulkan","NVN present upscale %s off: %s failed (VkResult %d); the compositor stretch from now on",name(mode),what,r);broken=true;mode=OFF;}
 // Frames the pass takes: sampled as UNORM and written to the UNORM swapchain (sRGB / float frames keep the blit).

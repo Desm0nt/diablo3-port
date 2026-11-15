@@ -33,8 +33,8 @@
     <string name="d3_native_res">Native screen resolution (experimental, for powerful devices)</string>
     <string name="d3_native_res_note">The game renders at your screen\'s own resolution (e.g. 2400×1080 instead of 2000×900 on a 20:9 phone; the sizes above show it). Much sharper, but about 40 % more GPU work (more on 1440p screens): lower fps, more heat. May not work on every device; if the game misbehaves, turn it off.</string>
     <string name="d3_upscale">Upscale to the screen</string>
-    <string name="d3_upscale_auto">Auto (GSR on Snapdragon, FSR on others)</string>
-    <string name="d3_upscale_note">Off: the system stretches the game\'s picture to the screen (soft). Auto: the game scales it itself with an edge-preserving filter (Snapdragon GSR on Adreno, AMD FSR 1 on other GPUs): sharper edges and text, a little more GPU work. Works together with Sharpening; not needed with native screen resolution.</string>
+    <string name="d3_upscale_auto">On (AMD FSR 1)</string>
+    <string name="d3_upscale_note">Off: the system stretches the game\'s picture to the screen (soft). Auto: the game scales it itself with an edge-preserving filter (AMD FSR 1): sharper edges and text, a little more GPU work. Works together with Sharpening; not needed with native screen resolution.</string>
     <string name="d3_aniso">Anisotropic filtering ×4</string>
     <string name="d3_aniso_note">Keeps ground and wall textures sharp in the distance and at an angle (the Switch version has none). A little more GPU work; it may lag or not work on some phones: then turn it off. GPUs without this feature ignore it.</string>
     <string name="d3_cpu_cores">CPU cores (may not work)</string>
