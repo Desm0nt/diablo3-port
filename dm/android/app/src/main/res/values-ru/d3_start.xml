@@ -6,4 +6,5 @@
     <string name="d3_start_missing_data">Файлы игры не найдены в Download/Diablo3Mobile. Запустите на ПК setup со своими файлами игры и скопируйте созданную им папку «Diablo3Mobile» в папку Download на телефоне.</string>
     <string name="d3_start_missing_modules">Нет пропатченных модулей игры (Download/Diablo3Mobile/dm/out). Запустите setup на ПК ещё раз и заново скопируйте всю папку «Diablo3Mobile» в Download на телефоне.</string>
     <string name="d3_start_missing_shaders">Нет шейдеров (Download/Diablo3Mobile/dm/shaders). Запустите setup на ПК ещё раз и заново скопируйте всю папку «Diablo3Mobile» в Download на телефоне.</string>
+    <string name="d3_start_damaged_archives" formatted="true">Некоторые файлы игры неполные (копирование на телефон оборвалось):\n\n%1$s\n\nСкопируйте эти файлы с ПК ещё раз в то же место в Download/Diablo3Mobile (с заменой) и запустите игру.</string>
 </resources>

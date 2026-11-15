@@ -303,6 +303,57 @@ static int d3_pick_shader_dir(void) {
     LOG("【红】boot: shaders: no bundle in %s or a misplaced copy: the game would draw nothing (black screen); stopping with the missing-shaders screen (DM_SHADER_CHECK=0 starts anyway)", g_shaders);
     return -4;
 }
+
+// [D3] GitHub issue #26: an archive cut short by an interrupted copy (romfs/CPKs/Act4.cpk, 459 of 1171 MB) let the game start, then it
+// died after the hero was chosen (FORTIFY pread abort). Every *.cpk under romfs/CPKs, romfs/Update/CPKs and aoc/<n>/ is checked before the
+// game starts (d3_cpk_check.h: the archive's name table must line up at the file's real length; any language, no size list). A damaged one
+// stops the start with a screen naming the files (start code -11, DmActivity reads nativeStartDetail). A set of files that passed once is
+// remembered by name / size / modification time (files/cpk-check.ok), so later starts read no archive header. DM_CPK_CHECK=0: log only.
+#include "d3_cpk_check.h"
+static char g_start_detail[2048];   // the start screen's details (-11: the damaged archives, one per line)
+static int d3_check_archives(void) {
+    const char *m = getenv("DM_CPK_CHECK"); const int stop = !(m && *m == '0');
+    char dirs[48][1300]; int nd = 0;
+    snprintf(dirs[nd++], sizeof dirs[0], "%s/romfs/CPKs", g_src);
+    snprintf(dirs[nd++], sizeof dirs[0], "%s/romfs/Update/CPKs", g_src);
+    { char aoc[1100]; snprintf(aoc, sizeof aoc, "%s/aoc", g_src); DIR *d = opendir(aoc);
+      if (d) { struct dirent *e; while ((e = readdir(d)) && nd < 48) if (e->d_name[0] != '.') snprintf(dirs[nd++], sizeof dirs[0], "%s/%s", aoc, e->d_name); closedir(d); } }
+    // the set's signature: FNV-1a over "path size mtime" of every archive
+    char (*paths)[1400] = calloc(256, sizeof *paths); if (!paths) return 0;
+    int np = 0; uint64_t sig = 0xCBF29CE484222325ull;
+    for (int i = 0; i < nd; i++) {
+        DIR *d = opendir(dirs[i]); if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d)) && np < 256) {
+            size_t l = strlen(e->d_name); if (l < 5 || strcasecmp(e->d_name + l - 4, ".cpk")) continue;
+            snprintf(paths[np], sizeof paths[0], "%s/%s", dirs[i], e->d_name);
+            struct stat st; if (stat(paths[np], &st)) continue;
+            char line[1500]; snprintf(line, sizeof line, "%s %lld %lld\n", paths[np], (long long)st.st_size, (long long)st.st_mtime);
+            for (const char *c = line; *c; c++) sig = (sig ^ (uint8_t)*c) * 0x100000001B3ull;
+            np++;
+        }
+        closedir(d);
+    }
+    char okf[1100], want[40], have[40] = {0}; snprintf(okf, sizeof okf, "%s/cpk-check.ok", g_files); snprintf(want, sizeof want, "%016llx %d", (unsigned long long)sig, np);
+    { FILE *f = fopen(okf, "r"); if (f) { if (!fgets(have, sizeof have, f)) have[0] = 0; fclose(f); } }
+    if (np && !strcmp(have, want)) { LOG("boot: archives: %d *.cpk unchanged since they last passed the check", np); free(paths); return 0; }
+    const uint64_t t0 = now_ns(); int bad = 0, unread = 0; size_t used = 0; g_start_detail[0] = 0;
+    for (int i = 0; i < np; i++) {
+        char why[256]; const int r = d3_cpk_check(paths[i], why, sizeof why);
+        const char *rel = !strncmp(paths[i], g_src, strlen(g_src)) ? paths[i] + strlen(g_src) + 1 : paths[i];
+        if (r == 1) {
+            bad++; LOG("【红】boot: archive %s is damaged: %s", rel, why);
+            if (used < sizeof g_start_detail - 1) used += (size_t)snprintf(g_start_detail + used, sizeof g_start_detail - used, "%s%s", used ? "\n" : "", rel);
+            if (used > sizeof g_start_detail - 1) used = sizeof g_start_detail - 1;
+        } else if (r < 0) { unread++; LOG("boot: archive %s: %s (not judged)", rel, why); }
+    }
+    LOG("boot: archives: %d *.cpk checked in %.0f ms: %d damaged, %d not readable", np, (now_ns() - t0) / 1e6, bad, unread);
+    free(paths);
+    if (!bad && !unread && np) { FILE *f = fopen(okf, "w"); if (f) { fprintf(f, "%s\n", want); fclose(f); } }
+    if (bad && !stop) { LOG("【红】boot: archives: starting anyway (DM_CPK_CHECK=0): the game will crash when it reads a damaged one"); return 0; }
+    return bad ? -11 : 0;
+}
+JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStartDetail(JNIEnv *env, jclass cls) { (void)cls; return (*env)->NewStringUTF(env, g_start_detail); }
 #endif
 // 内部目录 romfs/data/ 下逐个链接到资源目录的文件（游戏按 rom:/data/… 读；链接让资源留在玩家放的位置，不复制 5 GB）
 // Under the internal dir romfs/data/, link each file of the resource dir (the game reads rom:/data/...; links keep the resources where the player put them instead of copying 5 GB)
@@ -596,6 +647,7 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     snprintf(g_shaders, sizeof g_shaders, "%s/shaders", g_runtime);
 #ifdef DM_GAME_D3
     { int rc = d3_pick_shader_dir(); if (rc) return rc; }
+    { int rc = d3_check_archives(); if (rc) return rc; }
 #else
     snprintf(required, sizeof required, "%s", g_shaders);
     DIR *shaders = opendir(required); int have_shader = 0;

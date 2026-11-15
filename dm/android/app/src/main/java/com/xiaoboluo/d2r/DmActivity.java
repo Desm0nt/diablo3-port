@@ -97,6 +97,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native void nativePadRemoved(int device);
     static native String nativeDriverStatus();          // [D3] "<requested>\t<active>\t<reason>\t<details>" (vk_driver.c), "" before the driver loads
     static native void nativeLog(String text);          // [DOOM] a "[java] ..." breadcrumb line into boot.log (jni_android.c)
+    static native String nativeStartDetail();            // [D3] details of a failed start (-11: the damaged archives, one per line; jni_android.c d3_check_archives)
     static native String nativeLogPath();               // [DOOM] this run's boot.log ("" before nativeStart)
     // [D3] (from the DOOM 2016 port, its BUGS_AND_FIXES 2.22) crash logs (CrashLog.java): breadcrumbs from before the native log exists
     // wait in pendingCrumbs
@@ -1299,6 +1300,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         int result = nativeStart(getFilesDir().getAbsolutePath(), ext.getAbsolutePath(), src, Locale.getDefault().toLanguageTag());
         if (DOOM) { nativeLogReady = true; gameStartedAt = android.os.SystemClock.uptimeMillis(); flushCrumbs(); crumb("nativeStart " + result); }
         if (result < 0) {
+            // [D3] GitHub issue #26: archives cut short by an interrupted copy, named on the start screen
+            if (D3 && result == -11) { String files = ""; try { files = nativeStartDetail(); } catch (Throwable t) { /* older native */ }
+                showStartError(d3Ui().getString(R.string.d3_start_damaged_archives, files)); return; }
             int resource = switch (result) {
                 // [D3] its own texts (from the DOOM 2016 port, d89997e): the shared ones name d2r's Download/S2X/D2R Mobile and d2rm_android.py
                 case -2 -> D3 ? R.string.d3_start_missing_data : R.string.dmAndroidMissingData;

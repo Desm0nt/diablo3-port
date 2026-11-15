@@ -6,4 +6,5 @@
     <string name="d3_start_missing_data">Game files were not found in Download/Diablo3Mobile. On a PC, run setup with your own game files, then copy the \"Diablo3Mobile\" folder it makes to the phone\'s Download folder.</string>
     <string name="d3_start_missing_modules">The patched game modules are missing (Download/Diablo3Mobile/dm/out). Run setup on the PC again and copy the whole \"Diablo3Mobile\" folder to the phone\'s Download folder again.</string>
     <string name="d3_start_missing_shaders">The shaders are missing (Download/Diablo3Mobile/dm/shaders). Run setup on the PC again and copy the whole \"Diablo3Mobile\" folder to the phone\'s Download folder again.</string>
+    <string name="d3_start_damaged_archives" formatted="true">Some game files are incomplete (the copy to the phone was cut off):\n\n%1$s\n\nCopy these files again from your PC to the same place in Download/Diablo3Mobile (replace them), then start the game.</string>
 </resources>

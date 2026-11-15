@@ -6,4 +6,5 @@
     <string name="d3_start_missing_data">Oyun dosyaları Download/Diablo3Mobile içinde bulunamadı. Bilgisayarda kendi oyun dosyalarınızla setup\'ı çalıştırın ve oluşturduğu \"Diablo3Mobile\" klasörünü telefonun Download klasörüne kopyalayın.</string>
     <string name="d3_start_missing_modules">Yamalı oyun modülleri eksik (Download/Diablo3Mobile/dm/out). Bilgisayarda setup\'ı yeniden çalıştırın ve \"Diablo3Mobile\" klasörünün tamamını telefonun Download klasörüne yeniden kopyalayın.</string>
     <string name="d3_start_missing_shaders">Gölgelendiriciler eksik (Download/Diablo3Mobile/dm/shaders). Bilgisayarda setup\'ı yeniden çalıştırın ve \"Diablo3Mobile\" klasörünün tamamını telefonun Download klasörüne yeniden kopyalayın.</string>
+    <string name="d3_start_damaged_archives" formatted="true">Bazı oyun dosyaları eksik (telefona kopyalama yarıda kesildi):\n\n%1$s\n\nBu dosyaları PC\'den Download/Diablo3Mobile içindeki aynı yere yeniden kopyalayın (üzerine yazın), sonra oyunu başlatın.</string>
 </resources>
