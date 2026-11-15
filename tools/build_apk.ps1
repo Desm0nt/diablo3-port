@@ -70,14 +70,19 @@ if ($Validation) {
 } elseif (Test-Path $vvl) { Remove-Item $vvl }
 
 $jni = (Resolve-Path $jdir).Path -replace '\\', '/'
-# Default Vulkan driver bundled as assets: Turnip (Mesa, MIT) fetched by tools/fetch_turnip.py with a pinned SHA-256;
-# without it the APK simply uses the system driver.
-& $python tools/fetch_turnip.py *> work/logs/fetch-turnip.log
+# Vulkan driver packages bundled as assets (tools/fetch_drivers.py = frontend-common/tools/drivers/fetch_drivers.py, KB DRV-04, as DOOM 2016:
+# the four Turnip v27 builds + RADV-Xclipse + PanVK JimVulkan / zenith, pinned URLs and SHA-256; zips cached in work/drivers; a package that
+# cannot be fetched is skipped, see the log). The app copies to the phone only the ones that fit its GPU (VkDrivers.extractBundled); without
+# them the APK simply uses the system driver.
+& $python tools/fetch_drivers.py *> work/logs/fetch-drivers.log
+if ($LASTEXITCODE) { Write-Warning 'Some driver packages were not bundled (work/logs/fetch-drivers.log)' }
 # Gamepad themes and the default on-screen layout of the front end (dm/android/front-assets, nx2android themes, MIT) go in beside the driver
 $fa = 'work/front-assets'
 if (Test-Path $fa) { Remove-Item -Recurse -Force $fa }
 New-Item -ItemType Directory -Force $fa | Out-Null
 if (Test-Path work/driver-assets/drivers) { Copy-Item -Recurse work/driver-assets/drivers $fa }
+# the driver manager's offline copy of drivers/sources.json (DriverManager.java; the app prefers the DOOM 2016 repository's when online)
+Copy-Item drivers/sources.json "$fa/driver-sources.json"
 Copy-Item -Recurse dm/android/front-assets/* $fa
 $drv = '-PdmDriverAssets=' + ((Resolve-Path $fa).Path -replace '\\', '/')
 if (-not (Get-Command $gradle -ErrorAction SilentlyContinue)) { throw "Gradle not found: '$gradle' (put gradle on PATH or set GRADLE to gradle.bat)" }

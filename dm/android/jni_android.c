@@ -325,6 +325,38 @@ static int link_romfs(const char *romfs) {
 }
 #endif
 
+// [DOOM] BUGS_AND_FIXES 2.56 (DOOM issue #33: PanVK on a Mali-G57 failed in vkCreateSwapchainKHR, the start error had no gear, the player
+// was stuck on that driver; KB DRV-07). The game's Vulkan initialization failed while a custom driver package ran: everything it made is
+// already destroyed (dm_android_vk_initialize -> cleanup_initialization), so the driver is switched to the system one in this process
+// (vk_driver.c dm_vk_driver_reset_to_system) and the initialization runs once more. No loop: the second run has no custom driver. The status
+// for the app (nativeDriverStatus) then says init-failed / init-failed-all; DmActivity (driverWatch / showBootFailure) resets the saved choice
+// and tells the player. When the engine itself had started (a failure inside dm_vk_initialize: it keeps state of its own), no retry here:
+// init-failed-restart, the start error tells the player that the next start uses the system driver.
+int dm_vk_driver_custom(void);
+const char *dm_vk_driver_name(void);
+const char *dm_vk_driver_requested(void);
+void dm_vk_driver_reset_to_system(void);
+void dm_vk_driver_note_fallback(const char *failed, const char *reason, const char *error);
+int dm_android_vk_retry_safe(void);
+static int vk_fallback_to_system(const char *shaders, char *error, size_t bytes, int rc) {
+    char failed[160], first[512]; snprintf(failed, sizeof failed, "%s", dm_vk_driver_requested()); snprintf(first, sizeof first, "%s", error);
+    LOG("boot: Vulkan initialization with the custom driver %s (%s) failed %d: %s", failed, dm_vk_driver_name(), rc, first);
+    if (!dm_android_vk_retry_safe()) {
+        LOG("boot: driver fallback: no retry in this process (the engine had started), the next start uses the system driver");
+        dm_vk_driver_note_fallback(failed, "init-failed-restart", first);
+        return rc;
+    }
+    LOG("boot: driver fallback: everything made with %s is destroyed; initializing Vulkan again with the system driver in this process", failed);
+    dm_vk_driver_reset_to_system();
+    error[0] = 0;
+    uint64_t t0 = now_ns();
+    int r = dm_android_vk_initialize(shaders, error, bytes);
+    if (r) LOG("boot: driver fallback: the system driver failed too %d: %s", r, error);
+    else LOG("boot: driver fallback: Vulkan initialized with the system driver in %.0f ms (%s did not start: %s)", (now_ns() - t0) / 1e6, failed, first);
+    dm_vk_driver_note_fallback(failed, r ? "init-failed-all" : "init-failed", first);
+    return r;
+}
+
 static void *host_thread(void *arg) {
     (void)arg;
     char out[1200]; snprintf(out, sizeof out, "%s/out", g_runtime);
@@ -334,6 +366,7 @@ static void *host_thread(void *arg) {
     snprintf(shaders, sizeof shaders, "%s", g_shaders);   // <runtime>/shaders, or the copy d3_pick_shader_dir found
     uint64_t t0 = now_ns(); LOG("boot: Vulkan initialization (shaders %s)", shaders);
     int graphics_rc = dm_android_vk_initialize(shaders, error, sizeof error);
+    if (graphics_rc && dm_vk_driver_custom()) graphics_rc = vk_fallback_to_system(shaders, error, sizeof error, graphics_rc);   // [DOOM] 2.56
     if (graphics_rc) { LOG("boot: Vulkan initialization failed %d: %s", graphics_rc, error); front_android_boot_failed(-6); return NULL; }
     LOG("boot: Vulkan initialized in %.0f ms", (now_ns() - t0) / 1e6);   // [DOOM] breadcrumb
 #ifdef DM_GAME_XC2

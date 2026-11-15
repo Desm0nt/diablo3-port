@@ -129,8 +129,8 @@ pwsh tools/build_apk.ps1 [-Install <adb serial>]  # Linux / macOS with PowerShel
 
 The script reads every tool path from the environment (`ANDROID_HOME`, `JAVA_HOME`, `GRADLE`, `PYTHON`) and signs with
 `DM_KEYSTORE` (default: the Android debug keystore in `~/.android`). Output: `work/D3-port-debug.apk`, app id
-`org.diablo3.port` ("Diablo III Mobile"). It downloads the default Turnip driver with a pinned SHA-256
-(`tools/fetch_turnip.py`) the first time. `work/` is git-ignored and holds every build output and every game-derived file.
+`org.diablo3.port` ("Diablo III Mobile"). It downloads the bundled Vulkan driver packages (Turnip; PanVK and RADV-Xclipse as
+experimental options) with pinned SHA-256s (`tools/fetch_drivers.py`) the first time. `work/` is git-ignored and holds every build output and every game-derived file.
 
 ## Installing
 
@@ -231,9 +231,10 @@ Diablo III Mobile stands on the work of others — thank you:
 - **[libadrenotools](https://github.com/bylaws/libadrenotools)** by Billy Laws (BSD-2-Clause).
 - **Ryujinx** shader translator (Ryujinx Team and Contributors, MIT), vendored by d2r-mobile in `dm/third_party/ryujinx`.
 - **[AMD FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR)** RCAS (MIT).
-- **[Mesa](https://mesa3d.org) Turnip** (MIT) — the default Vulkan driver, bundled in the APK as the adrenotools build
-  by **[The412Banner](https://github.com/The412Banner/Banners-Turnip)** (Mesa main). Not stored in this repository:
-  `tools/fetch_turnip.py` downloads it at build time with a pinned SHA-256.
+- **[Mesa](https://mesa3d.org) Turnip** (MIT) — the default Vulkan driver on Adreno, bundled in the APK as the adrenotools build
+  by **[The412Banner](https://github.com/The412Banner/Banners-Turnip)** (Mesa main); **Mesa PanVK** (Mali) and **RADV** (Samsung Xclipse)
+  adrenotools builds by [JimVulkan](https://github.com/JimVulkan) and [zenithblue-oss](https://github.com/zenithblue-oss/panvk-kbase-android)
+  as experimental options (MIT). Not stored in this repository: `tools/fetch_drivers.py` downloads them at build time with pinned SHA-256s.
 - Khronos **Vulkan validation layers** (Apache-2.0) — used for debugging, not redistributed.
 
 Details per file: [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md).

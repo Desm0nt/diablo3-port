@@ -424,6 +424,16 @@ int present(void*,void*,VkImage source,VkFormat source_format,uint32_t width,uin
 }
 extern "C" void dm_android_vk_set_window(ANativeWindow *window){if(window)ANativeWindow_acquire(window);{std::lock_guard<std::mutex> l(window_mutex);if(desired)ANativeWindow_release(desired);desired=window;++generation;}window_cv.notify_all();}
 extern "C" int dm_android_vk_has_window(){return has_window(nullptr);}
+// [DOOM] BUGS_AND_FIXES 2.56 (DOOM issue #33, KB DRV-07): the in-process fallback to the system driver (jni_android.c host_thread). A failed
+// initialization destroys what it made (fail -> cleanup_initialization), so it may run again with another driver, as long as the engine was
+// not initialized yet (dm_vk_initialize below keeps state of its own): dm_android_vk_retry_safe. DM_VK_FAKE_INIT_FAIL (test switch, dm/env):
+// 1 = the initialization fails right after the swapchain was made, only while a custom driver is active (the same VkResult as PanVK on the
+// Mali-G57 of DOOM issue #33), so the fallback can be checked on a phone where every driver works; 2 = it fails with any driver (the system
+// driver too: the start error must be shown, no loop).
+extern "C" int dm_vk_driver_custom(void);
+static bool engine_touched=false;
+extern "C" int dm_android_vk_retry_safe(void){return !engine_touched && !ready;}
+static bool fake_init_fail(){const char *e=getenv("DM_VK_FAKE_INIT_FAIL");if(!e||!*e)return false;const int v=atoi(e);return v>=2 || (v==1 && dm_vk_driver_custom());}
 extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t bytes){
     if(path){std::string dir=path;size_t cut=dir.find_last_of('/');if(FILE *m=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-present-native").c_str(),"rb")){present_native=fgetc(m)!='0';fclose(m);}
         if(FILE *m=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-present-timing").c_str(),"rb")){present_timing=true;fclose(m);}}
@@ -432,6 +442,7 @@ extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t byte
     if(ready||!path||!*path)return fail("Initialization requires an external shader directory and an uninitialized renderer",VK_ERROR_INITIALIZATION_FAILED);
     // 每次初始化从缺省的 120 Hz 重新读标记。 | Each initialization starts again from the 120 Hz default before the marker.
     frame_rate_vote=120;
+    dm_vk_format_list=0;dm_vk_custom_border=0;dm_vk_descriptor_indexing=0;   // [DOOM] 2.56: a repeated initialization (driver fallback) starts over
     {std::string dir=path;size_t cut=dir.find_last_of('/');if(FILE *m=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-frame-rate").c_str(),"rb")){float v=0;frame_rate_vote=fscanf(m,"%f",&v)==1 && v>=0 && v<=240?v:0;fclose(m);}}
 
     VkApplicationInfo ai{VK_STRUCTURE_TYPE_APPLICATION_INFO};ai.pApplicationName="dm-android";ai.apiVersion=VK_API_VERSION_1_1;
@@ -534,6 +545,8 @@ extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t byte
         if(r==VK_ERROR_SURFACE_LOST_KHR){uint64_t bad=active_generation;destroy_swap();wait_window_change(bad);continue;}
         if(r)return fail("Swapchain",r);break;
     }
+    if(fake_init_fail()){__android_log_print(ANDROID_LOG_WARN,"dm-vulkan","DM_VK_FAKE_INIT_FAIL=%s: failing the initialization after the swapchain (test of the driver fallback)",getenv("DM_VK_FAKE_INIT_FAIL"));
+        return fail("Swapchain (faked by DM_VK_FAKE_INIT_FAIL)",VK_ERROR_INVALID_EXTERNAL_HANDLE);}
     VkCommandPoolCreateInfo cp{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};cp.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;cp.queueFamilyIndex=family;if((r=vkCreateCommandPool(device,&cp,nullptr,&command_pool)))return fail("Present command pool",r);
     VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};ca.commandPool=command_pool;ca.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ca.commandBufferCount=1;if((r=vkAllocateCommandBuffers(device,&ca,&command)))return fail("Present command",r);
     VkSemaphoreCreateInfo sc{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};if((r=vkCreateSemaphore(device,&sc,nullptr,&acquired)))return fail("Acquire semaphore",r);VkFenceCreateInfo fc{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};if((r=vkCreateFence(device,&fc,nullptr,&fence)))return fail("Present fence",r);
@@ -549,5 +562,5 @@ extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t byte
         if((r=vkCreateSemaphore(device,&sc,nullptr,&overlap_acquired)))return fail("Acquire semaphore",r);if((r=vkCreateFence(device,&fc,nullptr,&overlap_fence)))return fail("Present fence",r);}
     __android_log_print(ANDROID_LOG_INFO,"dm-vulkan","Present overlap=%d (marker gfx-present-overlap)",int(overlap));
     shader_path=path;dm_vk_config config{};config.size=sizeof(config);config.game.size=sizeof(config.game);config.game.physical=physical;config.game.device=device;config.game.queue=queue;config.game.queue_family=family;config.game.enabled_core=features.features;config.game.enabled_shader_draw_parameters=draw.shaderDrawParameters;config.game.fence_timeout_ns=10000000000ull;config.game.shader_directory=shader_path.c_str();config.game.present=present;config.game.log=log_message;config.game.fatal=fatal;config.sampler_mirror_clamp_to_edge=mirror;config.sampler_filter_minmax=minmax;config.has_window=has_window;config.display_hz=0; // Query actual display refresh in frontend; do not guess 60 Hz.
-    int status=dm_vk_initialize(&config,error,bytes);if(!status)ready=true;else cleanup_initialization();return status;
+    engine_touched=true;int status=dm_vk_initialize(&config,error,bytes);if(!status)ready=true;else cleanup_initialization();return status;
 }

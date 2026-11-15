@@ -4,7 +4,7 @@
 # APK) and the APK. Layout on the phone: /sdcard/Download/Diablo3Mobile/{romfs,aoc,dm,drivers}.
 # Sources (defaults = the folder tools/setup_d3.py prepares, work/Diablo3Mobile):
 #   PREP=<dir> (default work/Diablo3Mobile) with romfs/, aoc/<index>/, dm/out/, dm/shaders/; APK=<file> (default work/D3-port-debug.apk);
-#   DRIVER=<dir> (default work/driver-assets/drivers/turnip27, from tools/fetch_turnip.py). Device: ADB_SERIAL / ADB as in tools/run.sh.
+#   DRIVER=<dir> (default work/driver-assets/drivers/turnip27, from tools/fetch_drivers.py). Device: ADB_SERIAL / ADB as in tools/run.sh.
 # Big files: plain adb push first, tools/push_big.sh (resumable 256 MiB chunks) when it fails or the size is wrong; files already on
 # the phone with the right size are skipped, so the script can simply be run again after an interruption. Never kills the adb server.
 # (setup push [serial] does the same for the data folder without the APK / driver.)

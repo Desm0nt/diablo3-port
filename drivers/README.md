@@ -2,11 +2,21 @@
 
 No driver binaries are stored in this repository.
 
-**Bundled default.** `tools/build_apk.ps1` runs `tools/fetch_turnip.py`, which downloads the Mesa **Turnip v27** adrenotools
-package (Mesa main, MIT; build by [The412Banner](https://github.com/The412Banner/Banners-Turnip)) with a pinned SHA-256 and
-packages it into the APK as `assets/drivers/turnip27`. On the first start the app copies it to its private storage and uses
-it by default on Adreno GPUs; when it does not load (or on a non-Adreno GPU) the app falls back to the phone's own driver.
-Without the download the APK simply uses the system driver.
+**Bundled packages.** `tools/build_apk.ps1` runs `tools/fetch_drivers.py` (the shared copy of
+`frontend-common/tools/drivers/fetch_drivers.py`, the same pinned list as the DOOM Mobile port), which downloads these adrenotools
+packages with pinned SHA-256s and packages them into the APK as `assets/drivers/<name>/`: the four Mesa **Turnip v27** builds (MIT;
+build by [The412Banner](https://github.com/The412Banner/Banners-Turnip)), **RADV Xclipse 1.8.0** (Samsung Xclipse, Android 14+;
+[JimVulkan](https://github.com/JimVulkan/radv-xclipse)), **PanVK JimVulkan 1.6.0** and **PanVK zenith 26.3.1** (Mali;
+[JimVulkan](https://github.com/JimVulkan/mali-panvk), [zenithblue-oss](https://github.com/zenithblue-oss/panvk-kbase-android)).
+On every start after an install or update the app copies to its private storage only the packages that fit the phone's GPU
+(GPU family, glibc build, `meta.json` `minApi`) and replaces older copies of them. `turnip27` is the default on Adreno 6xx/7xx; on
+Mali, PowerVR and Xclipse the system driver stays the default and PanVK / RADV are experimental options in the gear dialog.
+Without the downloads the APK simply uses the system driver.
+
+**Driver manager.** The gear dialog's *Manage drivers / Download…* lists the installed packages (origin, GPU family, size, why one
+cannot run here), installs a package zip picked with the system file picker, and downloads packages for this GPU from the GitHub
+releases listed in `drivers/sources.json` (the app reads the DOOM Mobile repository's copy, cached for 6 h; this file is the copy the
+APK carries for offline use).
 
 **Your own driver.** Copy an adrenotools driver package into `Download/Diablo3Mobile/drivers/` on the phone, as the zip
 or unpacked:

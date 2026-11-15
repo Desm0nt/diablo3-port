@@ -107,6 +107,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
 
     private static WeakReference<DmActivity> current = new WeakReference<>(null);
     private static volatile int bootFailure;
+    private long gameStartedAt;   // [DOOM] nativeStart time (D3: VkDrivers times its "first frames presented" line itself)
+    private static boolean driverRestart;   // [D3] KB DRV-07: the restart after a failed Vulkan start with a custom driver was asked for
     private AlertDialog inputDialog;
 
     private SurfaceView view;
@@ -509,13 +511,22 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             // Vulkan driver (vk_driver.c): adrenotools packages under <data>/drivers/<name>/ (meta.json + the library) are copied to
             // private storage (a driver must be loaded from there); the package chosen in the dialog sets DM_VK_DRIVER, which dm/env
             // can also set (DM_VK_DRIVER=<name>). The hooks adrenotools loads live in nativeLibraryDir.
-            Os.setenv("DM_NATIVE_LIB_DIR", getApplicationInfo().nativeLibraryDir, true);
             File drivers = new File(getFilesDir(), "drivers");
-            Os.setenv("DM_DRIVERS_DIR", drivers.getAbsolutePath(), true);
-            extractBundledDrivers(drivers);   // the APK's default driver (Turnip 27, assets/drivers/<name>/; as DOOM 2016)
-            importDrivers(new File(Environment.getExternalStorageDirectory(), "Download/" + DATA_DIR + "/drivers"), drivers);
-            if (D3) pruneDrivers(p, drivers);   // [D3] GitHub issue #9: copies of packages the player deleted from Download/.../drivers go too
-            if (D3) updateDriversInBackground(drivers);   // [D3] (from the DOOM 2016 port) packages for other Adreno GPUs from drivers/manifest.json when online
+            if (D3) {
+                // [D3] KB DRV-04 (DOOM 2016 BUGS_AND_FIXES 2.39): the shared VkDrivers as in DOOM 2016. prepare(): DM_NATIVE_LIB_DIR / DM_DRIVERS_DIR;
+                // the APK's packages (the Turnip builds; PanVK JimVulkan / zenith and RADV-Xclipse as experimental options; tools/fetch_drivers.py)
+                // copied only when they fit this phone (GPU family, glibc, meta.json minApi) and again after every APK update (<name>/.dm_origin; the
+                // old copy-by-size never replaced a same-name package); the player's packages from Download/Diablo3Mobile/drivers (folders or zips,
+                // origin "import"); the DOOM 2016 repository's drivers/manifest.json in the background (only packages of this GPU's family, not
+                // the ones deleted in the driver manager). The default stays: Turnip on Adreno 6xx+, the system driver on Mali / PowerVR / Xclipse.
+                vkDrivers().prepare();
+                pruneDrivers(p, drivers);   // [D3] GitHub issue #9: copies of packages the player deleted from Download/.../drivers go too
+            } else {
+                Os.setenv("DM_NATIVE_LIB_DIR", getApplicationInfo().nativeLibraryDir, true);
+                Os.setenv("DM_DRIVERS_DIR", drivers.getAbsolutePath(), true);
+                vkDrivers().extractBundled(drivers);
+                importDrivers(new File(Environment.getExternalStorageDirectory(), "Download/" + DATA_DIR + "/drivers"), drivers);
+            }
             // Game language (DOOM takes it from the system like on the Switch: hle_oe.c GetDesiredLanguage reads DM_LANG; jni sets
             // DM_LANG from the phone locale only when it is unset). "" = follow the phone.
             // Aim assist strength (hle_hid.c DM_AA_STRENGTH: the game's single-player assist scaled; 0 = the game's weak MP-method assist)
@@ -524,9 +535,12 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             Os.setenv("DM_RUMBLE", p.getBoolean("rumble", false) ? "1" : "0", true);
             String lang = p.getString("lang", "");
             if (!lang.isEmpty()) Os.setenv("DM_LANG", lang, true);
-            String drv = p.getString("driver", defaultDriver());
-            if (D3) { drv = driverHardwareCheck(p, drv); drv = driverGuardCheck(p, drv); }
-            if (!drv.isEmpty()) Os.setenv("DM_VK_DRIVER", drv, true); else Os.unsetenv("DM_VK_DRIVER");
+            // [D3] KB DRV-02 / DRV-04 / DRV-07 (DOOM 2016 2.22 / 2.25 / 2.39 / 2.56, VkDrivers.choose): the saved choice or this GPU's default, the
+            // hardware check at every start (another GPU family, glibc build, missing library, meta.json minApi -> the system driver, the choice
+            // reset, the player told why), the crash guard (two launches without a first frame -> the system driver), the message of a
+            // driver whose Vulkan start failed in the last process; sets DM_VK_DRIVER
+            if (D3) vkDrivers().choose();
+            else { String drv = p.getString("driver", defaultDriver()); if (!drv.isEmpty()) Os.setenv("DM_VK_DRIVER", drv, true); else Os.unsetenv("DM_VK_DRIVER"); }
             // [D3] GPUs we could not test (no Adreno kernel driver: Mali, PowerVR, Xclipse): turn on the existing text diagnostics so one
             // report shows what the renderer did - the NVN calls of the first 120 frames, a per-pass GPU profile (passes, targets,
             // draws, pipelines) every 600 frames for the first ~2 minutes.
@@ -588,102 +602,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         return "gpu_model=" + (g.isEmpty() ? "-" : g) + " kgsl=" + kgsl() + " mali=" + mali() + " pvr=" + powervr() + " SoC="
             + (android.os.Build.VERSION.SDK_INT >= 31 ? android.os.Build.SOC_MANUFACTURER + " " + android.os.Build.SOC_MODEL : android.os.Build.HARDWARE);
     }
-    // The GPU family a driver package is for: "mali" (PanVK / panfrost), "xclipse" (RADV), "powervr", "adreno" (Turnip / freedreno) or ""
-    // (unknown: offered everywhere; vk_driver.c verifies what really runs). The folder name and meta.json "name" decide first, description /
-    // libraryName only when they say nothing (the GameHub PanVK zip ships libvulkan_freedreno.so). vk_driver.c family_of uses the same words.
-    static String familyWord(String s) {
-        s = s.toLowerCase(Locale.ROOT);
-        if (s.contains("panvk") || s.contains("panfrost") || s.contains("mali")) return "mali";
-        if (s.contains("radv") || s.contains("radeon") || s.contains("xclipse")) return "xclipse";
-        if (s.contains("powervr") || s.contains("imagination") || s.contains("mesa-pvr")) return "powervr";
-        if (s.contains("turnip") || s.contains("freedreno") || s.contains("adreno")) return "adreno";
-        return "";
-    }
-    private org.json.JSONObject driverMeta(String name) {
-        try { return new org.json.JSONObject(readSmall(new File(new File(new File(getFilesDir(), "drivers"), name), "meta.json"))); }
-        catch (Exception e) { return null; }
-    }
-    String driverFamily(String name) {
-        String f = familyWord(name); if (!f.isEmpty()) return f;
-        org.json.JSONObject o = driverMeta(name); if (o == null) return "";
-        f = familyWord(o.optString("name", "")); if (!f.isEmpty()) return f;
-        f = familyWord(o.optString("description", "")); if (!f.isEmpty()) return f;
-        return familyWord(o.optString("libraryName", ""));
-    }
     static boolean mali() { return new File("/dev/mali0").exists(); }
     static boolean powervr() { return new File("/dev/pvrsrvkm").exists(); }
-    // The package's driver library: meta.json libraryName, else its first .so (a *vulkan* one preferred), as vk_driver.c picks it.
-    static File driverLib(File dir, org.json.JSONObject meta) {
-        String ln = meta != null ? meta.optString("libraryName", "") : "";
-        if (!ln.isEmpty() && !ln.contains("/")) { File f = new File(dir, ln); if (f.isFile()) return f; }
-        File[] fs = dir.listFiles(); File pick = null;
-        if (fs != null) for (File f : fs) if (f.getName().endsWith(".so") && (pick == null || (f.getName().contains("vulkan") && !pick.getName().contains("vulkan")))) pick = f;
-        return pick;
-    }
-    // DT_NEEDED of an ELF64 library (empty on any parse problem); vk_driver.c elf_check reads it the same way.
-    static java.util.List<String> elfNeeded(File f) {
-        java.util.ArrayList<String> out = new java.util.ArrayList<>();
-        try (java.io.RandomAccessFile r = new java.io.RandomAccessFile(f, "r")) {
-            byte[] eh = new byte[64]; r.readFully(eh);
-            if (eh[0] != 0x7f || eh[1] != 'E' || eh[2] != 'L' || eh[3] != 'F' || eh[4] != 2) return out;
-            java.nio.ByteBuffer e = java.nio.ByteBuffer.wrap(eh).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            long phoff = e.getLong(32); int phent = e.getShort(54) & 0xffff, phnum = e.getShort(56) & 0xffff;
-            if (phent != 56 || phnum == 0 || phnum > 64) return out;
-            byte[] phb = new byte[phent * phnum]; r.seek(phoff); r.readFully(phb);
-            java.nio.ByteBuffer ph = java.nio.ByteBuffer.wrap(phb).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            long dynOff = -1, dynSz = 0;
-            for (int i = 0; i < phnum; i++) if (ph.getInt(i * 56) == 2) { dynOff = ph.getLong(i * 56 + 8); dynSz = ph.getLong(i * 56 + 32); }   // PT_DYNAMIC
-            if (dynOff < 0) return out;
-            int n = (int) Math.min(dynSz, 512 * 16); byte[] db = new byte[n]; r.seek(dynOff); r.readFully(db);
-            java.nio.ByteBuffer d = java.nio.ByteBuffer.wrap(db).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            long strtab = 0, strsz = 0; java.util.ArrayList<Long> need = new java.util.ArrayList<>();
-            for (int i = 0; i + 16 <= n; i += 16) { long tag = d.getLong(i), val = d.getLong(i + 8); if (tag == 0) break; if (tag == 5) strtab = val; else if (tag == 10) strsz = val; else if (tag == 1) need.add(val); }
-            long stroff = -1;   // DT_STRTAB is a virtual address: the PT_LOAD that holds it gives its file offset
-            for (int i = 0; i < phnum; i++) { int b = i * 56; if (ph.getInt(b) == 1) { long off = ph.getLong(b + 8), va = ph.getLong(b + 16), fsz = ph.getLong(b + 32); if (strtab >= va && strtab < va + fsz) stroff = strtab - va + off; } }
-            if (stroff < 0) return out;
-            for (long v : need) { if (v >= strsz) continue; r.seek(stroff + v); StringBuilder sb = new StringBuilder(); int c; while ((c = r.read()) > 0 && sb.length() < 128) sb.append((char) c); out.add(sb.toString()); }
-        } catch (Exception ex) { /* not an ELF we can read: no verdict */ }
-        return out;
-    }
-    // Why a driver package cannot run on this phone, or null: a package for another GPU family (no-adreno: Turnip needs an Adreno 6xx+ on
-    // KGSL / no-mali / no-xclipse / no-powervr), a Linux glibc build (glibc-build: the "-EMULATOR" PanVK zips are for Winlator-style glibc
-    // containers), or a versioned library it needs and does not ship (missing-lib). vk_driver.c repeats these checks natively
-    // (DM_VK_DRIVER_FORCE=1 skips them there).
-    String driverProblem(String name) {
-        String fam = driverFamily(name);
-        if (fam.equals("adreno") && !turnipPossible()) return "no-adreno";
-        if (fam.equals("mali") && !mali()) return "no-mali";
-        if (fam.equals("xclipse") && (kgsl() || mali() || powervr())) return "no-xclipse";
-        if (fam.equals("powervr") && !powervr()) return "no-powervr";
-        File dir = new File(new File(getFilesDir(), "drivers"), name);
-        org.json.JSONObject meta = driverMeta(name);
-        if (meta != null && meta.optString("abi", "").toLowerCase(Locale.ROOT).contains("glibc")) return "glibc-build";
-        File lib = driverLib(dir, meta);
-        if (lib != null) for (String n : elfNeeded(lib)) {
-            if (n.equals("libc.so.6") || n.equals("libm.so.6") || n.equals("libpthread.so.0") || n.equals("libdl.so.2") || n.contains("ld-linux")) return "glibc-build";
-            if (n.matches(".*\\.so\\.[0-9].*") && !new File(dir, n).exists()) return "missing-lib " + n;
-        }
-        return null;
-    }
-    // The player's words for a driverProblem / vk_driver.c status reason (the dialog's language).
-    String driverReasonText(String r) {
-        if (r == null || r.isEmpty()) return "";
-        android.content.Context ui = d3Ui();
-        switch (r) {
-            case "no-adreno": return ui.getString(R.string.d3_drv_no_adreno);
-            case "no-mali": return ui.getString(R.string.d3_drv_no_mali);
-            case "no-xclipse": return ui.getString(R.string.d3_drv_no_xclipse);
-            case "no-powervr": return ui.getString(R.string.d3_drv_no_powervr);
-            case "glibc-build": return ui.getString(R.string.d3_drv_glibc);
-            case "not-taken-over": return ui.getString(R.string.d3_drv_not_taken_over);
-            case "no-gpu": return ui.getString(R.string.d3_drv_no_gpu);
-            case "load-failed": return ui.getString(R.string.d3_drv_load_failed);
-            case "no-library": return ui.getString(R.string.d3_drv_no_library);
-            default:
-                if (r.startsWith("missing-lib")) return ui.getString(R.string.d3_drv_missing_lib) + r.substring(11);
-                return r;
-        }
-    }
+    // [D3] KB DRV-04: the package helpers (GPU family, driverProblem, reason texts, ELF DT_NEEDED) are VkDrivers' (frontend-common) since the
+    // driver manager came; DOOM's texts (GearText / Ui.t, the pause menu's language)
     static boolean qualcommSoc() {
         String s = ((android.os.Build.VERSION.SDK_INT >= 31 ? android.os.Build.SOC_MANUFACTURER + " " : "") + android.os.Build.HARDWARE).toLowerCase(Locale.ROOT);
         return s.contains("qti") || s.contains("qualcomm") || s.contains("qcom");
@@ -710,30 +632,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static String readSmall(File f) throws java.io.IOException {
         try (java.io.InputStream in = new java.io.FileInputStream(f)) { java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream(); byte[] buf = new byte[8192]; int n; while ((n = in.read(buf)) > 0) b.write(buf, 0, n); return b.toString("UTF-8"); }
     }
-    // [D3] (from the DOOM 2016 port) Driver packages from the internet (when there is a connection): the manifest lists adrenotools packages
-    // (name, url, sha256, optional "auto" GPU regex). Missing ones are downloaded in the background, checked against their SHA-256 and
-    // unpacked to <dir>/<name>/; they show up in the settings and, when "auto" matches this GPU, are used by default from the next launch.
-    // Offline nothing happens and the bundled Turnip / system driver are used. The D3 repository is private, so the manifest is the
-    // public one of the DOOM 2016 port (the same Turnip packages; a copy is kept in this repository as drivers/manifest.json).
-    static final String DRIVER_MANIFEST_URL = "https://raw.githubusercontent.com/Desm0nt/doom-port/main/drivers/manifest.json";
-    private void updateDriversInBackground(final File dir) {
-        new Thread(() -> {
-            try {
-                byte[] man = httpGet(DRIVER_MANIFEST_URL, 1 << 20);
-                org.json.JSONArray pk = new org.json.JSONObject(new String(man, "UTF-8")).getJSONArray("packages");
-                dir.mkdirs(); try (java.io.FileOutputStream os = new java.io.FileOutputStream(new File(dir, "manifest.json"))) { os.write(man); }
-                for (int i = 0; i < pk.length(); i++) {
-                    org.json.JSONObject o = pk.getJSONObject(i); String name = o.getString("name");
-                    if (!name.matches("[A-Za-z0-9._-]+") || hasDriverLib(new File(dir, name))) continue;
-                    byte[] zip = httpGet(o.getString("url"), 64 << 20);
-                    String got = sha256(zip);
-                    if (!got.equalsIgnoreCase(o.getString("sha256"))) { android.util.Log.e("dm", "driver " + name + ": SHA-256 mismatch " + got + ", skipped"); continue; }
-                    unzipDriver(new java.io.ByteArrayInputStream(zip), new File(dir, name)); markDriver(new File(dir, name), DRIVER_FROM_NET);
-                    android.util.Log.i("dm", "driver " + name + ": downloaded (" + zip.length + " bytes)");
-                }
-            } catch (Exception e) { android.util.Log.i("dm", "driver update skipped: " + e); }
-        }, "dm-driver-update").start();
-    }
+    // [D3] (from the DOOM 2016 port) Driver packages from the internet: VkDrivers.updateInBackground (prepare) reads the public manifest of the
+    // DOOM 2016 port (the same packages; a copy is kept in this repository as drivers/manifest.json).
+    static final String DRIVER_MANIFEST_URL = VkDrivers.MANIFEST_URL;
     static byte[] httpGet(String url, int max) throws java.io.IOException {
         for (int hop = 0; hop < 5; hop++) {   // GitHub release assets redirect to another host
             java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
@@ -753,30 +654,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         try { byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(d); StringBuilder sb = new StringBuilder(); for (byte x : h) sb.append(String.format("%02x", x)); return sb.toString(); }
         catch (java.security.NoSuchAlgorithmException e) { return ""; }
     }
-    // Copy assets/drivers/<name>/* to <dst>/<name>/ when missing or of another size.
-    private void extractBundledDrivers(File dst) {
-        try {
-            String[] names = getAssets().list("drivers"); if (names == null) return;
-            for (String n : names) {
-                String[] files = getAssets().list("drivers/" + n); if (files == null || files.length == 0) continue;
-                File out = new File(dst, n); out.mkdirs();
-                for (String f : files) {
-                    File o = new File(out, f);
-                    try (java.io.InputStream in = getAssets().open("drivers/" + n + "/" + f)) {
-                        long size = -1; try (android.content.res.AssetFileDescriptor fd = getAssets().openFd("drivers/" + n + "/" + f)) { size = fd.getLength(); } catch (java.io.IOException e) { /* compressed asset: size unknown */ }
-                        if (o.isFile() && (size < 0 ? o.length() > 0 : o.length() == size)) continue;
-                        try (java.io.OutputStream os = new java.io.FileOutputStream(o)) { byte[] buf = new byte[1 << 16]; int k; while ((k = in.read(buf)) > 0) os.write(buf, 0, k); }
-                        android.util.Log.i("dm", "bundled driver " + n + ": " + f + " extracted");
-                    }
-                }
-            }
-        } catch (java.io.IOException e) { android.util.Log.e("dm", "bundled drivers: " + e); }
-    }
-
     // Driver packages in private storage (imported at launch from Download/<DATA_DIR>/drivers), sorted by folder name.
     private String[] driverPackages() {
         File[] dirs = new File(getFilesDir(), "drivers").listFiles(); java.util.ArrayList<String> out = new java.util.ArrayList<>();
-        if (dirs != null) for (File d : dirs) { File[] fs = d.isDirectory() ? d.listFiles() : null; if (fs == null) continue;
+        // [D3] (DOOM 2.39) not the driver manager's own folders (".cache", ".stage-*") nor a half-unpacked "<name>.tmp"
+        if (dirs != null) for (File d : dirs) { File[] fs = d.isDirectory() && !d.getName().startsWith(".") && !d.getName().endsWith(".tmp") ? d.listFiles() : null; if (fs == null) continue;
             for (File f : fs) if (f.getName().endsWith(".so")) { out.add(d.getName()); break; } }
         java.util.Collections.sort(out); return out.toArray(new String[0]);
     }
@@ -799,14 +681,15 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 String name = d.getName().substring(0, d.getName().length() - 4); File out = new File(dst, name);
                 if (!hasDriverLib(out)) try (java.io.InputStream in = new java.io.FileInputStream(d)) { unzipDriver(in, out); android.util.Log.i("dm", "driver package " + name + ": unpacked from zip"); }
                 catch (java.io.IOException e) { android.util.Log.e("dm", "driver package " + d.getName() + ": " + e); }
-                if (hasDriverLib(out)) markDriver(out, DRIVER_FROM_USER);
+                if (hasDriverLib(out)) { markDriver(out, DRIVER_FROM_USER); if (VkDrivers.readOrigin(out) == null) VkDrivers.writeOrigin(out, "import", d.getPath()); }
                 continue;
             }
             File[] files = d.isDirectory() ? d.listFiles() : null; if (files == null) continue;
             File out = new File(dst, d.getName()); out.mkdirs(); if (D3) markDriver(out, DRIVER_FROM_USER);
+            if (D3) VkDrivers.writeOrigin(out, "import", d.getPath());   // [D3] (DOOM 2.39) shown by the driver manager
             for (File f : files) {
                 File o = new File(out, f.getName());
-                if (o.length() == f.length()) continue;
+                if (o.length() == f.length() || f.getName().equals(VkDrivers.ORIGIN)) continue;
                 try (java.io.InputStream in = new java.io.FileInputStream(f); java.io.OutputStream os = new java.io.FileOutputStream(o)) {
                     byte[] buf = new byte[1 << 16]; int n; while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
                     android.util.Log.i("dm", "driver package " + d.getName() + ": " + f.getName() + " copied");
@@ -816,7 +699,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     }
 
     // [D3] Where a package in files/drivers came from (GitHub issue #9: the list kept drivers the player had deleted from Download/.../drivers,
-    // their private copies stayed): a marker file in the package, written by importDrivers (the player's) and updateDriversInBackground (the
+    // their private copies stayed): a marker file in the package, written by importDrivers (the player's) and the manifest updater (the
     // manifest's). Packages from before the markers: the APK's assets and the cached manifest's names are not the player's, anything else is.
     static final String DRIVER_FROM_USER = ".from-download", DRIVER_FROM_NET = ".from-manifest";
     static void markDriver(File d, String mark) { File m = new File(d, mark); if (!m.isFile()) try { m.createNewFile(); } catch (IOException e) { /* only the pruning's hint */ } }
@@ -825,6 +708,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         try { String[] b = getAssets().list("drivers"); if (b != null && java.util.Arrays.asList(b).contains(name)) return false; } catch (IOException e) { return false; }   // bundled Turnip: never
         if (new File(d, DRIVER_FROM_USER).isFile()) return true;
         if (new File(d, DRIVER_FROM_NET).isFile()) return false;
+        // [D3] KB DRV-04: installed by the driver manager (from a zip / downloaded) or bundled: never pruned (their source is not in Download/)
+        String[] org = VkDrivers.readOrigin(d); if (org != null) return "import".equals(org[0]);
         try { org.json.JSONArray pk = new org.json.JSONObject(readSmall(new File(dir, "manifest.json"))).getJSONArray("packages");
             for (int i = 0; i < pk.length(); i++) if (name.equals(pk.getJSONObject(i).optString("name"))) return false; } catch (Exception e) { /* no cached manifest */ }
         return true;
@@ -881,86 +766,49 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         deleteDriverTree(out); if (!tmp.renameTo(out)) throw new java.io.IOException("rename failed: " + out);
     }
 
-    // [D3] Driver crash guard (from the DOOM 2016 port): before a non-system driver is loaded its name goes to files/driver-trying
-    // ("<name>\n<failed launches>"); the file is removed once the game has presented a frame or the native side reports it fell back to
-    // the system driver (driverWatch). A file left over means the last launch died before its first frame with that driver: after
-    // DRIVER_GUARD_STRIKES such launches in a row the system driver is chosen (saved, so the player sees it in the dialog) and a toast
-    // says why. Two strikes, not one: a launch killed by hand before its first frame is not a crash.
-    static final int DRIVER_GUARD_STRIKES = 2;
-    private String driverNotice;   // shown once the game view is up
-    private File driverGuard() { return new File(getFilesDir(), "driver-trying"); }
-    // [D3] (from the DOOM 2016 port, its BUGS_AND_FIXES 2.22 / 2.25) hardware check at every start: Turnip needs a Qualcomm Adreno 6xx+
-    // (KGSL), PanVK a Mali (/dev/mali0), RADV-Xclipse a Samsung Xclipse, and a Linux glibc build (the "-EMULATOR" zips) runs nowhere in an
-    // Android app (driverProblem). Such a saved choice (settings restored from another phone, or picked before this check existed) gets the
-    // system driver; the choice is reset so the dialog and the next starts agree, and the player is told once why. Runs before the crash
-    // guard, so a reset choice never counts as a strike.
-    private String driverHardwareCheck(SharedPreferences p, String drv) {
-        String problem = drv.isEmpty() ? null : driverProblem(drv);
-        if (problem != null) {
-            crumb("driver: saved choice " + drv + " cannot run here (" + problem + "), this phone has " + hardwareSummary() + ": the system driver is used and the choice reset");
-            p.edit().putString("driver", "").apply();
-            driverNotice = d3Ui().getString(R.string.d3_toast_driver_unfit, driverLabel(drv), driverReasonText(problem));
-            drv = "";
-        }
-        crumb("driver: " + (drv.isEmpty() ? "system" : drv) + " (saved " + (p.contains("driver") ? "\"" + p.getString("driver", "") + "\"" : "none, default " + defaultDriver())
-            + "), turnip possible " + turnipPossible() + ", " + hardwareSummary());
-        return drv;
+    // [D3] KB DRV-02 / DRV-04 / DRV-07 / DRV-09: the shared Vulkan driver code of DOOM 2016 (frontend-common VkDrivers / DriverManager, its
+    // BUGS_AND_FIXES 2.22 / 2.25 / 2.39 / 2.56) through the part of the shared GearHost it needs (GearHost.java here: D3 keeps its own gear dialog,
+    // the driver section in it is DOOM's). VkDrivers: the start (prepare / choose: bundled packages, imports, manifest, hardware check, crash
+    // guard), the watch after the start (gameStarted: guard cleared at the first frames, the fallback dialog, the in-process fallback after
+    // a failed Vulkan start), graphicsFailed on the start error; DriverManager: "Manage drivers…" (list, delete, install from zip, Download…).
+    // D3's own: issue #9 pruning (pruneDrivers) and its "Delete a driver…" (the package's source in Download/ goes too).
+    private VkDrivers vk;
+    VkDrivers vkDrivers() { if (vk == null) vk = new VkDrivers(driverHost); return vk; }
+    private final float[] driverStats = new float[4];
+    final GearHost driverHost = new GearHost() {
+        @Override public Activity activity() { return DmActivity.this; }
+        @Override public String dataDirName() { return DATA_DIR; }
+        @Override public SharedPreferences gamePrefs() { return doomPrefs(); }
+        @Override public boolean libraryLoaded() { return libraryLoaded; }
+        @Override public boolean started() { return started; }
+        @Override public void crumb(String line) { DmActivity.this.crumb(line); }
+        @Override public void immersive() { immersiveBars(); }
+        @Override public VkDrivers drivers() { return vkDrivers(); }
+        @Override public String driverStatus() { if (!libraryLoaded) return null; try { return nativeDriverStatus(); } catch (Throwable t) { return null; } }
+        @Override public float[] frameStats() { if (!libraryLoaded) return null; try { nativeFrameStats(driverStats); return driverStats; } catch (Throwable t) { return null; } }
+        @Override public String defaultDriver(VkDrivers d) { return DmActivity.this.defaultDriver(); }
+    };
+    // the driver manager's file pick (DriverManager.pickFile -> ACTION_OPEN_DOCUMENT)
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request == DriverManager.REQ_ZIP) DriverManager.picked(driverHost, result == RESULT_OK && data != null ? data.getData() : null);
     }
-    private String driverGuardCheck(SharedPreferences p, String drv) {
-        File guard = driverGuard(); String left = readText(guard);
-        int strikes = 0;
-        if (left != null) {
-            String[] g = left.split("\n"); String name = g[0].trim();
-            try { strikes = g.length > 1 ? Integer.parseInt(g[1].trim()) : 1; } catch (NumberFormatException e) { strikes = 1; }
-            if (!name.equals(drv)) strikes = 0;   // about another driver: the player changed it since
-            crumb("driver guard: last launch with " + name + " ended before its first frame (" + strikes + " in a row)");
-            if (strikes >= DRIVER_GUARD_STRIKES) {
-                crumb("driver guard: " + strikes + " launches with " + name + " died before the first frame: the system driver is chosen and saved");
-                p.edit().putString("driver", "").apply(); drv = ""; strikes = 0;
-                driverNotice = d3Ui().getString(R.string.d3_toast_driver_crashed, driverLabel(name));
-            }
-            guard.delete();
-        }
-        if (!drv.isEmpty()) {
-            try (OutputStream os = new FileOutputStream(guard)) { os.write((drv + "\n" + (strikes + 1) + "\n").getBytes(StandardCharsets.UTF_8)); }
-            catch (IOException e) { android.util.Log.e("dm", "driver guard: " + e); }
-        }
-        return drv;
+    // The gear's driver list as DOOM 2016's (frontend-common GearPages.driver): packages that cannot run here (VkDrivers.problem) are not offered,
+    // a line lists them with the reason; want = the choice to keep checked after the driver manager changed the list (null = the saved one).
+    private void driverList(LinearLayout drvBox, String want, String[][] names, RadioGroup[] g) {
+        VkDrivers d = vkDrivers(); drvBox.removeAllViews();
+        java.util.ArrayList<String> offered = new java.util.ArrayList<>(); StringBuilder hiddenWhy = new StringBuilder();
+        for (String n : d.packages()) { String why = d.problem(n); if (why == null) offered.add(n); else hiddenWhy.append("\n- ").append(d.label(n)).append(": ").append(d.reasonText(why)); }
+        names[0] = offered.toArray(new String[0]);
+        if (hiddenWhy.length() > 0) note(drvBox, Ui.t(this, "Скрыты (не подходят этому телефону, " + VkDrivers.hardwareSummary() + "):",
+            "Hidden (cannot run on this phone, " + VkDrivers.hardwareSummary() + "):") + hiddenWhy);
+        String[] labels = new String[names[0].length + 1]; labels[0] = GearText.s(this, "gear_driver_system");
+        for (int i = 0; i < names[0].length; i++) labels[i + 1] = d.label(names[0][i]);
+        String cur = want != null && (want.isEmpty() || offered.contains(want)) ? want : doomPrefs().getString("driver", defaultDriver());
+        int at = 0; for (int i = 0; i < names[0].length; i++) if (names[0][i].equals(cur)) at = i + 1;
+        g[0] = radios(drvBox, labels, 7000, at, false);
     }
-    // "<requested>\t<active>\t<reason>[\t<details>]" from vk_driver.c, or null before the driver is loaded. details (DOOM 2016 port, 2.25):
-    // "verified=0|1 gpu=... driver=... id=..." (what the GPU reports for the custom driver).
-    private String[] driverStatus() {
-        if (!libraryLoaded) return null;
-        String s; try { s = nativeDriverStatus(); } catch (Throwable t) { return null; }
-        String[] f = s == null ? new String[0] : s.split("\t", -1);
-        return f.length >= 3 ? f : null;
-    }
-    // After the game starts: removes the driver crash guard once a frame was presented, and tells the player once when the chosen
-    // driver did not start and the native side fell back to the system driver. Polls every second until both are settled.
-    private boolean driverGuardDone, driverStatusDone, firstFrameDone;   // firstFrameDone: [DOOM] breadcrumb "first frames presented"
-    private long gameStartedAt;
-    private final float[] guardStats = new float[4];
-    private final Runnable driverWatch = new Runnable() { @Override public void run() {
-        if (!started || isDestroyed()) return;
-        String[] st = driverStatus();
-        if (!driverStatusDone && st != null) {
-            driverStatusDone = true;
-            crumb("Vulkan driver status: requested \"" + st[0] + "\" active " + st[1] + " reason " + st[2] + (st.length > 3 ? " " + st[3] : ""));
-            if (!st[0].isEmpty() && "system".equals(st[1])) {
-                android.util.Log.w("dm", "driver " + st[0] + " did not start (" + st[2] + "): system driver");
-                android.widget.Toast.makeText(DmActivity.this, d3Ui().getString(R.string.d3_toast_driver_fallback, driverLabel(st[0]), driverReasonText(st[2])), android.widget.Toast.LENGTH_LONG).show();
-                driverGuard().delete(); driverGuardDone = true;   // not a crash: the native side already chose the system driver
-            }
-        }
-        if (!driverGuardDone || !firstFrameDone) {
-            try { nativeFrameStats(guardStats); } catch (Throwable t) { guardStats[0] = 0; }
-            if (guardStats[0] > 0 && !driverGuardDone) { driverGuard().delete(); driverGuardDone = true; android.util.Log.i("dm", "driver guard: first frames presented, guard cleared"); }
-            if (guardStats[0] > 0 && !firstFrameDone) { firstFrameDone = true;
-                crumb(String.format(Locale.ROOT, "first frames presented %.1f s after the game started (%.0f fps, frame %.1f ms)", (android.os.SystemClock.uptimeMillis() - gameStartedAt) / 1000.0, guardStats[0], guardStats[1]));
-                if (updates != null) updates.start(); }   // [D3] the "a new version is out" check (once per start, after the first frames)
-        }
-        if (!(driverGuardDone && driverStatusDone && firstFrameDone)) view.postDelayed(this, 1000);
-    } };
+    private static String driverPicked(String[][] names, RadioGroup[] g) { int k = g[0] == null ? 0 : g[0].getCheckedRadioButtonId() - 7000; return k > 0 && k <= names[0].length ? names[0][k - 1] : ""; }
 
     // [D3] Gear dialog of Diablo III (showD3Settings). Texts are string resources (res/values/d3_settings.xml English, values-ru
     // Russian); the dialog's own language follows the phone or the "Menu language" option (pref "ui_lang", applies at once: the
@@ -1070,25 +918,23 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             // Vulkan driver: the system one, or any adrenotools package under files/drivers/<name>/ (bundled Turnip 27, or imported from
             // Download/Diablo3Mobile/drivers), labelled with the name from its meta.json; below it, what the running game actually uses.
             heading(box, when(ui, R.string.d3_driver, false));
-            // [D3] (from the DOOM 2016 port, 2.25) packages that cannot run here (driverProblem: another GPU family, a glibc build, a missing
-            // library) are not offered; a line lists them with the reason
+            // [D3] KB DRV-04: DOOM 2016's driver section (frontend-common GearPages.driver, its texts: GearText / Ui.t): the list (packages that
+            // cannot run here hidden with the reason), what the running game uses, and "Manage drivers…" (DriverManager: installed packages, delete,
+            // install from a zip, Download… from drivers/sources.json); the list is filled again when the manager changed it.
             pruneDrivers(p, new File(getFilesDir(), "drivers"));   // issue #9: a package deleted from Download/.../drivers while the game runs leaves the list now
-            java.util.ArrayList<String> offered = new java.util.ArrayList<>(); StringBuilder hiddenWhy = new StringBuilder();
-            for (String n : driverPackages()) { String why = driverProblem(n); if (why == null) offered.add(n); else hiddenWhy.append("\n- ").append(driverLabel(n)).append(": ").append(driverReasonText(why)); }
-            final String[] drvNames = offered.toArray(new String[0]);
-            if (hiddenWhy.length() > 0) note(box, ui.getString(R.string.d3_driver_hidden, hardwareSummary()) + hiddenWhy);
-            String[] drvLabels = new String[drvNames.length + 1]; drvLabels[0] = ui.getString(R.string.d3_driver_system);
-            for (int i = 0; i < drvNames.length; i++) drvLabels[i + 1] = driverLabel(drvNames[i]);
-            int drvAt = 0; { String cur = p.getString("driver", defaultDriver()); for (int i = 0; i < drvNames.length; i++) if (drvNames[i].equals(cur)) drvAt = i + 1; }
-            RadioGroup drvG = radios(box, drvLabels, 7000, drvAt, false);
-            String[] st = driverStatus();
+            final LinearLayout drvBox = new LinearLayout(this); drvBox.setOrientation(LinearLayout.VERTICAL); box.addView(drvBox);
+            final String[][] drvNames = {new String[0]}; final RadioGroup[] drvG = {null};
+            driverList(drvBox, null, drvNames, drvG);
+            String[] st = vkDrivers().status();
             if (st != null) {
-                boolean fell = !st[0].isEmpty() && "system".equals(st[1]);
-                note(box, fell ? ui.getString(R.string.d3_driver_active_fallback, driverLabel(st[0]))
-                               : ui.getString(R.string.d3_driver_active, st[0].isEmpty() || "system".equals(st[1]) ? ui.getString(R.string.d3_driver_system_short) : driverLabel(st[0])));
-                // [DOOM] 2.25: why it fell back, or what the GPU reports for the custom driver (vk_driver.c verified it)
-                if (fell || (st.length > 3 && !st[0].isEmpty())) note(box, (fell ? driverReasonText(st[2]) + (st.length > 3 ? "; " : "") : "") + (st.length > 3 ? st[3] : ""));
+                VkDrivers vd = vkDrivers(); boolean fell = !st[0].isEmpty() && "system".equals(st[1]);
+                note(box, fell ? GearText.s(this, "gear_driver_active_fallback", vd.label(st[0]))
+                               : GearText.s(this, "gear_driver_active", st[0].isEmpty() || "system".equals(st[1]) ? GearText.s(this, "gear_driver_system_short") : vd.label(st[0])));
+                // (DOOM 2.25) why it fell back, or what the GPU reports for the custom driver (vk_driver.c verified it)
+                if (fell || (st.length > 3 && !st[0].isEmpty())) note(box, (fell ? vd.reasonText(st[2]) + (st.length > 3 ? "; " : "") : "") + (st.length > 3 ? st[3] : ""));
             }
+            android.widget.Button mgrDrv = new android.widget.Button(this); mgrDrv.setText(Ui.t(this, "Драйверы…", "Manage drivers…")); mgrDrv.setAllCaps(false); box.addView(mgrDrv);
+            mgrDrv.setOnClickListener(v -> new DriverManager(vkDrivers(), () -> driverList(drvBox, driverPicked(drvNames, drvG), drvNames, drvG)).show());
             note(box, ui.getString(R.string.d3_driver_note));
             final String[] userDrv = userDriverPackages();   // [D3] issue #9: the player's own packages can be deleted here (bundled / downloaded ones not)
             android.widget.Button delDrv = new android.widget.Button(this); delDrv.setText(ui.getString(R.string.d3_driver_delete));
@@ -1149,11 +995,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             });
             android.widget.ScrollView scroll = new android.widget.ScrollView(this); scroll.addView(box);
             Runnable save = () -> {
-                int drvPick = picked(drvG, 7000, drvNames.length + 1);
                 p.edit().putString("ui_lang", D3_UI_LANGS[picked(uiG, 9100, D3_UI_LANGS.length)]).putString("lang", D3_LANG_CODES[picked(langG, 5000, D3_LANG_CODES.length)])
                     .putBoolean("handheld", picked(modeG, 1000, 2) == 1).putInt("aspect", picked(aspG, 8000, 4))
                     .putInt("sharpen", picked(sh, 2000, SHARPEN_STOPS.length)).putInt("fps_limit", D3_FPS_LIMITS[picked(fpsLim, 8500, D3_FPS_LIMITS.length)])
-                    .putString("driver", drvPick > 0 ? drvNames[drvPick - 1] : "").putBoolean("rumble", rumble.isChecked())
+                    .putString("driver", driverPicked(drvNames, drvG)).putBoolean("rumble", rumble.isChecked())
                     .putBoolean("d3_stretch_loading", stretchL.isChecked()).putBoolean("d3_logs", logsC.isChecked())
                     .putInt("mp_pads", picked(mpG, 9400, 3)).putBoolean("mp_lan", lanC.isChecked()).apply();
                 cp.edit().putBoolean("fps", fps.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putBoolean("d3_hide_sticks", hideSt.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
@@ -1169,7 +1014,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 .setNegativeButton(ui.getString(R.string.d3_cancel), null).show();
             editB.setOnClickListener(v -> { save.run(); dlg.dismiss(); if (d3Pad != null) d3Pad.startEdit(); });   // drag controls on the pad; "Done" there ends it
             delDrv.setOnClickListener(v -> {   // pick one, confirm, delete; the dialog is saved first (as the editor button) and reopened with the new list
-                String[] labels = new String[userDrv.length]; for (int i = 0; i < userDrv.length; i++) labels[i] = driverLabel(userDrv[i]);
+                String[] labels = new String[userDrv.length]; for (int i = 0; i < userDrv.length; i++) labels[i] = vkDrivers().label(userDrv[i]);
                 new AlertDialog.Builder(this).setTitle(ui.getString(R.string.d3_driver_delete)).setItems(labels, (d, w) -> new AlertDialog.Builder(this)
                     .setMessage(ui.getString(R.string.d3_driver_delete_confirm, labels[w]))
                     .setPositiveButton(ui.getString(R.string.d3_driver_delete_yes), (d2, w2) -> {
@@ -1468,10 +1313,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         }
         started = true;
         if (touchOverlay != null) touchOverlay.setInputEnabled(true);
-        if (D3) {   // [D3] driver crash guard / fallback message (driverWatch), and the notice from the guard at this launch
-            if (driverNotice != null) { android.widget.Toast.makeText(this, driverNotice, android.widget.Toast.LENGTH_LONG).show(); driverNotice = null; }
-            view.postDelayed(driverWatch, 1000);
-        }
+        // [D3] VkDrivers.gameStarted (DOOM 2016): the notice from choose(), the crash guard cleared at the first frames, the fallback dialog
+        // (DRV-09), the in-process fallback after a failed Vulkan start (DRV-07); then the "a new version is out" check (once per start)
+        if (D3) vkDrivers().gameStarted(view, () -> { if (updates != null) updates.start(); });
         nativeFocus(3);
     }
 
@@ -1495,6 +1339,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
 
     private void showBootFailure() {
         releaseTouches();
+        // [D3] KB DRV-07 (DOOM 2.56, issue #33 there): Vulkan failed with a custom driver and the native side could not retry with the system
+        // driver in this process (VkDrivers.graphicsFailed: the choice is already reset): a new process starts with the system driver and says why
+        if (D3 && bootFailure == -6 && (driverRestart || vkDrivers().graphicsFailed())) {
+            if (!driverRestart) { driverRestart = true; crumb("restart in a new process for the Vulkan driver fell back to the system driver");
+                startActivity(new Intent(this, DmRestart.class).putExtra("pid", android.os.Process.myPid())); }
+            return;
+        }
         showStartError(getString(bootFailure == -6 ? R.string.dmAndroidGraphicsFailed : R.string.dmAndroidHostStopped));
     }
 

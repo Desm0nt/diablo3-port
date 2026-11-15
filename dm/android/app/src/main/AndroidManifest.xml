@@ -33,6 +33,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- [DOOM] restarts the game in a new process (DmRestart.java); [D3] KB DRV-07: after the game's Vulkan start failed with a custom driver
+             and the native side could not retry with the system driver in the same process -->
+        <activity
+            android:name=".DmRestart"
+            android:process=":restart"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay" />
         <receiver android:name=".widget.HeroWidget2x2Provider"
             android:exported="false" android:label="@string/dmAndroidWidgetName2x2">
             <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
