@@ -4705,6 +4705,12 @@ void descriptors(Descriptors &out,Commands &commands,bool compute){struct InDesc
                     switch(b.source){
                     case XBG_SOURCE_UNIFORM:case XBG_SOURCE_STORAGE:{if(slot>=16){ok=false;break;}auto r=b.source==XBG_SOURCE_UNIFORM?state.ub[ns][slot]:state.sb[ns][slot];
                         if(UBO_DYN(dmode,b) && b.source==XBG_SOURCE_UNIFORM && r.address && r.size){size_t copy=std::min<size_t>(r.size,b.bytes?b.bytes:65536);key.push_back(copy);if(tags)ktag.push_back(2);dyn_ubos.push_back({(uint64_t(b.binding)<<32)|element,r.address,copy});} // address only moves the dynamic offset
+                        // [D3] GitHub issue #22 (PowerVR BXM-8-256, DM_GFX_UBO_DYNAMIC=0, its default there; also any port's safe mode / switch 0):
+                        // a non-dynamic guest uniform buffer is a snapshot of its contents taken when the set is built, baked into the set at its
+                        // offset. The key only has the address and size, and the game rewrites the same address between draws (skinning bone
+                        // matrices, per-object constants), so a memo hit drew with the previous object's data: heroes and NPCs exploded into
+                        // spikes, floor tiles flew apart. Such a set is never memoized (dynamic mode copies the contents on every hit instead).
+                        else if(b.source==XBG_SOURCE_UNIFORM && r.address){ok=false;++desc_memo_why[3];break;}
                         else{key.push_back(r.address);key.push_back(r.size);if(tags){ktag.push_back(b.source==XBG_SOURCE_UNIFORM?3:10);ktag.push_back(4);}}break;}
                     case XBG_SOURCE_SUPPORT:key.push_back((uint64_t(uint32_t(state.viewport.width))<<32)|uint32_t(state.viewport.height));key.push_back(state.color.alpha_func);if(tags){ktag.push_back(5);ktag.push_back(6);}break;
                     case XBG_SOURCE_C1:break;
