@@ -38,6 +38,7 @@ void dm_haptics_android_foreground(int fg);
 struct ANativeWindow;
 void dm_aperf_present(struct ANativeWindow *window, float marker_vote_hz);
 void dm_aperf_start(void);
+void dm_aperf_focus(int ev);   /* nativeFocus: 2 / 3 = in front again -> a workload reset hint at the next present */
 int dm_thermal_now(void);
 #ifdef __cplusplus
 }

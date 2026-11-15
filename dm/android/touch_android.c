@@ -147,6 +147,8 @@ void dm_android_touch_uimsg(const char *cat, const char *act, const char *arg) {
     if (dm_touch_game_set_scene) dm_touch_game_set_scene(!nav, epoch, world);
     pthread_mutex_unlock(&lock);
 }
+/* [game-state] perf_android.c (GameManager.setGameState mode): 1 in a game, 0 in the front end (the boot starts there) */
+int dm_android_scene_game(void) { pthread_mutex_lock(&lock); int g = !!scene.game; pthread_mutex_unlock(&lock); return g; }
 static void sync_host(void) {
     dm_tc_set_panel_state(dm_ui_panel_state());
     dm_tc_set_tap_box(dm_ui_tap_box());

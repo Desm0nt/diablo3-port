@@ -465,3 +465,49 @@ G99: маски, повтор после «системы», фон, resume, ж�
 5. Рецентс и обратно: `[cpu] background: placement checks paused`, затем `[cpu] resume: N thread(s) had other masks (…)`.
 6. ⚙ → «Ядра CPU» → «Только мощные»: `[cpu] plan (gear, live): mode=big … translate=2-7 (fc) …` и `[cpu] placed (mode, mode big)`.
 7. `[cpu] … mask found X (set Y): set again` = система переписала маску (HyperOS); `left free but its mask is …` в режиме «Все» = система сузила.
+
+## Подсказки разгона системе: ADPF с фиксированным бюджетом, «нагрузка растёт», GameState (issue #23) — 15.11.2026 (ветка `wt/adpf`)
+
+Вторая половина #23 (первая — размещение потоков, раздел выше): после конца стартового буста MediaTek (PowerHAL / FPSGO) частоты
+падают, игра в «замедленной съёмке», пока рецентс или запись экрана не дадут новый буст. Здесь — официальные API Android, которыми
+игра сама просит частоты. Общий модуль `port-common/modules/adpf-boost` (KB PERF-E14 + PERF-X08).
+
+**Что было (0.2.15):** ADPF-сессия из nx2android: цель = период пейсера (когда кадры медленные и ярус падает, подсказка просила
+*меньше* частоты), участники пересматривались раз в 300 выводов (при 20 fps = 15 с), главный поток и `JobWorker` попадали только
+если сами набирали 15 % ядра, не было `setPreferPowerEfficiency`, потерянная сессия (EPIPE) не открывалась снова, сводки не было.
+
+**Что сделано (`dm/android/perf_android.c`, решения — `perf_boost.h`):**
+- Из DOOM Eternal (PERF-E14, ETR `26ece9a` / adpf `53e8f89`): цель = min(период, `DM_ADPF_BUDGET_MS=33.33`); пересмотр участников
+  каждые `DM_ADPF_SCAN_MS=5000`; `setPreferPowerEfficiency(false)` (Android 15); учёт кодов возврата, EPIPE → переоткрытие через 5 с;
+  кадр > 1 с или > 250 мс при < 25 % CPU — пауза, не отчёт; строка `[perf] ADPF 10s:` (отчёты, работа против цели, участники с ядром и
+  uclamp.min, min/cur/max частот каждого кластера).
+- Участники D3: поток вывода — всегда; главный гостевой поток — с первого скана (уходит после двух сканов < 5 % ядра); `JobWorker*`
+  (`DM_CPU_JOB_NAMES`, как в cpu-place) — от 5 % ядра и раньше любых других; прочие потоки игры — от 15 %; не больше 6.
+- «Нагрузка растёт»: 3 кадра подряд работа > цели, или целую секунду кадры в среднем на 15 % медленнее цели → подсказка, не чаще
+  раза в 500 мс. Android 16 (API 36): `APerformanceHint_notifyWorkloadIncrease(cpu, !gpu)`; Android 14–15: платформенный символ
+  `APerformanceHint_sendHint(CPU_LOAD_UP)` из `libandroid.so` (за ним Java `PerformanceHintManager.Session.sendHint`, который `@hide`:
+  публичного пути на 13–15 нет; `DM_ADPF_BOOST=2` — только публичный вызов); Android 13 — подсказок нет (в логе). Сброс
+  (`notifyWorkloadReset` / `CPU_LOAD_RESET`) при возврате в игру (`nativeFocus` 2/3) и когда закрылся экран загрузки.
+- GameState (Java, Android 13): `GameStateHint.java` дважды в секунду, пока игра на экране, спрашивает `nativeGameState` и передаёт
+  смену в `GameManager.setGameState`: loading = экран загрузки (`diag.c dm_loadscreen_up`), режим «игра, можно прервать» в игре
+  («нельзя прервать», если открывалась локальная игра `dm_ldn_lan_on`), «нет игры» во фронтенде (`touch_android.c
+  dm_android_scene_game`). В манифесте уже `appCategory="game"`. Будет ли HyperOS / MediaTek что-то с этим делать — неизвестно.
+- Переключатели: `DM_ADPF_BUDGET_MS=33.33`, `DM_ADPF_TARGET_MS=period` (старое поведение), `DM_ADPF_BOOST=0` (без подсказок),
+  `DM_ADPF_BOOST_MS=500`, `DM_ADPF_BOOST_FRAMES=3`, `DM_GAME_STATE=0`, `DM_ADPF_POWER_EFF`, `DM_ADPF_SCAN_MS`, `DM_ADPF_MAX_THREADS`,
+  `DM_ADPF_DIAG_MS`; `DM_ADPF=0` / `DM_NO_ADPF=1` — без сессии. Пункта в ⚙ нет (параллельная ветка правит те же места ⚙).
+
+Проверка без телефона: `port-common/modules/adpf-boost/test/t_adpf_boost.c` (решения: серии кадров, секунда медленных кадров, лимит
+частоты, паузы, выбор участников — главный / воркеры / прочие / уход после двух пустых сканов), обе APK собраны. На телефоне не проверено.
+
+**Проверка на телефоне (boot.log):**
+1. `[perf] ADPF switches: DM_ADPF_TARGET_MS=budget(default) DM_ADPF_BUDGET_MS=33.33 … DM_ADPF_BOOST=1 …`.
+2. `[perf] ADPF symbols: setThreads yes, reportActualWorkDuration2 yes, setPreferPowerEfficiency yes, notifyWorkloadIncrease no,
+   sendHint (platform) yes|no; boost hints: …` — Mi 14 Ultra (Android 15) ждём `sendHint (platform) yes` → «sendHint CPU_LOAD_UP / RESET
+   (platform symbol)»; при `no` и `none on this Android` подсказок разгона на этой прошивке нет.
+3. `[perf] ADPF session open (target 16.67 ms = min(period 16.67, budget 33.33), …)`, `[perf] ADPF setPreferPowerEfficiency(false) -> 0`.
+4. Через ~5 с `[perf] ADPF session threads: N:nvn-translate M:main K:JobWorker0 …` — главный и воркеры должны быть в списке.
+5. Раз в 10 с `[perf] ADPF 10s: … boost up U (over target A, slow 1 s B) refused R (rc X) limited L, reset S …; threads …@cpuN uclamp.min …;
+   policies MHz min/cur/max: …`. Первые 5 подсказок отдельно: `[perf] ADPF load increase (…) -> rc 0`.
+6. Рецентс и обратно: `[perf] ADPF workload reset (back in front) -> rc 0`; после загрузки уровня — `(loading screen gone)`.
+7. GameState: `[perf] game state (java): polling …`, затем `[perf] game state: loading 0, mode none (… scene front end …)`, при входе в игру
+   `loading 1, mode gameplay interruptible (load screen up …)`, потом `loading 0, mode gameplay interruptible (… scene game …)`.
