@@ -335,7 +335,7 @@ static int d3_check_archives(void) {
         closedir(d);
     }
     char okf[1100], want[40], have[40] = {0}; snprintf(okf, sizeof okf, "%s/cpk-check.ok", g_files); snprintf(want, sizeof want, "%016llx %d", (unsigned long long)sig, np);
-    { FILE *f = fopen(okf, "r"); if (f) { if (!fgets(have, sizeof have, f)) have[0] = 0; fclose(f); } }
+    { FILE *f = fopen(okf, "r"); if (f) { if (!fgets(have, sizeof have, f)) have[0] = 0; fclose(f); have[strcspn(have, "\r\n")] = 0; } }
     if (np && !strcmp(have, want)) { LOG("boot: archives: %d *.cpk unchanged since they last passed the check", np); free(paths); return 0; }
     const uint64_t t0 = now_ns(); int bad = 0, unread = 0; size_t used = 0; g_start_detail[0] = 0;
     for (int i = 0; i < np; i++) {
