@@ -856,8 +856,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final int[] D3_FPS_LIMITS = {30, 60};   // above 60 is not offered: D3 runs its frames at 60 like on the Switch (present interval 1)
     static final String[] D3_LANG_CODES = {"", "ru", "en-US", "en-GB"};
     static final String[] D3_LANG_LABELS = {null /* d3_system */, "Русский", "English (US)", "English (UK)"};   // game languages keep their own names
-    static final String[] D3_UI_LANGS = {"", "ru", "en"};
-    static final String[] D3_UI_LANG_LABELS = {null /* d3_system */, "Русский", "English"};
+    static final String[] D3_UI_LANGS = {"", "ru", "en", "zh"};
+    static final String[] D3_UI_LANG_LABELS = {null /* d3_system */, "Русский", "English", "简体中文"};
     static final int[] D3_SHARPEN_LABELS = {R.string.d3_off, R.string.d3_low, R.string.d3_medium, R.string.d3_high};   // SHARPEN_STOPS
     static final int[] D3_DZ_LABELS = {R.string.d3_dz_none, R.string.d3_dz_small, R.string.d3_dz_medium, R.string.d3_dz_large};   // DEADZONES
     static final int[] D3_GEAR_LABELS = {R.string.d3_gear_normal, R.string.d3_gear_faded};   // DoomPadView.GEAR_*
