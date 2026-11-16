@@ -90,6 +90,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native void nativeCpuCores(int mode);        // [cpu-place] gear "CPU cores": 0 auto, 1 big cores, 2 all cores (live; hle_cpu_place.c)
     static native void nativeSetAniso(int level);       // [D3] gear "Anisotropic filtering": 0 off, 4 = x4 (live; xbg_game.cpp namespace aniso)
     static native void nativeSetUpscale(int mode);      // [D3] gear "Upscale": 0 off, 1 auto (live; vulkan_present.cpp namespace upscale)
+    static native void nativeSetD3Zoom(int percent);    // [D3] gear "Camera zoom-out" 100..140 % (live; hle_d3_zoom.c, issue #31)
     static native void nativeSetD3Drs(boolean on);      // [D3] gear "Game dynamic resolution": on = the game's DRS, off = always full resolution (live; hle_d3_drs.c)
     static final String FRONT_DATA_DIR = "Diablo3Mobile";   // Download/<this>: the player's data folder; save exports go to its saves/
     private FrontMenu front;
@@ -508,6 +509,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 // The game's dynamic resolution (hle_d3_drs.c, issue #23): on = its own DRS (3D down to 0.7 when the GPU is late), off = always
                 // full resolution; also switched live from the gear (nativeSetD3Drs)
                 Os.setenv("DM_D3_DRS", p.getBoolean("d3_drs", true) ? "auto" : "off", true);
+                // Camera zoom-out (hle_d3_zoom.c, issue #31): 100..140 %, a wider view of the gameplay camera; also live from the gear (nativeSetD3Zoom)
+                Os.setenv("DM_D3_ZOOM", String.valueOf(Math.max(100, Math.min(140, p.getInt("d3_zoom", 100)))), true);
                 // Widescreen only: loading screens' 16:9 art presented alone, stretched to the screen (hle_d3.c ls_present_crop)
                 Os.setenv("DM_D3_WIDE_STRETCH_LOADING", p.getBoolean("d3_stretch_loading", true) ? "1" : "0", true);
                 // Gear "Write logs" (issue #19, CrashLog.logsOn): off keeps boot.log in the private runtime dir (jni_android.c log_init)
@@ -977,6 +980,20 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             // The game's dynamic resolution (hle_d3_drs.c DM_D3_DRS); live
             CheckBox drsC = new CheckBox(this); drsC.setText(when(ui, R.string.d3_drs, true)); drsC.setChecked(p.getBoolean("d3_drs", true)); box.addView(drsC);
             note(box, ui.getString(R.string.d3_drs_note));
+            // Camera zoom-out (hle_d3_zoom.c DM_D3_ZOOM, issue #31): 100..140 %, saved and applied live while the slider moves
+            final int zoomWas = Math.max(100, Math.min(140, p.getInt("d3_zoom", 100)));
+            final TextView zoomT = heading(box, ui.getString(R.string.d3_label_fmt, ui.getString(R.string.d3_zoom, zoomWas), ui.getString(R.string.d3_when_now)));
+            android.widget.SeekBar zoomS = new android.widget.SeekBar(this); zoomS.setMax(40); zoomS.setProgress(zoomWas - 100); box.addView(zoomS);
+            zoomS.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+                public void onProgressChanged(android.widget.SeekBar sb, int v, boolean user) {
+                    zoomT.setText(ui.getString(R.string.d3_label_fmt, ui.getString(R.string.d3_zoom, v + 100), ui.getString(R.string.d3_when_now)));
+                    p.edit().putInt("d3_zoom", v + 100).apply();
+                    if (libraryLoaded && started) try { nativeSetD3Zoom(v + 100); } catch (UnsatisfiedLinkError e) { /* an older library */ }
+                }
+                public void onStartTrackingTouch(android.widget.SeekBar sb) {}
+                public void onStopTrackingTouch(android.widget.SeekBar sb) {}
+            });
+            note(box, ui.getString(R.string.d3_zoom_note));
             heading(box, when(ui, R.string.d3_fps_limit, false));
             String[] limLabels = new String[D3_FPS_LIMITS.length]; int limAt = 0;
             for (int i = 0; i < limLabels.length; i++) { limLabels[i] = String.valueOf(D3_FPS_LIMITS[i]); if (D3_FPS_LIMITS[i] == d3FpsLimit()) limAt = i; }

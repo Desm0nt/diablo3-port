@@ -173,4 +173,6 @@
     <string name="d3_loot_noancient">No ancient or primal legendaries</string>
     <string name="d3_speed">Movement speed</string>
     <string name="d3_atkspeed">Attack speed</string>
+    <string name="d3_zoom" formatted="true">Camera zoom-out: %1$d %%</string>
+    <string name="d3_zoom_note">Shows more around the hero: a wider view, the interface keeps its size. 100 % = as on the Switch. Above about 120 % the picture edges stretch a little, and monsters at the very edge may appear a moment late.</string>
 </resources>

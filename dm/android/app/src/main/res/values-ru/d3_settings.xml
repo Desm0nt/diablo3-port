@@ -171,4 +171,6 @@
     <string name="d3_loot_noancient">Без древних и первозданных легендарок</string>
     <string name="d3_speed">Скорость бега</string>
     <string name="d3_atkspeed">Скорость атаки</string>
+    <string name="d3_zoom" formatted="true">Отдаление камеры: %1$d %%</string>
+    <string name="d3_zoom_note">Показывает больше вокруг героя: шире обзор, интерфейс остаётся прежнего размера. 100 % — как на Switch. Выше ~120 % края картинки немного растягиваются, а монстры у самого края могут появляться с небольшой задержкой.</string>
 </resources>

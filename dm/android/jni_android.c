@@ -985,6 +985,9 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetUpscale(JNIEnv
 #ifdef DM_GAME_D3
 void dm_d3_drs_set(int on);
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetD3Drs(JNIEnv *env, jclass cls, jboolean on) { (void)env; (void)cls; dm_d3_drs_set(on ? 1 : 0); }
+// [D3] Gear "Camera zoom-out" 100..140 % (hle_d3_zoom.c, issue #31), live while the slider moves; the next start reads DM_D3_ZOOM
+void dm_d3_zoom_set(int pct);
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetD3Zoom(JNIEnv *env, jclass cls, jint pct) { (void)env; (void)cls; dm_d3_zoom_set((int)pct); }
 #endif
 JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeOpmode(JNIEnv *env, jclass cls) { (void)env; (void)cls; return dm_opmode(); }
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetOpmode(JNIEnv *env, jclass cls, jint m) { (void)env; (void)cls; dm_set_opmode(m ? 1 : 0); }
