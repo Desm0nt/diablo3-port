@@ -766,12 +766,23 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         File d = new File(new File(getFilesDir(), "drivers"), name); deleteDriverTree(d);
         SharedPreferences p = doomPrefs();
         if (name.equals(p.getString("driver", null))) p.edit().remove("driver").apply();
+        // one the manifest updater fetched must not come back with the next manifest (as DriverManager.delete)
+        java.util.Set<String> rm = new java.util.HashSet<>(p.getStringSet("driver_removed", java.util.Collections.emptySet())); rm.add(name);
+        p.edit().putStringSet("driver_removed", rm).apply();
         crumb("driver package " + name + ": deleted by the player");
         return !d.exists();
     }
+    // Every package but the APK's own (bundled Turnip): the gear's "Delete driver" list. Issue #23: it offered only the packages imported from
+    // Download/.../drivers (userDriver), so the ones installed with "Install from file" (origin "file") or downloaded were missing from it.
     private String[] userDriverPackages() {
-        File dir = new File(getFilesDir(), "drivers"); java.util.ArrayList<String> out = new java.util.ArrayList<>();
-        for (String n : driverPackages()) if (userDriver(dir, n)) out.add(n);
+        java.util.List<String> bundled;
+        try { String[] b = getAssets().list("drivers"); bundled = b != null ? java.util.Arrays.asList(b) : java.util.Collections.emptyList(); }
+        catch (IOException e) { bundled = java.util.Collections.emptyList(); }
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        for (String n : driverPackages()) {
+            String[] org = VkDrivers.readOrigin(new File(new File(getFilesDir(), "drivers"), n));
+            if (!bundled.contains(n) && !(org != null && "bundled".equals(org[0]))) out.add(n);
+        }
         return out.toArray(new String[0]);
     }
 
@@ -994,7 +1005,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             android.widget.Button mgrDrv = new android.widget.Button(this); mgrDrv.setText(Ui.t(this, "Драйверы…", "Manage drivers…")); mgrDrv.setAllCaps(false); box.addView(mgrDrv);
             mgrDrv.setOnClickListener(v -> new DriverManager(vkDrivers(), () -> driverList(drvBox, driverPicked(drvNames, drvG), drvNames, drvG)).show());
             note(box, ui.getString(R.string.d3_driver_note));
-            final String[] userDrv = userDriverPackages();   // [D3] issue #9: the player's own packages can be deleted here (bundled / downloaded ones not)
+            final String[] userDrv = userDriverPackages();   // [D3] issue #9 / #23: every package but the bundled one can be deleted here
             android.widget.Button delDrv = new android.widget.Button(this); delDrv.setText(ui.getString(R.string.d3_driver_delete));
             if (userDrv.length > 0) box.addView(delDrv);
             CheckBox rumble = new CheckBox(this); rumble.setText(when(ui, R.string.d3_rumble, false)); rumble.setChecked(p.getBoolean("rumble", false)); box.addView(rumble);
