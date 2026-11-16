@@ -341,14 +341,29 @@ static void load_driver(void) {
                 getenv("MESA_GRALLOC_LINEAR") ? getenv("MESA_GRALLOC_LINEAR") : "(unset)", pl ? pl : "(unset: on)");
             // D3 issue #23: PanVK zenith 26.3.1 ("P0A-V19-FULLPLANE") reads window-buffer layouts only through a stable-C IMapper
             // (/vendor/lib64/hw/mapper.<suffix>.so; candidates PANVK_MAPPER_NAMES=a,b, ro.hardware.gralloc, "mediatek"...) and refuses to
-            // guess without one -> vkCreateSwapchainKHR -1000072003. Phones whose vendor has only the HIDL gralloc4 mapper have none. Logged
-            // so a report says which case it is.
-            { char got[256] = ""; size_t used = 0; DIR *hd = opendir("/vendor/lib64/hw");
-              if (hd) { struct dirent *de; while ((de = readdir(hd))) if (!strncmp(de->d_name, "mapper.", 7) && strstr(de->d_name, ".so") && used + strlen(de->d_name) + 2 < sizeof got)
-                  used += (size_t)snprintf(got + used, sizeof got - used, "%s%s", used ? " " : "", de->d_name);
+            // guess without one -> vkCreateSwapchainKHR -1000072003. Phones whose vendor has only the HIDL gralloc4 mapper have none.
+            // When PANVK_MAPPER_NAMES is unset or empty, every mapper.<suffix>.so the vendor has goes into it (the directory listing; if
+            // SELinux denies it, a probe of known suffixes), so a mapper with an unusual name is found too. Builds that do not read the
+            // variable ignore it. A PANVK_MAPPER_NAMES from dm/env is kept. Logged so a report says which case it is.
+            { char got[256] = "", names[256] = ""; size_t used = 0, nu = 0; int nn = 0; DIR *hd = opendir("/vendor/lib64/hw");
+              const char *cur = getenv("PANVK_MAPPER_NAMES"); const int want = !(cur && *cur);
+              #define DM_ADD_MAPPER(file) do { const char *f_ = (file); size_t l_ = strlen(f_);                                                \
+                  if (used + l_ + 2 < sizeof got) used += (size_t)snprintf(got + used, sizeof got - used, "%s%s", used ? " " : "", f_);        \
+                  if (l_ > 10 && !strcmp(f_ + l_ - 3, ".so") && !strpbrk(f_ + 7, "/,") && nn < 16 && nu + (l_ - 10) + 2 < sizeof names) {     \
+                      nu += (size_t)snprintf(names + nu, sizeof names - nu, "%s%.*s", nn ? "," : "", (int)(l_ - 10), f_ + 7); nn++; } } while (0)
+              if (hd) { struct dirent *de; while ((de = readdir(hd))) if (!strncmp(de->d_name, "mapper.", 7)) DM_ADD_MAPPER(de->d_name);
                 closedir(hd); }
-              LOG("[vk] stable-C IMapper in /vendor/lib64/hw: %s (PanVK builds that need one: PANVK_MAPPER_NAMES=%s)", hd ? (used ? got : "none") : "(cannot list)",
-                  getenv("PANVK_MAPPER_NAMES") ? getenv("PANVK_MAPPER_NAMES") : "(unset)"); }
+              else { static const char *const k_sfx[] = { "mali", "arm", "mediatek", "mtk", "mt6789", "mt6833", "mt6877", "mt6895", "mt6983",
+                         "mt6985", "common", "default", "imapper", "exynos", "samsung", "unisoc", "sprd", "google", "gs101", "gs201", "zuma",
+                         "minigbm", "ranchu", "rockchip", "hisi", "kirin" };
+                  for (size_t i = 0; i < sizeof k_sfx / sizeof *k_sfx; i++) { char p[96], f[64];
+                      snprintf(f, sizeof f, "mapper.%s.so", k_sfx[i]); snprintf(p, sizeof p, "/vendor/lib64/hw/%s", f);
+                      if (!access(p, F_OK)) DM_ADD_MAPPER(f); } }
+              #undef DM_ADD_MAPPER
+              if (want && nn) setenv("PANVK_MAPPER_NAMES", names, 1);
+              LOG("[vk] stable-C IMapper in /vendor/lib64/hw (%s): %s; PANVK_MAPPER_NAMES=%s (%s)", hd ? "listed" : "listing denied, probed known names",
+                  used ? got : "none", getenv("PANVK_MAPPER_NAMES") ? getenv("PANVK_MAPPER_NAMES") : "(unset)",
+                  !want ? "from dm/env, kept" : nn ? "set from what was found" : "nothing to suggest: PanVK builds that need a stable-C mapper cannot open a window here"); }
         }
         const char *slash = strrchr(drv, '/');
         char dir[1024], hookdir[1024];
