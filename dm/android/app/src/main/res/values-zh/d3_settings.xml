@@ -174,5 +174,5 @@
     <string name="d3_speed">移动速度</string>
     <string name="d3_atkspeed">攻击速度</string>
     <string name="d3_zoom" formatted="true">镜头拉远：%1$d %%</string>
-    <string name="d3_zoom_note">显示英雄周围更大的范围：视野更宽，界面大小不变。100 % = 与 Switch 相同。超过约 120 % 时画面边缘会略有拉伸，屏幕最边缘的怪物可能会稍晚出现。</string>
+    <string name="d3_zoom_note">将镜头向后拉远，显示英雄周围更大的范围：视角不变，界面大小不变。100 % = 与 Switch 相同，约 120 % = 与 PC 版相同。屏幕上显示的场景越多，GPU 负载越高。</string>
 </resources>

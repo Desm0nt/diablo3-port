@@ -174,5 +174,5 @@
     <string name="d3_speed">Movement speed</string>
     <string name="d3_atkspeed">Attack speed</string>
     <string name="d3_zoom" formatted="true">Camera zoom-out: %1$d %%</string>
-    <string name="d3_zoom_note">Shows more around the hero: a wider view, the interface keeps its size. 100 % = as on the Switch. Above about 120 % the picture edges stretch a little, and monsters at the very edge may appear a moment late.</string>
+    <string name="d3_zoom_note">Moves the camera back to show more around the hero: the same angle, the interface keeps its size. 100 % = as on the Switch, about 120 % = as far as on the PC. More of the world on the screen means more GPU load.</string>
 </resources>
