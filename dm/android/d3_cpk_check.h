@@ -94,4 +94,56 @@ out:
     return rc;
 }
 static int d3_cpk_check(const char *path, char *why, size_t n) { return d3_cpk_check_len(path, 0, why, n); }
+
+// [D3] GitHub issue #33: a Patch2_7_1.cpk of the right length but with damaged bytes inside (a bad copy to the phone) passed the check
+// above, and the game died before its first frame when it parsed the archive's hotfix table (free() of a pointer read from the file).
+// The full check: the header's sector_crc32 (offset 56) is the CRC-32 of every byte from the first compressed sector to the end of the
+// file (tools/d3cpklib.py verify). It reads the whole archive (20 GB a set), so the caller runs it only after a launch that crashed
+// before its first frame. Same results as d3_cpk_check; 0 also for a layout it does not know or an archive without that CRC.
+#ifndef D3CPK_NO_ZLIB
+#include <zlib.h>
+#define d3cpk_crc32(c, b, n) ((uint32_t)crc32((uLong)(c), (const Bytef *)(b), (uInt)(n)))
+#else   // tools/test_cpk_crc.c on a PC without zlib headers: the same CRC-32 (IEEE, reflected 0xEDB88320), bitwise
+static uint32_t d3cpk_crc32(uint32_t c, const uint8_t *b, size_t n) {
+    c = ~c; while (n--) { c ^= *b++; for (int k = 0; k < 8; k++) c = c >> 1 ^ (0xEDB88320u & (0u - (c & 1))); } return ~c;
+}
+#endif
+static int d3_cpk_crc(const char *path, char *why, size_t n) {
+    why[0] = 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) { snprintf(why, n, "cannot be opened (errno %d)", errno); return -1; }
+    struct stat st; if (fstat(fd, &st)) { snprintf(why, n, "cannot be read (errno %d)", errno); close(fd); return -1; }
+    const uint64_t len = (uint64_t)st.st_size;
+    int rc = 0; uint8_t h[72] = {0}; uint8_t *buf = NULL;
+    if (len < 72 || d3cpk_read(fd, h, 72, 0)) goto out;                 // the quick check judges those
+    int big;
+    if (h[0] == 0xA1 && h[1] == 0xB2 && h[2] == 0xC3 && h[3] == 0xD4) big = 1;
+    else if (h[0] == 0xD4 && h[1] == 0xC3 && h[2] == 0xB2 && h[3] == 0xA1) big = 0;
+    else goto out;
+#define U32(o) (big ? ((uint32_t)h[o] << 24 | (uint32_t)h[(o) + 1] << 16 | (uint32_t)h[(o) + 2] << 8 | h[(o) + 3]) \
+                    : ((uint32_t)h[(o) + 3] << 24 | (uint32_t)h[(o) + 2] << 16 | (uint32_t)h[(o) + 1] << 8 | h[o]))
+    const uint32_t ver = U32(4), fmt = U32(16), hs = U32(28), stored = U32(56);
+    const uint64_t dfs = big ? ((uint64_t)U32(8) << 32 | U32(12)) : ((uint64_t)U32(12) << 32 | U32(8));
+    uint64_t rs;
+    if (ver == 6) rs = 0x10000; else if (ver == 7) rs = U32(60); else goto out;
+#undef U32
+    if (!rs || (fmt == 0 && len - (uint64_t)hs * rs == dfs)) goto out;   // raw cutscene archive: no compressed sectors
+    uint64_t first;
+    if (fmt == 10) first = hs;
+    else { first = (rs * hs) & 0xFFFF0000ull; if (first % rs) first += rs; }
+    if (first >= len) goto out;
+    enum { CH = 4 << 20 };
+    buf = malloc(CH); if (!buf) goto out;
+    uint32_t crc = 0;
+    for (uint64_t off = first; off < len;) {
+        const size_t want = len - off < CH ? (size_t)(len - off) : CH;
+        if (d3cpk_read(fd, buf, want, off)) { snprintf(why, n, "cannot be read at %llu MB (errno %d)", (unsigned long long)(off >> 20), errno); rc = -1; goto out; }
+        crc = d3cpk_crc32(crc, buf, want); off += want;
+    }
+    if (crc != stored) { snprintf(why, n, "damaged: %llu MB, the right length but its data checksum is wrong (%08x, the header says %08x)",
+                                            (unsigned long long)(len >> 20), (unsigned)crc, (unsigned)stored); rc = 1; }
+out:
+    free(buf); close(fd);
+    return rc;
+}
 #endif

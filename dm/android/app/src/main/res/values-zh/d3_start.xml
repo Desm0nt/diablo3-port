@@ -7,4 +7,6 @@
     <string name="d3_start_missing_modules">缺少打过补丁的游戏模块（Download/Diablo3Mobile/dm/out）。请在电脑上重新运行 setup，再把整个「Diablo3Mobile」文件夹重新拷到手机的 Download 文件夹。</string>
     <string name="d3_start_missing_shaders">缺少着色器（Download/Diablo3Mobile/dm/shaders）。请在电脑上重新运行 setup，再把整个「Diablo3Mobile」文件夹重新拷到手机的 Download 文件夹。</string>
     <string name="d3_start_damaged_archives" formatted="true">部分游戏文件不完整（复制到手机时中断了）：\n\n%1$s\n\n请从电脑把这些文件重新复制到 Download/Diablo3Mobile 中的相同位置（覆盖），然后启动游戏。</string>
+    <string name="d3_start_checking_archives" formatted="true">上次启动在画面出现前崩溃了。正在检查一次游戏文件（最多约一分钟）…\n\n%1$d %%</string>
+    <string name="d3_start_corrupt_archives" formatted="true">部分游戏文件已损坏（大小正确，但内容有误：通常是复制到手机时出错）：\n\n%1$s\n\n请从电脑把这些文件重新复制到 Download/Diablo3Mobile 中的相同位置（覆盖），然后启动游戏。</string>
 </resources>

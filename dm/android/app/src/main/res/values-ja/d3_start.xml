@@ -7,4 +7,6 @@
     <string name="d3_start_missing_modules">パッチ済みのゲームモジュールがありません（Download/Diablo3Mobile/dm/out）。PC で setup をもう一度実行し、「Diablo3Mobile」フォルダ全体をスマートフォンの Download フォルダにコピーし直してください。</string>
     <string name="d3_start_missing_shaders">シェーダーがありません（Download/Diablo3Mobile/dm/shaders）。PC で setup をもう一度実行し、「Diablo3Mobile」フォルダ全体をスマートフォンの Download フォルダにコピーし直してください。</string>
     <string name="d3_start_damaged_archives" formatted="true">一部のゲームファイルが不完全です（スマートフォンへのコピーが途中で止まりました）：\n\n%1$s\n\nこれらのファイルをPCから Download/Diablo3Mobile の同じ場所にもう一度コピー（上書き）してから、ゲームを起動してください。</string>
+    <string name="d3_start_checking_archives" formatted="true">前回の起動は画面が表示される前にクラッシュしました。ゲームファイルを一度だけ確認しています（最大1分ほど）…\n\n%1$d %%</string>
+    <string name="d3_start_corrupt_archives" formatted="true">一部のゲームファイルが壊れています（サイズは正しいものの中身が壊れています。多くはスマートフォンへのコピーの失敗です）：\n\n%1$s\n\nこれらのファイルをPCから Download/Diablo3Mobile の同じ場所にもう一度コピー（上書き）してから、ゲームを起動してください。</string>
 </resources>

@@ -7,4 +7,6 @@
     <string name="d3_start_missing_modules">패치된 게임 모듈이 없습니다(Download/Diablo3Mobile/dm/out). PC에서 setup을 다시 실행하고 \"Diablo3Mobile\" 폴더 전체를 휴대폰의 Download 폴더에 다시 복사하세요.</string>
     <string name="d3_start_missing_shaders">셰이더가 없습니다(Download/Diablo3Mobile/dm/shaders). PC에서 setup을 다시 실행하고 \"Diablo3Mobile\" 폴더 전체를 휴대폰의 Download 폴더에 다시 복사하세요.</string>
     <string name="d3_start_damaged_archives" formatted="true">일부 게임 파일이 불완전합니다(휴대폰으로 복사하다가 중단됨):\n\n%1$s\n\n이 파일들을 PC에서 Download/Diablo3Mobile의 같은 위치로 다시 복사(덮어쓰기)한 뒤 게임을 시작하세요.</string>
+    <string name="d3_start_checking_archives" formatted="true">지난 실행이 화면이 나오기 전에 중단되었습니다. 게임 파일을 한 번 검사하는 중입니다(최대 1분)…\n\n%1$d %%</string>
+    <string name="d3_start_corrupt_archives" formatted="true">일부 게임 파일이 손상되었습니다(크기는 맞지만 내용이 잘못됨: 대개 휴대폰으로 복사할 때 생긴 오류):\n\n%1$s\n\n이 파일들을 PC에서 Download/Diablo3Mobile의 같은 위치로 다시 복사(덮어쓰기)한 뒤 게임을 시작하세요.</string>
 </resources>

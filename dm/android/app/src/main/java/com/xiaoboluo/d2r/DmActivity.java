@@ -102,6 +102,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native String nativeDriverStatus();          // [D3] "<requested>\t<active>\t<reason>\t<details>" (vk_driver.c), "" before the driver loads
     static native void nativeLog(String text);          // [DOOM] a "[java] ..." breadcrumb line into boot.log (jni_android.c)
     static native String nativeStartDetail();            // [D3] details of a failed start (-11: the damaged archives, one per line; jni_android.c d3_check_archives)
+    static native String nativeCpkVerify(String src, String files);   // [D3] issue #33: the full archive check (cpkVerify); jni_android.c
+    static native void nativeCpkProgress(long[] out);                  // [D3] its progress {MB read, MB total}
     static native String nativeLogPath();               // [DOOM] this run's boot.log ("" before nativeStart)
     // [D3] (from the DOOM 2016 port, its BUGS_AND_FIXES 2.22) crash logs (CrashLog.java): breadcrumbs from before the native log exists
     // wait in pendingCrumbs
@@ -1375,6 +1377,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         File data = new File(downloads, "S2X/D2R Mobile/data"), earlier = new File(downloads, "data");
         if (!data.isDirectory() && earlier.isDirectory()) data = earlier;
         String src = DOOM ? new File(downloads, DATA_DIR).getAbsolutePath() : data.getAbsolutePath();   // [DOOM] Download/DOOM Mobile/{romfs,dm}
+        if (D3 && !started && cpkVerify(src)) return;   // [D3] issue #33: the last launch crashed before its first frame: archive checksums first
         if (DOOM) CrashLog.session(this, "fg");   // [DOOM] the game runs from here: a leftover marker at the next start = it did not end cleanly
         int result = nativeStart(getFilesDir().getAbsolutePath(), ext.getAbsolutePath(), src, Locale.getDefault().toLanguageTag());
         if (DOOM) { nativeLogReady = true; gameStartedAt = android.os.SystemClock.uptimeMillis(); flushCrumbs(); crumb("nativeStart " + result); }
@@ -1401,6 +1404,47 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         // (DRV-09), the in-process fallback after a failed Vulkan start (DRV-07); then the "a new version is out" check (once per start)
         if (D3) vkDrivers().gameStarted(view, () -> { if (updates != null) updates.start(); });
         nativeFocus(3);
+    }
+
+    // [D3] GitHub issue #33: Update/CPKs/Patch2_7_1.cpk with the right length but damaged data (a bad copy to the phone) passed the quick
+    // start check, and the game crashed before its first frame on every launch. After a launch that crashed before its first frame
+    // (files/cpk-crc.next, left by jni_android.c crash_report_hook) every archive's data checksum is checked once, on a background thread
+    // with a progress screen, before the game starts (nativeCpkVerify, 10-60 s; a set of files that passed it is not read again). A damaged
+    // archive stops the start with a screen naming it. true = the start waits for the check (it calls startHost again when done).
+    private boolean cpkVerifying, cpkVerified;
+    private boolean cpkVerify(String src) {
+        if (cpkVerifying) return true;
+        if (cpkVerified) return false;
+        cpkVerified = true;
+        if (!new File(getFilesDir(), "cpk-crc.next").isFile()) return false;
+        cpkVerifying = true;
+        final TextView tv = new TextView(this);
+        tv.setTextColor(0xFFFFFFFF); tv.setTextSize(18); tv.setGravity(android.view.Gravity.CENTER); tv.setPadding(64, 64, 64, 64);
+        tv.setBackgroundColor(0xF0101010); tv.setKeepScreenOn(true); tv.setClickable(true);
+        tv.setText(d3Ui().getString(R.string.d3_start_checking_archives, 0));
+        gameFrame.addView(tv, new FrameLayout.LayoutParams(-1, -1));
+        final long[] pr = new long[2];
+        tv.post(new Runnable() { @Override public void run() {
+            if (!cpkVerifying) return;
+            try { nativeCpkProgress(pr); } catch (Throwable t) { /* older native */ }
+            tv.setText(d3Ui().getString(R.string.d3_start_checking_archives, pr[1] > 0 ? (int) Math.min(100, pr[0] * 100 / pr[1]) : 0));
+            tv.bringToFront(); tv.postDelayed(this, 500);
+        } });
+        final String files = getFilesDir().getAbsolutePath();
+        new Thread(() -> {
+            String r;
+            try { r = nativeCpkVerify(src, files); } catch (Throwable t) { new File(files, "cpk-crc.next").delete(); r = "\n\tarchives: full check failed: " + t; }
+            final String res = r;
+            runOnUiThread(() -> {
+                cpkVerifying = false; gameFrame.removeView(tv);
+                int cut = res.indexOf("\n\t");
+                String bad = cut >= 0 ? res.substring(0, cut) : res, log = cut >= 0 ? res.substring(cut + 2) : "";
+                if (!log.isEmpty()) crumb(log);
+                if (!bad.isEmpty()) { showStartError(d3Ui().getString(R.string.d3_start_corrupt_archives, bad)); return; }
+                startHost();
+            });
+        }, "dm-cpkcrc").start();
+        return true;
     }
 
     private void showStartError(String message) {

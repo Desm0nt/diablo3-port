@@ -91,6 +91,10 @@ static int lifecycle_ready(void) { pthread_once(&g_lifecycle_once, lifecycle_ini
 static pthread_mutex_t g_log_mu = PTHREAD_MUTEX_INITIALIZER;
 static int g_log_fd = -1;
 static char g_log_path[1200], g_crash_flag[1200];
+// [D3] issue #33: a crash before the first frame (g_frame_seen still 0) leaves <files>/cpk-crc.next; the next start then checks every
+// archive's data checksum once (d3_cpk_crc, DmActivity.cpkVerify) before the game starts. g_frame_seen: nativeFrameStats saw frames.
+static char g_crc_flag[1200];
+static _Atomic int g_frame_seen;
 static _Atomic int g_pump_busy;
 static char g_crash_note[384];   // the last FATAL line: copied into the crash marker (read in the signal handler, racy by design)
 static long g_log_head = -1, g_log_max = 32l << 20;
@@ -136,6 +140,7 @@ static size_t s_dec(char *o, int v) { char t[12]; int n = 0; unsigned u = v < 0 
 static size_t s_cat(char *o, const char *s) { size_t n = 0; while (s[n]) { o[n] = s[n]; n++; } return n; }
 static void crash_report_hook(int phase, int sig, uint64_t addr, uint64_t pc) {
     if (phase == 0) {   // the marker first: <files>/dm-crash.txt "signal=<n> addr=<hex> pc=<hex>\n<last FATAL line>\n"
+        if (g_crc_flag[0] && !atomic_load(&g_frame_seen)) { int c = open(g_crc_flag, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600); if (c >= 0) close(c); }
         int fd = g_crash_flag[0] ? open(g_crash_flag, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
         if (fd < 0) return;
         char b[640]; size_t n = 0;
@@ -223,6 +228,9 @@ static void log_init(void) {
     g_logf = fopen(g_log_path, "w"); g_log_fd = g_logf ? fileno(g_logf) : -1;
     log_limit();
     snprintf(g_crash_flag, sizeof g_crash_flag, "%s/dm-crash.txt", g_files);
+#ifdef DM_GAME_D3
+    snprintf(g_crc_flag, sizeof g_crc_flag, "%s/cpk-crc.next", g_files);
+#endif
     crash_set_report_hook(crash_report_hook);
     int fds[2]; if (pipe(fds)) return;
     dup2(fds[1], 2); close(fds[1]); setvbuf(stderr, NULL, _IOLBF, 0);
@@ -312,15 +320,14 @@ static int d3_pick_shader_dir(void) {
 // remembered by name / size / modification time (files/cpk-check.ok), so later starts read no archive header. DM_CPK_CHECK=0: log only.
 #include "d3_cpk_check.h"
 static char g_start_detail[2048];   // the start screen's details (-11: the damaged archives, one per line)
-static int d3_check_archives(void) {
-    const char *m = getenv("DM_CPK_CHECK"); const int stop = !(m && *m == '0');
+// Every *.cpk under <src>/romfs/CPKs, romfs/Update/CPKs, aoc/<n>/ into paths[256] (sizes into sizes when given); want = the set's
+// signature "<FNV-1a 64 over 'path size mtime' lines> <count>". Returns the count.
+static int d3_list_archives(const char *src, char (*paths)[1400], uint64_t *sizes, char want[40]) {
     char dirs[48][1300]; int nd = 0;
-    snprintf(dirs[nd++], sizeof dirs[0], "%s/romfs/CPKs", g_src);
-    snprintf(dirs[nd++], sizeof dirs[0], "%s/romfs/Update/CPKs", g_src);
-    { char aoc[1100]; snprintf(aoc, sizeof aoc, "%s/aoc", g_src); DIR *d = opendir(aoc);
+    snprintf(dirs[nd++], sizeof dirs[0], "%s/romfs/CPKs", src);
+    snprintf(dirs[nd++], sizeof dirs[0], "%s/romfs/Update/CPKs", src);
+    { char aoc[1100]; snprintf(aoc, sizeof aoc, "%s/aoc", src); DIR *d = opendir(aoc);
       if (d) { struct dirent *e; while ((e = readdir(d)) && nd < 48) if (e->d_name[0] != '.') snprintf(dirs[nd++], sizeof dirs[0], "%s/%s", aoc, e->d_name); closedir(d); } }
-    // the set's signature: FNV-1a over "path size mtime" of every archive
-    char (*paths)[1400] = calloc(256, sizeof *paths); if (!paths) return 0;
     int np = 0; uint64_t sig = 0xCBF29CE484222325ull;
     for (int i = 0; i < nd; i++) {
         DIR *d = opendir(dirs[i]); if (!d) continue;
@@ -331,12 +338,24 @@ static int d3_check_archives(void) {
             struct stat st; if (stat(paths[np], &st)) continue;
             char line[1500]; snprintf(line, sizeof line, "%s %lld %lld\n", paths[np], (long long)st.st_size, (long long)st.st_mtime);
             for (const char *c = line; *c; c++) sig = (sig ^ (uint8_t)*c) * 0x100000001B3ull;
+            if (sizes) sizes[np] = (uint64_t)st.st_size;
             np++;
         }
         closedir(d);
     }
-    char okf[1100], want[40], have[40] = {0}; snprintf(okf, sizeof okf, "%s/cpk-check.ok", g_files); snprintf(want, sizeof want, "%016llx %d", (unsigned long long)sig, np);
-    { FILE *f = fopen(okf, "r"); if (f) { if (!fgets(have, sizeof have, f)) have[0] = 0; fclose(f); have[strcspn(have, "\r\n")] = 0; } }
+    snprintf(want, 40, "%016llx %d", (unsigned long long)sig, np);
+    return np;
+}
+static void d3_read_line(const char *path, char *out, size_t n) {
+    out[0] = 0; FILE *f = fopen(path, "r"); if (!f) return;
+    if (!fgets(out, (int)n, f)) out[0] = 0;
+    fclose(f); out[strcspn(out, "\r\n")] = 0;
+}
+static int d3_check_archives(void) {
+    const char *m = getenv("DM_CPK_CHECK"); const int stop = !(m && *m == '0');
+    char (*paths)[1400] = calloc(256, sizeof *paths); if (!paths) return 0;
+    char want[40], have[40]; const int np = d3_list_archives(g_src, paths, NULL, want);
+    char okf[1100]; snprintf(okf, sizeof okf, "%s/cpk-check.ok", g_files); d3_read_line(okf, have, sizeof have);
     if (np && !strcmp(have, want)) { LOG("boot: archives: %d *.cpk unchanged since they last passed the check", np); free(paths); return 0; }
     const uint64_t t0 = now_ns(); int bad = 0, unread = 0; size_t used = 0; g_start_detail[0] = 0;
     for (int i = 0; i < np; i++) {
@@ -355,6 +374,56 @@ static int d3_check_archives(void) {
     return bad ? -11 : 0;
 }
 JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStartDetail(JNIEnv *env, jclass cls) { (void)cls; return (*env)->NewStringUTF(env, g_start_detail); }
+
+// [D3] GitHub issue #33: the player's Update/CPKs/Patch2_7_1.cpk had the right length but damaged data (a bad copy to the phone), so the
+// quick check above passed it and the game died before its first frame, parsing the archive. After a launch that crashed before its
+// first frame (<files>/cpk-crc.next, crash_report_hook) DmActivity.cpkVerify runs this on a background thread before nativeStart: the
+// data checksum of every archive (d3_cpk_crc, the whole file is read: 16 GB, about 10-60 s). Once per set of files: a set that passed
+// it is remembered (files/cpk-crc.ok, the same signature as cpk-check.ok), so further crashes before the first frame (a driver) do not
+// read 16 GB again. Returns "" = nothing damaged, else the damaged files (paths below src), one per line, then "\n\t" and log lines.
+// nativeCpkProgress: {bytes read, bytes total} (MB).
+static _Atomic long long g_crc_done, g_crc_total;
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeCpkProgress(JNIEnv *env, jclass cls, jlongArray out) {
+    (void)cls; jlong v[2] = {(jlong)(atomic_load(&g_crc_done) >> 20), (jlong)(atomic_load(&g_crc_total) >> 20)}; (*env)->SetLongArrayRegion(env, out, 0, 2, v);
+}
+JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeCpkVerify(JNIEnv *env, jclass cls, jstring jsrc, jstring jfiles) {
+    (void)cls;
+    const char *src = (*env)->GetStringUTFChars(env, jsrc, NULL), *files = (*env)->GetStringUTFChars(env, jfiles, NULL);
+    char mark[1100], okf[1100], qok[1100]; snprintf(mark, sizeof mark, "%s/cpk-crc.next", files); snprintf(okf, sizeof okf, "%s/cpk-crc.ok", files);
+    snprintf(qok, sizeof qok, "%s/cpk-check.ok", files);
+    char *res = calloc(1, 4096); size_t used = 0; char logl[1024] = {0};
+    char (*paths)[1400] = calloc(256, sizeof *paths); uint64_t *sizes = calloc(256, sizeof *sizes);
+    if (!res || !paths || !sizes) goto done;
+    char want[40], have[40]; const int np = d3_list_archives(src, paths, sizes, want);
+    d3_read_line(okf, have, sizeof have);
+    if (np && !strcmp(have, want)) { snprintf(logl, sizeof logl, "archives: %d *.cpk unchanged since they passed the full check: not read again", np); goto done; }
+    long long total = 0; for (int i = 0; i < np; i++) total += (long long)sizes[i];
+    atomic_store(&g_crc_total, total); atomic_store(&g_crc_done, 0);
+    const uint64_t t0 = now_ns(); int bad = 0, unread = 0; const size_t sl = strlen(src);
+    for (int i = 0; i < np; i++) {
+        char why[256]; int r = d3_cpk_check(paths[i], why, sizeof why);
+        if (r == 0) r = d3_cpk_crc(paths[i], why, sizeof why);
+        atomic_fetch_add(&g_crc_done, (long long)sizes[i]);
+        const char *rel = !strncmp(paths[i], src, sl) && paths[i][sl] == '/' ? paths[i] + sl + 1 : paths[i];
+        if (r == 1) {
+            bad++; __android_log_print(ANDROID_LOG_WARN, "dm", "archive %s is damaged: %s", rel, why);
+            if (used < 3000) used += (size_t)snprintf(res + used, 4096 - used, "%s%s", used ? "\n" : "", rel);
+            if (strlen(logl) < 700) snprintf(logl + strlen(logl), sizeof logl - strlen(logl), "%s%s: %s", logl[0] ? "; " : "", rel, why);
+        } else if (r < 0) unread++;
+    }
+    { char head[200]; snprintf(head, sizeof head, "archives: full check (the last launch crashed before its first frame): %d *.cpk, %lld MB in %.1f s: %d damaged, %d not readable%s",
+                               np, total >> 20, (now_ns() - t0) / 1e9, bad, unread, bad ? ": " : "");
+      char tail[1024]; snprintf(tail, sizeof tail, "%s%s", head, logl); snprintf(logl, sizeof logl, "%s", tail); }
+    if (!bad && !unread && np) { FILE *f = fopen(okf, "w"); if (f) { fprintf(f, "%s\n", want); fclose(f); } }
+    if (bad) unlink(qok);   // the quick check must not skip this set either
+done:
+    unlink(mark);   // whatever the result: checked once per crash
+    if (res && used < 4000) snprintf(res + used, 4096 - used, "\n\t%s", logl);
+    jstring out = (*env)->NewStringUTF(env, res ? res : "");
+    free(res); free(paths); free(sizes);
+    (*env)->ReleaseStringUTFChars(env, jsrc, src); (*env)->ReleaseStringUTFChars(env, jfiles, files);
+    return out;
+}
 #endif
 // 内部目录 romfs/data/ 下逐个链接到资源目录的文件（游戏按 rom:/data/… 读；链接让资源留在玩家放的位置，不复制 5 GB）
 // Under the internal dir romfs/data/, link each file of the resource dir (the game reads rom:/data/...; links keep the resources where the player put them instead of copying 5 GB)
@@ -776,6 +845,7 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativePadAxes(JNIEnv *e
 void dm_frame_stats(float out[4]);
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeFrameStats(JNIEnv *env, jclass cls, jfloatArray out) {
     (void)cls; float v[4]; dm_frame_stats(v); (*env)->SetFloatArrayRegion(env, out, 0, 4, v);
+    if (v[0] > 0) atomic_store(&g_frame_seen, 1);   // [D3] issue #33: a crash from here on is not "before the first frame"
 }
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativePadRemoved(JNIEnv *env, jclass cls, jint device) {
     (void)env; (void)cls;
