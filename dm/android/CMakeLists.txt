@@ -169,6 +169,9 @@ endif()
 # Same optimization level as the Makefile (-O1 -g); dm_android_compat.h force-included; -fno-strict-aliasing matches the host's habit of reading and writing guest memory under Apple clang's default behaviour
 set(DM_CFLAGS -O1 -g -Wall -Wno-unused-function -fno-strict-aliasing -include ${CMAKE_CURRENT_SOURCE_DIR}/compat/include/dm_android_compat.h)
 target_compile_options(dmcore PUBLIC $<$<COMPILE_LANGUAGE:C>:${DM_CFLAGS} -std=gnu17>)
+# [pc xbg-o3] DOOM 2016 [mt S4]: the block-linear deswizzle (texture uploads on the translation thread) is a pure function:
+# -O3 for it alone (source options come after dmcore's -O1, so they win). Test: port-common/modules/xbg-o3/test/t_deswz_o3.py.
+set_source_files_properties(${DM}/gfx/tex/nvn_deswizzle.c PROPERTIES COMPILE_OPTIONS "-O3;-mtune=cortex-x3")
 # [DOOM] Vulkan through trampolines (vk_tramp.S + vk_driver.c): the system loader or a custom driver (Turnip) through
 # libadrenotools (BSD-2, third_party/libadrenotools); its hook libraries are packaged next to libdm.so (tools/build_apk.ps1).
 set(BUILD_SHARED_LIBS_SAVED ${BUILD_SHARED_LIBS})
