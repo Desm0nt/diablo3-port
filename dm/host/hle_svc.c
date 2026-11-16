@@ -137,7 +137,23 @@ static int svc_mprotect(void *a, size_t n, int prot, const char *who) {
 #else
 #define APP_POOL_ADD_MB 512
 #endif
-static uint64_t app_pool(void) { static uint64_t v; if (!v) { const char *e = getenv("DM_APP_POOL_ADD_MB"); long add = e ? atol(e) : APP_POOL_ADD_MB; v = APP_POOL + ((uint64_t)add << 20); if (e) LOG("DM_APP_POOL_ADD_MB：应用内存池报 %llu MB（Switch 的 3285 MB %+ld）", (unsigned long long)(v >> 20), add); } return v; }
+#ifdef DM_GAME_D3
+// [D3] hle_d3.c gh_install: the game's graphics heap grown for DM_D3_HEIGHT (KB WIDE-09). The pool grows by as much, as far as the heap
+// region allows (heap = pool - image <= g_heap_cap, 64 MB spare); what does not fit comes out of the +512 MB main-heap margin.
+unsigned dm_d3_gfx_extra_mb;
+static size_t image_bytes(void);
+static uint64_t d3_pool_gfx(uint64_t v) {
+    if (!dm_d3_gfx_extra_mb) return v;
+    const uint64_t want = (uint64_t)dm_d3_gfx_extra_mb << 20, top = (uint64_t)g_heap_cap + image_bytes(), spare = 64ull << 20;
+    const uint64_t room = top > v + spare ? (top - v - spare) & ~((2ull << 20) - 1) : 0, add = want < room ? want : room;
+    LOG("[wide] graphics heap +%u MB: the pool reported to the game %llu -> %llu MB (heap region %zu MB; %llu MB from the main-heap margin)",
+        dm_d3_gfx_extra_mb, (unsigned long long)(v >> 20), (unsigned long long)((v + add) >> 20), g_heap_cap >> 20, (unsigned long long)((want - add) >> 20));
+    return v + add;
+}
+#else
+static uint64_t d3_pool_gfx(uint64_t v) { return v; }
+#endif
+static uint64_t app_pool(void) { static uint64_t v; if (!v) { const char *e = getenv("DM_APP_POOL_ADD_MB"); long add = e ? atol(e) : APP_POOL_ADD_MB; v = APP_POOL + ((uint64_t)add << 20); if (!e) v = d3_pool_gfx(v); if (e) LOG("DM_APP_POOL_ADD_MB：应用内存池报 %llu MB（Switch 的 3285 MB %+ld）", (unsigned long long)(v >> 20), add); } return v; }
 static size_t image_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) n += g_mod[i].size; return (n + 0x1fffff) & ~(size_t)0x1fffff; }
 
 // 游戏主堆读数：主堆 = main+0x32137a0 那个 nn::mem::StandardAllocator（启动时把整块堆交给它）。申请失败返回空，原版多处不判空直接写

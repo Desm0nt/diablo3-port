@@ -328,6 +328,31 @@ static void df_install(module_t *m, unsigned H) {
     LOG("[wide] DM_D3_FONT_FIT=near: font size lookup main+%#x replaced: every baked size (720 + 900 classes), exact or the nearest "
         "(larger only up to +5 %%); window %u lines (handheld %u) - the Switch fonts have sizes only for 720 / 900", DF_FIND, H, (H * 4 / 5 + 4) / 8 * 8);
 }
+// ---- The game's graphics heap at a height the Switch never runs (DM_D3_HEIGHT != 900; DM_D3_GFX_HEAP; KB WIDE-09)
+// At start (0xa36c34, the allocator set-up 0xa36b60) the game takes a fixed 372 MB block (mov w19,#0x17400000) from its heap for the
+// allocator behind the global 0x114c968: render targets and other GPU memory come from it (0xe6ac0 mode 0, 0x100 aligned), and a failed
+// allocation there is fatal (0xa39050: "out of memory" -> trap, SIGILL at main+0xa2c440 with lr main+0xa390ac). 2400x1080 still fits,
+// 2464x1080 (TECNO LI6, issue #23) dies in the front end before the first frame. Sized here linearly from 2400x1080 (fits in 372 MB, so
+// this is an upper bound for larger windows: any fixed part only makes the real need smaller) + 64 MB, in 16 MB steps, at most 800 MB.
+// The pool reported to the game grows by as much as the heap region allows (hle_svc.c app_pool), the rest comes out of the +512 MB
+// main-heap margin. DM_D3_GFX_HEAP=<MB> sets the size (0 = the game's 372 MB).
+enum { GH_SIZE = 0xa36c34 };
+extern unsigned dm_d3_gfx_extra_mb;   // hle_svc.c: the pool reported to the game grows by this much where the heap region allows
+static void gh_install(module_t *m, unsigned w, unsigned H) {
+    static const uint32_t k_gh = 0x52a2e813;   // mov w19,#0x17400000 (372 MB)
+    if (memcmp(m->base + GH_SIZE, &k_gh, 4)) { LOG("【红】[wide] graphics heap size main+%#x differs (not update 2.7.7): 372 MB kept, large windows may run out", GH_SIZE); return; }
+    const char *e = getenv("DM_D3_GFX_HEAP");
+    const uint64_t px = (uint64_t)w * H, ref = 2400u * 1080u;
+    uint64_t mb = e && *e ? (uint64_t)atol(e) : (372 * px + ref - 1) / ref + 64;
+    if (mb > 800) { LOG("【红】[wide] graphics heap: %ux%u wants %llu MB, capped at 800 MB (the main heap keeps its margin)", w, H, (unsigned long long)mb); mb = 800; }
+    mb = (mb + 15) & ~(uint64_t)15;
+    if (mb <= 372) { LOG("[wide] graphics heap main+%#x: the game's 372 MB kept (%s)", GH_SIZE, e && *e ? "DM_D3_GFX_HEAP" : "window small enough"); return; }
+    const uint32_t ins = 0x52a00000u | (uint32_t)((mb << 4) & 0xffff) << 5 | 19;   // mov w19,#(mb MB) = (mb << 4) << 16
+    if (dw_poke(m, GH_SIZE, &ins, 1)) { LOG("【红】[wide] graphics heap: mprotect RW failed, 372 MB kept"); return; }
+    dm_d3_gfx_extra_mb = (unsigned)(mb - 372);
+    LOG("[wide] graphics heap main+%#x: 372 -> %llu MB for the %ux%u window (render targets; 2464x1080 ran out of 372 MB)%s",
+        GH_SIZE, (unsigned long long)mb, w, H, e && *e ? " [DM_D3_GFX_HEAP]" : "");
+}
 void dm_d3_wide_install(void);   // main.c host_preload, right after load_modules (before any guest code runs)
 void dm_d3_wide_install(void) {
     const char *e = getenv("DM_D3_WIDE");
@@ -368,6 +393,7 @@ void dm_d3_wide_install(void) {
         DW_INIT + 8, w, H, wh, hh, a, (uint64_t)w * 9 > (uint64_t)H * 16 ? "Hor+" : (uint64_t)w * 9 == (uint64_t)H * 16 ? "16:9" : "Hor-, vertical FOV kept",
         H != 900 ? " [DM_D3_HEIGHT: render height, experimental]" : "", DW_LBOX);
     if (H != 900) df_install(m, H);   // fonts are baked only for 720 / 900 lines (WIDE-08)
+    if (H != 900) gh_install(m, w, H);   // render targets outgrow the game's 372 MB graphics heap (WIDE-09)
     if ((uint64_t)w * 9 > (uint64_t)H * 16 + H / 8) ls_install(m);   // wider than 16:9 (the 16-pixel rounding of a 16:9 width is not)
 }
 #endif
