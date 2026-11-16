@@ -220,9 +220,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         addBtn("R3", K_R3, "tr", 1, 0, -30, 30, 0, 0, 19, false);   // TL2: R3 at the top right, the rest of the row to its left
         addBtn(menuLabel, MENU_TOGGLE, "tr", 1, 0, -30, 30, -52, 0, 22, true);
         addBtn("L", K_L, "tr", 1, 0, -30, 30, -104, 0, 20, true);
-        // L3 shown from the start in this layout, at the left end of the top-right row (issue #28: the game's "Unequip" in the inventory
-        // is L3, and here the left stick is hidden and gone in menu mode, so its knob tap could not be found); the editor can hide it
-        addStickClick("L3", K_L3, "l3", 1, 0, -186, 30); { Btn l3 = btns.get(btns.size() - 1); l3.defHidden = false; l3.hidden = false; }
+        addStickClick("L3", K_L3, "l3", 0.30f, 0.55f, 0, 0);   // [front] padl3: hidden until "Add…" (R3 is in the top row already)
     }
     private boolean touch() { return LAYOUT_TOUCH.equals(layout); }
     private List<Ctl> all() { List<Ctl> a = new ArrayList<>(btns); a.add(left); if (right != null) a.add(right); return a; }
