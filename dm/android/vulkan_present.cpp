@@ -35,6 +35,19 @@ static VkResult dm_present_wait_fences(VkDevice d,uint32_t n,const VkFence *f,Vk
     for(unsigned tries=0;r==VK_ERROR_INITIALIZATION_FAILED && tries<1000;++tries)r=vkWaitForFences(d,n,f,all,timeout);
     return r;}
 #define vkWaitForFences dm_present_wait_fences
+// [present-thread] PERF-D07 DM_GFX_PRESENT_THREAD (port-common/modules/present-thread): with the present thread on, two threads use the
+// one VkQueue, so every queue call of this file takes queue_mutex (the engine's take it through dm_present_queue_lock); the blit's
+// submission and the queue present of the job the present thread runs are reported to the hand-off (present_thread.h). Mode 0: no lock.
+#include "present_thread.h"
+static std::atomic<int> pt_cfg{0};static std::mutex pt_queue_mutex;static thread_local bool pt_on_thread=false;
+static void pt_mark_submitted(void);static void pt_stamp_present(void);
+struct PtQLock{bool on;PtQLock():on(pt_cfg.load(std::memory_order_relaxed)!=0){if(on)pt_queue_mutex.lock();}~PtQLock(){if(on)pt_queue_mutex.unlock();}};
+static VkResult pt_queue_submit(VkQueue q,uint32_t n,const VkSubmitInfo *s,VkFence f){VkResult r;{PtQLock l;r=vkQueueSubmit(q,n,s,f);}if(r==VK_SUCCESS && pt_on_thread)pt_mark_submitted();return r;}
+static VkResult pt_queue_present(VkQueue q,const VkPresentInfoKHR *p){VkResult r;{PtQLock l;r=vkQueuePresentKHR(q,p);}if(pt_on_thread)pt_stamp_present();return r;}
+static VkResult pt_queue_wait_idle(VkQueue q){PtQLock l;return vkQueueWaitIdle(q);}
+#define vkQueueSubmit pt_queue_submit
+#define vkQueuePresentKHR pt_queue_present
+#define vkQueueWaitIdle pt_queue_wait_idle
 extern "C" double dm_present_period(void);
 // 错过上屏节拍的帧数（晚于「上次期望时刻 + 周期」2 ms 以上）；自适应出图档按它降档 / 试升
 // Frames that missed their display slot (more than 2 ms later than "previous desired time + period"); the adaptive present tier steps down / probes up by it
@@ -547,9 +560,14 @@ void record(VkCommandBuffer cmd,unsigned f,bool fence_idle,VkImage source,VkForm
 }
 }
 #endif
+int present_body(VkImage source,VkFormat source_format,uint32_t width,uint32_t height,const int32_t crop[4]);
 int present(void*,void*,VkImage source,VkFormat source_format,uint32_t width,uint32_t height,const int32_t crop[4],int32_t){
     std::lock_guard<std::mutex> render_lock(render_mutex);
     pin_update();
+    return present_body(source,source_format,width,height,crop);
+}
+// [present-thread] The present itself; the caller holds render_mutex (present(), the present thread, or DM_GFX_PRESENT_THREAD=2 inline).
+int present_body(VkImage source,VkFormat source_format,uint32_t width,uint32_t height,const int32_t crop[4]){
     VkFormatProperties sp;vkGetPhysicalDeviceFormatProperties(physical,source_format,&sp);if(!(sp.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT))return VK_ERROR_FORMAT_NOT_SUPPORTED;
     int x=0,y=0,w=int(width),h=int(height);if(crop&&crop[2]>0&&crop[3]>0){x=std::clamp(crop[0],0,w);y=std::clamp(crop[1],0,h);w=std::min(crop[2],int(width)-x);h=std::min(crop[3],int(height)-y);}if(w<=0||h<=0)return VK_ERROR_INITIALIZATION_FAILED;
     {   // [D3] gear "Upscale" switched (live), or the pass failed: the next swapchain is made for the new mode
@@ -670,6 +688,92 @@ int present(void*,void*,VkImage source,VkFormat source_format,uint32_t width,uin
     }
 }
 }
+// [present-thread] PERF-D07 DM_GFX_PRESENT_THREAD (DOOM 2016 vulkan_present.cpp pt::loop; port-common/modules/present-thread). The engine
+// reads the switch and calls dm_present_thread_set. 1: the engine hands each present (source image, format, size, crop) to the present
+// thread, which runs the same present_body as before: wait for the flight's fence, acquire, letterbox clear, RCAS, blit, submit, queue
+// present, swapchain / surface recreation, the window waits while the app is in the background, the ADPF report and frame-rate vote
+// (dm_aperf_present). Order on the one VkQueue: the engine waits until every handed present has its blit submitted before it submits
+// anything (dm_present_wait_submitted), and every queue call of both threads takes the queue lock, so the queue sees the same sequence as
+// presenting inline. The translation thread keeps its pin (pin_update at the hand-off). 2: the same protocol (queue lock) run inline on
+// the caller, no thread. 0 / unset: none of this runs and the queue lock is a no-op.
+// The present thread is the ADPF session's first thread (it calls dm_aperf_present; perf_android.c makes the caller a member); the
+// translation thread joins it by load like the game's other busy threads. Its cores: every core but the translation thread's, re-checked
+// every 128 presents (it is created by the pinned translation thread and inherits that pin: DOOM 2016's DM_GFX_PRESENT_UNPIN lesson).
+#if __has_include("../host/cpu_topo.h")
+#include "../host/cpu_topo.h"   // [cpu-place] where the module is in: its plan's present mask
+extern "C" const dm_cpu_plan_t *dm_cpu_plan(void) __attribute__((weak));
+#define PT_HAVE_PLAN 1
+#endif
+#include <pthread.h>
+#include <sys/resource.h>
+#include <thread>
+namespace pt {
+struct Job{VkImage src;VkFormat fmt;uint32_t w,h;int32_t crop[4];bool has_crop;};
+dmpt::Handoff<Job,4> &q=*new dmpt::Handoff<Job,4>();   // never destroyed: no exit-time destructor under a thread that waits on it
+thread_local uint64_t last_ticket=0;   // the producer's latest hand-off (nvn_vk.c maps its present number to it)
+std::atomic<int> translator_tid{0};std::atomic<uint64_t> inline_jobs{0};
+unsigned cpus_of(int tid){cpu_set_t s;CPU_ZERO(&s);if(sched_getaffinity(tid,sizeof s,&s))return 0;unsigned m=0;for(int c=0;c<32;c++)if(CPU_ISSET(c,&s))m|=1u<<c;return m;}
+// Every 128 presents: the wanted mask from DM_GFX_PRESENT_CPUS (hex), the cpu-place plan, or every core but the translation thread's.
+void place(){
+    static int ncpu=0;static unsigned all=0,khz[32];static unsigned placed=0,changes=0;
+    if(!ncpu){long n=sysconf(_SC_NPROCESSORS_CONF);ncpu=int(n<1?8:n>32?32:n);all=ncpu>=32?~0u:(1u<<ncpu)-1;
+        for(int c=0;c<ncpu;c++){char path[96];snprintf(path,sizeof path,"/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq",c);khz[c]=0;if(FILE *f=fopen(path,"rb")){if(fscanf(f,"%u",&khz[c])!=1)khz[c]=0;fclose(f);}}}
+    const char *u=getenv("DM_GFX_PRESENT_UNPIN");if(u && *u=='0')return;   // DOOM 2016's switch: =0 keeps the inherited mask
+    unsigned want=0,avoid=0;const char *why="";
+    if(const char *e=getenv("DM_GFX_PRESENT_CPUS");e && *e){want=unsigned(strtoul(e,nullptr,16))&all;why="DM_GFX_PRESENT_CPUS";}
+#ifdef PT_HAVE_PLAN
+    if(!want && dm_cpu_plan){const dm_cpu_plan_t *p=dm_cpu_plan();if(p && p->present){want=p->present&all;why="cpu plan";}}
+#endif
+    if(!want){const int t=translator_tid.load(std::memory_order_relaxed);avoid=pin_mask?pin_mask:t?cpus_of(t):0;want=dmpt::place_mask(all,avoid,khz,ncpu);why=pin_mask?"all but the pin":"all but the translation thread's cores";}
+    if(!want)return;
+    const unsigned now=cpus_of(0);if(now==want && placed==want)return;
+    cpu_set_t s;CPU_ZERO(&s);for(int c=0;c<32;c++)if(want>>c&1)CPU_SET(c,&s);const int r=sched_setaffinity(0,sizeof s,&s),err=r?errno:0;
+    if(placed!=want || ++changes<=4)__android_log_print(ANDROID_LOG_INFO,"dm-vulkan","NVN present thread tid=%d cpus %x -> %x (%s; translation thread %d on %x) result=%d errno=%d",
+        int(gettid()),now,want,why,translator_tid.load(std::memory_order_relaxed),avoid,r,err);
+    placed=want;
+}
+void loop(){
+    pt_on_thread=true;pthread_setname_np(pthread_self(),"dm-present");
+    int pr=setpriority(PRIO_PROCESS,0,-8);if(pr)pr=setpriority(PRIO_PROCESS,0,-4);
+    __android_log_print(ANDROID_LOG_INFO,"dm-vulkan","NVN present thread started tid=%d nice=%d (setpriority %d) inherited cpus=%x",int(gettid()),getpriority(PRIO_PROCESS,0),pr,cpus_of(0));
+    place();
+    for(unsigned n=1;;n++){Job j;uint64_t tk;if(!q.take(j,tk))return;
+        const int64_t t0=dmpt::now_ns();int r;{std::lock_guard<std::mutex> rl(render_mutex);r=present_body(j.src,j.fmt,j.w,j.h,j.has_crop?j.crop:nullptr);}
+        q.finish(tk,r,uint64_t(dmpt::now_ns()-t0));
+        if(r){static int told=0;if(told++<4)__android_log_print(ANDROID_LOG_ERROR,"dm-vulkan","NVN present thread: present %llu failed: VkResult %d",(unsigned long long)tk,r);}
+        if(n%128==0)place();}
+}
+}
+static void pt_mark_submitted(void){pt::q.mark_submitted();}
+static void pt_stamp_present(void){pt::q.stamp(dmpt::now_ns());}
+extern "C" void pc_note(const char *id,int applied,const char *fmt,...);   // [pc]
+extern "C" void dm_present_thread_set(int mode){pt_cfg.store(mode>0 && mode<=2?mode:0);if(mode>0)__android_log_print(ANDROID_LOG_INFO,"dm-vulkan","NVN present thread mode=%d (DM_GFX_PRESENT_THREAD: 1 own thread, 2 same protocol inline)",pt_cfg.load());
+    pc_note("present-thread",pt_cfg.load()==1,"%s",pt_cfg.load()==1?"DM_GFX_PRESENT_THREAD=1: fence / acquire / blit / queue present on dm-present; PERF-D07":pt_cfg.load()==2?"DM_GFX_PRESENT_THREAD=2: the protocol inline, no thread":"DM_GFX_PRESENT_THREAD=0: presents inline");   // [pc]
+}
+// Returns 0, or the VkResult of an earlier failed present on the thread (the engine stops with it, as it did for an inline failure).
+extern "C" int dm_present_async(VkImage source,VkFormat format,uint32_t width,uint32_t height,const int32_t crop[4],int32_t){
+    if(pt_cfg.load(std::memory_order_relaxed)!=1){std::lock_guard<std::mutex> render_lock(render_mutex);pin_update();++pt::inline_jobs;pt::last_ticket=0;return present_body(source,format,width,height,crop);}
+    pin_update();   // the translation thread (the caller) keeps its pin, as present() pinned it
+    {const int t=int(gettid());if(pt::translator_tid.load(std::memory_order_relaxed)!=t)pt::translator_tid.store(t,std::memory_order_relaxed);}
+    pt::Job j{source,format,width,height,{0,0,0,0},crop!=nullptr};if(crop)memcpy(j.crop,crop,sizeof j.crop);
+    uint64_t tk=0;XTRACE_BEGIN("dm-present-handoff");const int e=pt::q.push(j,[]{std::thread(pt::loop).detach();},&tk);XTRACE_END();
+    pt::last_ticket=e?0:tk;return e;
+}
+// Nanoseconds waited until every handed present has its blit submitted / has finished (0 = nothing pending).
+extern "C" uint64_t dm_present_wait_submitted(void){return pt::q.wait_submitted();}
+extern "C" uint64_t dm_present_drain(void){return pt::q.drain();}
+extern "C" int dm_present_last_error(void){return pt::q.err.load();}
+extern "C" void dm_present_queue_lock(void){if(pt_cfg.load(std::memory_order_relaxed))pt_queue_mutex.lock();}
+extern "C" void dm_present_queue_unlock(void){if(pt_cfg.load(std::memory_order_relaxed))pt_queue_mutex.unlock();}
+// Totals since start: presents run by the thread (or inline with =2), the thread's time in them, the engine's waits on a full hand-off ring
+// (ns), and on a not yet submitted blit (ns, dm_present_wait_submitted).
+extern "C" void dm_present_thread_stats(uint64_t out[4]){out[0]=pt::q.jobs.load()+pt::inline_jobs.load();out[1]=pt::q.busy_ns.load();out[2]=pt::q.full_ns.load();out[3]=pt::q.wait_ns.load();}
+// For nvn_vk.c (mtl_present / mtl_present_wait / mtl_presented_time): the ticket of the present this thread just handed over (0 = presented
+// inline), a wait until that present's blit is on the queue (the contract of mtl_present_wait), and when its vkQueuePresentKHR returned
+// (CLOCK_MONOTONIC seconds; 0 = not yet).
+extern "C" uint64_t dm_present_last_ticket(void){return pt_cfg.load(std::memory_order_relaxed)==1?pt::last_ticket:0;}
+extern "C" uint64_t dm_present_wait_ticket(uint64_t tk){return tk && pt_cfg.load(std::memory_order_relaxed)==1?pt::q.wait_ticket(tk):0;}
+extern "C" double dm_present_time(uint64_t tk){const int64_t ns=pt::q.presented_ns(tk);return ns?double(ns)*1e-9:0;}
 extern "C" void dm_android_vk_set_window(ANativeWindow *window){if(window)ANativeWindow_acquire(window);{std::lock_guard<std::mutex> l(window_mutex);if(desired)ANativeWindow_release(desired);desired=window;++generation;}window_cv.notify_all();}
 extern "C" int dm_android_vk_has_window(){return has_window(nullptr);}
 // [DOOM] BUGS_AND_FIXES 2.56 (DOOM issue #33, KB DRV-07): the in-process fallback to the system driver (jni_android.c host_thread). A failed

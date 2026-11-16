@@ -597,3 +597,46 @@ G99: маски, повтор после «системы», фон, resume, ж�
 На Mi 14 (Adreno): `width alignment 0 (default: Adreno, off)`, `DM_GFX_FEEDBACK_COPY=0`; строка `[d3drs] 10s` (обычно scale 1.000);
 ⚙ выкл. — в логе `[d3drs] gear: … off`, при 100 % ничего не меняется. С `DM_GFX_SIM_GPU=mali`: `alignment 64`, `FEEDBACK_COPY=1`,
 `NVN feedback copy shader=703334b9…`, картинка без изменений (в широком handheld 3D 1600 вместо 1638).
+
+## Общие модули port-common: выход потока на хостовом стеке (HLE-06) и present на своём потоке (PERF-D07) — 16.11.2026 (ветка `wt/pcmods`)
+
+**`thread-exit-hoststack` (KB HLE-06, из DOOM 2016, issues #12/#20 там).** SVC ExitThread звал `pthread_exit` прямо на маленьком
+гостевом стеке (Horizon исполняет SVC на стеке ядра, игры дают потокам по 16–64 КиБ); на Samsung S23+ / Android 17 teardown bionic
+уходил в guard-страницу (`CRASH sig=11 ... pc=libc.so+0x8ac44`), и гость мог освободить стек, пока `pthread_exit` ещё на нём. У D3 код
+тот же. Теперь `thread_main` запоминает sp своего pthread-стека перед `dm_thread_enter`, `thread_exit` переходит туда через
+`dm_call_on_stack` (новая процедура в `entry.S`) и делает весь teardown там. **Выключателя нет** (чистый фикс, как в D16; модуль и README
+port-common выключателя не предусматривают). Строка `[pc] thread-exit-hoststack: applied (guest threads exit on their host pthread
+stack, first 0x…; HLE-06)` при первом таком выходе. Вместе с ним пришёл `pc-core` (`dm/host/pc.h`, `hle_pc.c`, `pc_code.h`: функция
+`pc_note`, одна строка `[pc] <id>: …` на модуль; локального пути в первой строке `pc.h` больше нет).
+
+**`present-thread` (KB PERF-D07, протокол D16 `DM_GFX_PRESENT_THREAD`, образец слияния — DOS2 `644078b`).** Ожидание fence полёта,
+`vkAcquireNextImageKHR`, letterbox / RCAS / blit, его submit и `vkQueuePresentKHR` можно перенести с потока трансляции на поток
+`dm-present`. **`DM_GFX_PRESENT_THREAD=0` по умолчанию — всё как раньше** (каждый помощник `ptq::` — одно сравнение и старый вызов,
+замок очереди — пустой). `=1` — свой поток; `=2` — тот же протокол на месте (замок + передача, без потока: цена протокола).
+`DM_GFX_PRESENT_UNPIN=1` (поток уходит с ядер транслятора: он наследует его пин), `DM_GFX_PRESENT_CPUS` (hex-маска поверх всего).
+- Как в модуле: `dm/android/present_thread.h`, `dm/gfx/vulkan/engine/xbg_present_thread.inc` (новые), `vulkan_present.cpp` (обёртки
+  очереди, `present()` = замок + пин + `present_body`, блок потока), `nvn_vk.c` (тикет потока на номер present: `mtl_present_wait` ждёт,
+  пока blit прошлого present текстуры в очереди; `mtl_presented_time` — когда поток его поставил).
+- `xbg_game.cpp` вручную (текст D3 другой): `#include "xbg_present_thread.inc"` после объявления `mtl_addr` (у D3 нет движковых `.inc`);
+  `submit_slots`: `ptq::before_submit()` + `ptq::submit`; `ptq::perf(f)` после строки `NVN PERF poolreset`; `ptq::init()` после
+  `crumbs::init()`; `xbg_game_shutdown` и `xbg_legacy_finish`: `ptq::drain()` + `ptq::wait_idle` (у D3 свои строки, без `++hit_pend_gen` /
+  `condr::`); передача в `xbg_present_texture_now` (у D3 после неё `zcubo::frame();aniso_poll();`). Место 4 модуля (submit самотеста
+  BC-декодера под замком) в D3 нет: у D3 нет `selftest()` с `kat_fence`; его самотест `xbg_selftest.cpp` (`d3perf_switches`) и membench
+  идут внутри `xbg_game_initialize`, до первого present, когда потока ещё нет; `xbg_vulkan.cpp` (старый 2D-рендерер) игрой не вызывается.
+  Других `vkQueueSubmit` / `vkQueueWaitIdle` в `xbg_game.cpp` нет (проверка теста).
+- Своё у D3: копия иконок HUD (`hle_d3_icons.c icon_want / icon_done`, зовутся из `present_body`) при `=1` идёт на `dm-present`; обе
+  под `g_mu`. ADPF: при `=1` `dm_aperf_present` зовёт `dm-present`, он в сессии всегда; `nvn-translate` входит как прочий поток игры
+  (от 15 % ядра, не больше 6 участников). cpu-place: поток берёт `plan->present`; пин транслятора (`pin_update`,
+  `dm_cpu_place_translator`) по-прежнему на потоке трансляции.
+- Проверено без телефона: `pc_check` — `thread-exit-hoststack` и `pc-core` in sync; `present-thread` — «present, DIVERGED» только из-за
+  строк D3 в местах 6–8 и отсутствующего места 4 (с alt-патчем = diff этой ветки по `xbg_game.cpp` — in sync, проверено на копии
+  port-common). `t_present_thread.py`: 39 прогонов (TSan, ASan + UBSan, обе мутации пойманы), проверка мест вызова PASS.
+  `t_call_on_stack.py` (unicorn, Cortex-A53): PASS. APK собран (обычный и `-Android10`), на телефоне не запускался.
+- На телефоне (сохранения назад, только с разрешения хозяина): без env — `[pc] present-thread: skipped (DM_GFX_PRESENT_THREAD=0: presents
+  inline)`, строк `NVN present thread` и `NVN PERF present_thread` нет, fps и `present_cpu_ms` как в 0.2.21; `[pc] thread-exit-hoststack:
+  applied (...)` при первом выходе гостевого потока, без падения. С `DM_GFX_PRESENT_THREAD=1` в dm/env: `NVN DM_GFX_PRESENT_THREAD=1: …`,
+  `NVN present thread mode=1 (…)`, `[pc] present-thread: applied (…)`, `NVN present thread started tid=… nice=…`, `NVN present thread
+  tid=… cpus X -> Y (…)`, рядом с каждой `NVN PERF` — `NVN PERF present_thread mode=1 handed=1.00 jobs=1.00 busy_ms=… full_ms≈0
+  wait_ms≤0.3 …`; ждём `present_cpu_ms` ниже на 0,8–2 мс, `submit_cpu_ms` тот же; нет `Game presentation failed`. Пройти: домой и назад,
+  блокировка, поворот, загрузка, ⚙ «Апскейл» на лету, иконки на кнопках HUD (`[d3icons] cropped …`), выход в меню и из игры. `=2`: fps
+  как при 0.

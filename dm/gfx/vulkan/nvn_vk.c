@@ -113,13 +113,21 @@ void mtl_read_texels(const tex_t *t,unsigned level,unsigned layer,const NVNcopyR
 // in steady state the difference of two neighbours is the frame interval. The HLE's dropped-frame count and the dynamic 3D scale (hle_oe.c, the iOS
 // rules) depend on it; it used to be always 0 (no reading), so the dynamic scale never judged on Android.
 static double g_present_at[1024];
+// [present-thread] PERF-D07 DM_GFX_PRESENT_THREAD=1 (android/vulkan_present.cpp, port-common/modules/present-thread): xbg_present_texture only
+// hands the present to the present thread. Each present number keeps that thread's ticket: mtl_present_wait waits until its blit is on the
+// queue (the contract above: later commands of the game go behind it), mtl_presented_time is when the present thread queued it. Weak:
+// other presenters (and mode 0 / 2: ticket 0) keep the old rules.
+uint64_t dm_present_last_ticket(void) __attribute__((weak));uint64_t dm_present_wait_ticket(uint64_t tk) __attribute__((weak));double dm_present_time(uint64_t tk) __attribute__((weak));
+static _Atomic uint64_t g_present_pt[1024],g_present_pt_n[1024];
+static uint64_t present_pt(uint64_t n){return atomic_load_explicit(&g_present_pt_n[n%1024],memory_order_acquire)==n?atomic_load_explicit(&g_present_pt[n%1024],memory_order_relaxed):0;}
 static _Atomic double g_present_period;   // 本次出图的节拍周期（秒；平台出图读它排上屏时刻） | this present's pacing period (s; the platform present reads it to schedule display time)
 double dm_present_period(void){return g_present_period;}
 uint64_t mtl_present(const tex_t *t,double period,const int crop[4]){if(g_null){(void)t;(void)crop;g_present_period=period;return ++g_present_n;}g_present_period=period;win_t window={0};window.interval=period>0?1:0;if(crop)memcpy(window.crop,crop,sizeof(window.crop));xbg_present_texture(&window,t);uint64_t n=++g_present_n;
+    {const uint64_t pt=dm_present_last_ticket?dm_present_last_ticket():0;atomic_store_explicit(&g_present_pt[n%1024],pt,memory_order_relaxed);atomic_store_explicit(&g_present_pt_n[n%1024],n,memory_order_release);if(pt){g_present_at[n%1024]=0;return n;}}   // [present-thread]
     struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);g_present_at[n%1024]=(double)ts.tv_sec+ts.tv_nsec*1e-9;return n;}
-void mtl_present_wait(uint64_t ticket){if(ticket>g_present_n)die("Unknown present ticket");}
+void mtl_present_wait(uint64_t ticket){if(ticket>g_present_n)die("Unknown present ticket");if(ticket && dm_present_wait_ticket){const uint64_t pt=present_pt(ticket);if(pt)dm_present_wait_ticket(pt);}}   // [present-thread] the blit is on the queue (mtl_present_wait's contract)
 void mtl_present_flush(void){mtl_drain();}
-double mtl_presented_time(uint64_t n){return n && n<=g_present_n && g_present_n-n<1024?g_present_at[n%1024]:0;}
+double mtl_presented_time(uint64_t n){if(!(n && n<=g_present_n && g_present_n-n<1024))return 0;const uint64_t pt=present_pt(n);if(pt)return dm_present_time?dm_present_time(pt):0;return g_present_at[n%1024];}   // [present-thread] when the present thread queued it
 uint64_t mtl_present_count(void){return g_present_n;}
 int mtl_has_window(void){return g_config.has_window?g_config.has_window(g_config.game.userdata):0;}
 double front_display_refresh(char *name, size_t n);
