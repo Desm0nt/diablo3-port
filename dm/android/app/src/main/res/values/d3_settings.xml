@@ -152,6 +152,9 @@
     <string name="d3_cheat_legendary">Equip more than one copy of a legendary</string>
     <string name="d3_cheats_note">If the game build does not match, a mod switches itself off (red line in the log) and the game runs as usual.</string>
     <string name="d3_mods_note">Everything here is off by default and applies on next launch. Partly ported from d3hack by god-jester (Switch mod, GPL-2.0). Back up your saves before trying: seasonal heroes and cheated items stay in them.</string>
+    <string name="d3_challenge">Challenge Rift</string>
+    <string name="d3_challenge_on">Challenge Rift offline</string>
+    <string name="d3_challenge_note">The main menu\'s Challenge Rift works without Blizzard\'s servers: 29 real weekly rifts are built in and the rift changes every week. Beat the target time and you get the Challenge Rift cache (the Altar of Rites asks for one), once a week as in the real game.</string>
     <string name="d3_buffs">Season buffs (any number at once)</string>
     <string name="d3_buffs_theme">Tick the chosen season\'s theme</string>
     <string name="d3_buffs_note">Each season\'s theme is a separate switch in the game, so several can be on together. They apply to every hero, seasonal or not.</string>

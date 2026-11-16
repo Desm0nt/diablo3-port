@@ -5,7 +5,9 @@
 // exlaunch module for the Switch game build 2.7.6.90885; its sources carry no per-file headers. Ported from it (C++ -> C, our hook
 // mechanism, 2.7.7 addresses): the hooks MoveSpeed / AttackSpeed / EquipAny (d3/hooks/util.hpp), ForceAncient + AugmentSpecifier
 // (util.hpp), the sInitializeWorld hook with EnableGod / FlagsAreFun (main.cpp, d3/_lobby.hpp), the offline-season / community-event
-// XVar setup (d3/patches.cpp PatchDynamicSeasonal / PatchDynamicEvents / PatchBase) and the cheat patches (PortCheatCodes, PatchBase).
+// XVar setup (d3/patches.cpp PatchDynamicSeasonal / PatchDynamicEvents / PatchBase), the cheat patches (PortCheatCodes, PatchBase) and
+// the offline Challenge Rift (d3/hooks/debug.hpp StorageGetPubFile / ChallengeRiftCallback / the reward hooks, d3/util.cpp
+// PopulateChallengeRiftData; data: examples/config/d3hack-nx/rift_data -> hle_d3_rift_data.inc).
 // The rest of this tree is MIT; this file is GPL-2.0 (see README "License").
 //
 // Everything is off by default; the front end passes the choices at start:
@@ -18,6 +20,7 @@
 //                        resource, orbs, legendary) and hooks (god, dbgflags, equipany, ancient, primal); unset = none
 //   DM_D3_SPEED=<x>      movement speed multiplier (d3hack MovementSpeedMultiplier; 1 / unset = off, 0.1..10)
 //   DM_D3_ATKSPEED=<x>   attack speed multiplier (d3hack AttackSpeedMultiplier; 1 / unset = off, 0.1..10)
+//   DM_D3_CHALLENGE=1    Challenge Rift offline (see "Challenge Rift" below); unset / 0 = off
 // d3hack's 2.7.6 sites were moved to this update (2.7.7, main build-id 2607a74f) by matching each site's code: most of main is shifted by
 // 0, +0x10, +0x70 or +0x100. Every code site and every hooked / called game function is checked word for word, every XVar by its GOT
 // slot, vtable and registered name; on any mismatch that feature stays off with a red log line.
@@ -37,6 +40,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 
 // ---- code sites: original words -> patch words, grouped by feature (the season group is DM_D3_SEASON, the others DM_D3_CHEATS keys)
 #define NW 3
@@ -44,8 +48,9 @@ typedef struct { const char *feat; uint32_t off; int n; uint32_t orig[NW], patch
 static const site_t k_sites[] = {
     // offline season (d3hack PatchDynamicSeasonal / PatchBase)
     {"season", 0x5ff0c, 1, {0x12000100}, {0x52800020}},                           // IsSeasonsInitialized: and w0,w8,#1 -> mov w0,#1
-    {"season", 0x56b10, 2, {0xa9be4ff4, 0xa9017bfd}, {0x52800020, 0xd65f03c0}},   // IsSignedInOnline(user) -> 1 (hero create 0x351160 refuses a
-                                                                                  //   seasonal hero offline: "SeasonNotAvailableOnline")
+    {"signin", 0x56b10, 2, {0xa9be4ff4, 0xa9017bfd}, {0x52800020, 0xd65f03c0}},   // IsSignedInOnline(user) -> 1 (d3hack PatchBase, always on there;
+                                                                                  //   here with the season: hero create 0x351160 refuses a seasonal hero
+                                                                                  //   offline, "SeasonNotAvailableOnline"; and with the Challenge Rift)
     {"season", 0x351ccc, 1, {0x54000181}, {0x52800021}},                          // hero create's season-confirm callback 0x351cc0: b.ne -> mov w1,#1
     {"season", 0x1bf5f0, 2, {0xd10403ff, 0xf90063f7}, {0x52800000, 0xd65f03c0}},  // ValidateHeroForPartyMember -> 0 (no error)
     {"season", 0x61620, 2, {0xf81e0ff3, 0xa9017bfd}, {0x52800000, 0xd65f03c0}},   // main / pause menu "Connect to Diablo Servers" entry -> hidden
@@ -89,6 +94,16 @@ enum {
     F_ATTRSETI   = 0x46fc00,   // c void ACD_AttributesSetInt(ACD *, FastAttribKey, int)                                               0x46fb90 +0x70
     F_ATTRSETF   = 0x46fb80,   // c void ACD_AttributesSetFloat(ACD *, FastAttribKey, float)                                           0x46fb10 +0x70
     O_APPGLOBALS = 0x1905610, GOT_APPGLOBALS = 0x114a840,   // AppGlobals: +0x40 / +0x44 / +0x48 dwDebugFlags / 2 / 3
+    // Challenge Rift (see "Challenge Rift offline" below)
+    F_PUBFILE    = 0x066b10,   // h void StorageGetPublisherFile(int user, const char *name, callback **)                              0x066b10 +0
+    F_PUBFILE_DONE = 0x070850, // c the storage layer's "file arrived" entry (callback **, StorageResult *, {blz::string *, ctrl *} *)  (not in d3hack)
+    F_CR_DATA    = 0x185f70,   // h void sOnGetChallengeRiftData(void *bind, StorageResult *, ChallengeData *, WeeklyChallengeData *)  0x185f70 +0
+    F_CR_SAVE    = 0x04edc0,   // h void ChallengeRiftRewardEarned_SaveToProfile(int user, ConsoleChallengeRiftReward *)               0x04edc0 +0
+    F_CR_GRANT   = 0x7764e0,   // h void ChallengeRiftGrantRewardToPlayerIfEligible(Player *)                                          0x7763e0 +0x100
+    F_CR_REWARDS = 0x775cd0,   // h void ChallengeRiftHandleChallengeRewards(Player *, int total_time_ms, u32 *reward_screen_info)     0x775bd0 +0x100
+    F_SEASON_NUM = 0x72e090,   // c u32 OnlineServiceGetSeasonNum(void)                                                                0x72df90 +0x100
+    F_IS_SEASONAL = 0x4c8df0,  // c BOOL GameIsSeasonal(void)                                                                          0x4c8cf0 +0x100
+    F_GAMEGLOBALS = 0x7b2990,  // c SGameGlobals *SGameGlobalsGet(void)                                                                0x7b2890 +0x100
 };
 typedef struct { uint32_t off; uint32_t w[4]; } fn_t;
 static const fn_t k_fns[] = {
@@ -99,6 +114,11 @@ static const fn_t k_fns[] = {
     {F_PLNEXT,    {0xf81e0ff3, 0xa9017bfd, 0x910043fd, 0xf0006148}}, {F_ACDGET,   {0xf81e0ff3, 0xa9017bfd, 0x910043fd, 0x3100041f}},
     {F_ACTORGET,  {0xf81e0ff3, 0xa9017bfd, 0x910043fd, 0x900046e8}}, {F_ACTORFLAG, {0xf81d0ff5, 0xa9014ff4, 0xa9027bfd, 0x910083fd}},
     {F_ATTRSETI,  {0xa9bd57f6, 0xa9014ff4, 0xa9027bfd, 0x910083fd}}, {F_ATTRSETF, {0x6dbc23e9, 0xf9000bf5, 0xa9024ff4, 0xa9037bfd}},
+    {F_PUBFILE,   {0xd10103ff, 0xf9000bf5, 0xa9024ff4, 0xa9037bfd}}, {F_PUBFILE_DONE, {0xd10103ff, 0xa90157f6, 0xa9024ff4, 0xa9037bfd}},
+    {F_CR_DATA,   {0xa9ba6ffc, 0xa90167fa, 0xa9025ff8, 0xa90357f6}}, {F_CR_SAVE,  {0xf81c0ff7, 0xa90157f6, 0xa9024ff4, 0xa9037bfd}},
+    {F_CR_GRANT,  {0xd10203ff, 0xf90023f7, 0xa90557f6, 0xa9064ff4}}, {F_CR_REWARDS, {0xf81a0ffb, 0xa90167fa, 0xa9025ff8, 0xa90357f6}},
+    {F_SEASON_NUM, {0x900050e0, 0xf9463000, 0x140be4f6, 0x00000000}}, {F_IS_SEASONAL, {0xa9bf7bfd, 0x910003fd, 0xd0006408, 0xf9446908}},
+    {F_GAMEGLOBALS, {0xa9bf7bfd, 0x910003fd, 0x90004cc8, 0xf9446908}},
 };
 // attribute ids (d3hack attributes.hpp; checked in 2.7.7 against the attribute table the game builds at 0x67b390's callers: id * 0x40)
 enum { A_INVULNERABLE = 0x69, A_APS_TOTAL = 0xc9, A_IMMUNE_KNOCKBACK = 0x12d, A_STUN_IMMUNE = 0x134, A_FREEZE_IMMUNE = 0x13a,
@@ -114,7 +134,8 @@ enum { GOT_VT_BOOL = 0x115a388, GOT_VT_U32 = 0x115a398, F_BOOL_SET = 0xa26fc0, F
        GOT_SEASON_OVR = 0x11590d8, V_SEASON_OVR = 0x1a1c1c8,
        GOT_EV_ENABLED = 0x114acd8, V_EV_ENABLED = 0x18ffbe0, GOT_EV_SEASONONLY = 0x114ace8, V_EV_SEASONONLY = 0x18ffc98,
        GOT_BUFF_START = 0x114acb8, V_BUFF_START = 0x1771758, GOT_BUFF_END = 0x114acc0, V_BUFF_END = 0x1771760,
-       GOT_EGG_FLAG = 0x114ae38, V_EGG_FLAG = 0x1771820 };
+       GOT_EGG_FLAG = 0x114ae38, V_EGG_FLAG = 0x1771820,
+       GOT_CR_ENABLED = 0x1158fd8, V_CR_ENABLED = 0x1a1c4a8 };   // d3hack xvar_challengerift_enabled_ptr (same GOT slot)
 static const uint32_t k_fn_bool_set[6] = {0xf81d0ff5, 0xa9014ff4, 0xa9027bfd, 0x910083fd, 0xaa0003f3, 0x12000028};
 static const uint32_t k_fn_u32_set[6]  = {0xf81d0ff5, 0xa9014ff4, 0xa9027bfd, 0x910083fd, 0xaa0003f3, 0x9102c009};
 // season buffs / events: front-end key, XVar, the game's XVar name, GOT slot (0 = none), community event (needs CommunityEventEnabled)
@@ -154,6 +175,8 @@ static module_t *g_m;
 static int g_season;              // 0 = off
 static uint32_t g_buffs;          // bit per k_buffs entry
 static _Atomic int g_state;       // 0 not installed / nothing to do, 1 XVars pending, 2 XVars applied, -1 XVars refused
+static int g_cr;                  // Challenge Rift offline on (the publisher-file hook is in)
+static int g_xv_sb, g_xv_cr;      // XVars checked and ours to set: season / buffs, ChallengeRiftEnabled
 static int g_god, g_dbgflags, g_rank;   // hooks' settings (g_rank: 0 off, 1 ancient, 2 primal)
 static float g_move = 1, g_atk = 1;
 
@@ -195,6 +218,12 @@ static int patch_feature(const char *feat, const char *what) {
     }
     LOG("[d3mods] %s: %d site(s) patched (%s)", feat, n, what);
     return 1;
+}
+
+static int signin(void) {   // IsSignedInOnline -> 1, once for the features that need it
+    static int done;
+    if (!done) done = patch_feature("signin", "signed in online") ? 1 : -1;
+    return done > 0;
 }
 
 // ---- hooks
@@ -316,6 +345,187 @@ static void h_initworld(int32_t sno, uint64_t world) {
     if (g_god) enable_god();
     static int n; if (n++ < 4) LOG("[d3mods] world %#x set up: %s%s", (unsigned)sno, g_god ? "god mode on " : "", g_dbgflags ? "debug flags on" : "");
 }
+// ---- Challenge Rift offline (DM_D3_CHALLENGE=1; d3hack [challenge_rifts])
+// How the game gets a Challenge Rift (2.7.7): the menu (0x181700) asks 0x69ab0 -> 0x69990 -> StorageGetPublisherFile(user,
+// "challengerift_config.dat", cb) 0x66b10; the file's callback 0x726d0 parses a D3.ChallengeRifts.ChallengeData (it must have a challenge
+// number), 0x72880 then asks for "challengerift_<number % 10>.dat", 0x72a70 parses that as a D3.Leaderboard.WeeklyChallengeData (rift, hero
+// and account snapshot required; a snapshot without its completion time in ms gets it from the seconds) and calls sOnGetChallengeRiftData
+// 0x185f70, which wants start <= now < end and opens the Challenge Rift screen. The storage layer answers from its network thread through
+// 0x70850, which queues the user's callback for the main thread (0x7b970).
+// d3hack hooks sOnGetChallengeRiftData and overwrites a failed answer with its SD-card files (its older, commented-out way hooked
+// StorageGetPublisherFile). Here the hook is StorageGetPublisherFile itself: the two challenge files are answered at once from the bundled
+// d3hack dumps through the game's own 0x70850, so nothing depends on how the storage layer fails without a network and the game's own two
+// parse steps run unchanged. Other publisher files go to the game's function.
+//   config: challenge_number = the week number (unix time / 604800, a new one every Thursday 00:00 UTC), start 0, last broadcast 0,
+//           end 0x7fffffff (d3hack's values, so the "not yet started / ended" checks pass with any clock), hash / orb multiplier from the dump
+//   data:   bundled file (week number % count); DM_D3_CHALLENGE_RIFT=<n> picks file n instead (testing)
+// The reward: ChallengeRiftHandleChallengeRewards 0x775cd0 gives it when the run beat the target time and the player's last rewarded
+// challenge number (Player +0x98, from the profile) is below the current one (SGameGlobals +0x2198); SaveToProfile 0x4edc0 stores the
+// number in the profile only when it is above the stored one. d3hack picks a random number 0..900, so it has to bypass that compare
+// (0x4ee18 / 0x4ef28) and rewinds the player's last number around the game's functions, which makes the cache farmable. With the week
+// number none of that is needed: the game's own rule gives one cache a week (and the number is above any real one, ~3000 against ~450).
+// Ported from d3hack as they are: the season tag (SaveToProfile sets season_earned only when the lobby is connected, the grant in town
+// 0x7764e0 wants season_earned == the current season in a seasonal game: tag on save, re-tag an untagged entry before the grant).
+typedef struct { const uint8_t *p; uint64_t size, cap; uint8_t sso[16]; } blz_str_t;   // blz::string: m_elements, m_size, m_capacity, m_storage
+#include "hle_d3_rift_data.inc"
+enum { NRIFT = sizeof k_rifts / sizeof *k_rifts,
+       CD_BITS = 0x10, CD_START = 0x18, CD_NUMBER = 0x28, CD_END = 0x30,   // ChallengeData (d3hack symbols/constructors.hpp; reads of 0x185f70 / 0x728e4)
+       RW_BITS = 0x10, RW_CHALLENGE = 0x30, RW_SEASON = 0x38,              // ConsoleChallengeRiftReward: _has_bits_, challenge_rift_, season_earned_ (bit 8)
+       PL_LAST_REWARD = 0x98, PL_REWARDS_END = 0xdd88, PL_REWARDS_HEAD = 0xdd90, NODE_NEXT = 0x8, NODE_SEASON = 0x48,   // Player, its reward list
+       GG_CHALLENGE = 0x2198, GG_TARGET_MS = 0x220c };                     // SGameGlobals
+// single words that pin the layouts used below (the hooked / called functions' first words are in k_fns)
+static const struct { uint32_t off, w; } k_cr_words[] = {
+    {0x66b2c, 0xaa0203f3}, {0x66b30, 0xaa0103f4}, {0x66b40, 0xf9400273},   // StorageGetPublisherFile: x19 = x2, x20 = x1 (name), x19 = *x19 (callback)
+    {0x69a08, 0x91116c21}, {0x69a1c, 0x97fff43d},                          // 0x69990: x1 = "challengerift_config.dat"; bl 0x66b10
+    {0x729bc, 0x97ffd055},                                                 // 0x72880: bl 0x66b10 ("challengerift_%d.dat")
+    {0x70864, 0xb9400035}, {0x70868, 0xa9404c56}, {0x70884, 0xf9400014},   // 0x70850: w21 = *x1 (result), {x22, x19} = *x2 (string, ctrl; ctrl may be 0), x20 = *x0 (callback)
+    {0x70a60, 0x91002001}, {0x70a64, 0xf8410408}, {0x70a68, 0xf8418503}, {0x70a6c, 0xaa0003e2}, {0x70a70, 0xaa0803e0}, {0x70a74, 0xd61f0060},
+                                                                           //   its queued task: callback->fn(callback + 0x18, &result, &{string, ctrl})
+    {0x726e4, 0xb9400036}, {0x726e8, 0xa9404c55}, {0x72740, 0x942d0144}, {0x7274c, 0x34000168},   // config callback: result, {string, ctrl}; bl ParsePartialFromString; number != 0
+    {0x728e4, 0xb9402848},                                                 // 0x72880: w8 = ChallengeData +0x28 (challenge_number_)
+    {0x72a84, 0xb9400028}, {0x72a88, 0xa9404c55}, {0x72af4, 0x942d0057},   // data callback: the same shape
+    {0xbb2c60, 0xa9402428},                                                // ParsePartialFromString 0xbb2c50 (d3hack 0xbb2b50 +0x100): {ptr, size} = *x1
+    {0x185f94, 0xb9400013}, {0x185f9c, 0xb9400034}, {0x186014, 0xf9400ea8}, {0x18606c, 0xf9401aa8},   // sOnGetChallengeRiftData: *x0, *x1, start +0x18, end +0x30
+    {0x4edf8, 0xb9403288}, {0x4ee10, 0xb9401929}, {0x4ee18, 0x54000ee9}, {0x4ef28, 0x54fff7a8},   // SaveToProfile: reward +0x30 against the profile's number (d3hack's two gates, left alone)
+    {0x4eeb4, 0x321d0108}, {0x4eebc, 0xb9003a80},                          //   has bit 8, season_earned +0x38
+    {0x7764f8, 0x529bb108}, {0x776500, 0x529bb208}, {0x776518, 0xf9400694}, {0x77652c, 0xb9404a96}, {0x776530, 0x97feded8},   // grant: list end / head, next, season_earned, bl season num
+    {0x775d78, 0xb961981a}, {0x775e0c, 0xb9620ec8}, {0x775e14, 0xb900027a}, {0x775e30, 0xb9409a88}, {0x775e60, 0xb9000e68},   // rewards: +0x2198, +0x220c, info[0], Player +0x98, info[3]
+};
+static uint64_t pb_varint(const uint8_t *b, size_t n, size_t *i, int *ok) {   // d3hack debug.hpp ReadVarint
+    uint64_t v = 0;
+    for (unsigned sh = 0; *i < n && sh < 64; sh += 7) { uint8_t c = b[(*i)++]; v |= (uint64_t)(c & 0x7f) << sh; if (!(c & 0x80)) return v; }
+    *ok = 0; return 0;
+}
+// Top-level fields of a protobuf message (d3hack debug.hpp ParseWeeklyChallengeTopLevel, generalised): val[f] = the varint / fixed32 value or
+// the length of a length-delimited field f < nf; the return value has bit f set for every such field seen and bit 31 when well formed.
+static uint32_t pb_top(const uint8_t *b, size_t n, uint64_t *val, unsigned nf) {
+    uint32_t seen = 0; size_t i = 0; int ok = 1;
+    while (i < n) {
+        uint64_t tag = pb_varint(b, n, &i, &ok), v = 0; if (!ok) return 0;
+        unsigned f = (unsigned)(tag >> 3), w = (unsigned)(tag & 7);
+        if (w == 0) { v = pb_varint(b, n, &i, &ok); if (!ok) return 0; }
+        else if (w == 1) { if (n - i < 8) return 0; i += 8; }
+        else if (w == 5) { if (n - i < 4) return 0; uint32_t x; memcpy(&x, b + i, 4); v = x; i += 4; }
+        else if (w == 2) { v = pb_varint(b, n, &i, &ok); if (!ok || v > n - i) return 0; i += (size_t)v; }
+        else return 0;
+        if (f < nf && f < 31) { seen |= 1u << f; if (val) val[f] = v; }
+    }
+    return seen | 1u << 31;
+}
+static size_t pb_put(uint8_t *o, uint32_t field, uint64_t v) {   // a varint field
+    size_t n = 0; o[n++] = (uint8_t)(field << 3);
+    do { uint8_t c = v & 0x7f; v >>= 7; o[n++] = (uint8_t)(c | (v ? 0x80 : 0)); } while (v);
+    return n;
+}
+static uint8_t g_cr_cfg[64]; static blz_str_t g_cr_cfg_str, g_cr_dat_str;   // what the game's parsers read (never freed: the answers carry no owner)
+static uint64_t g_cr_week; static unsigned g_cr_file;
+static unsigned cr_pick(uint64_t week) {
+    const char *e = getenv("DM_D3_CHALLENGE_RIFT");
+    return e && *e ? (unsigned)strtoul(e, NULL, 10) % NRIFT : (unsigned)(week % NRIFT);
+}
+typedef void (*pubdone_t)(uint64_t *cb, int32_t *result, uint64_t *str);
+static void (*o_pubfile)(int32_t, const char *, uint64_t *);
+static void h_pubfile(int32_t user, const char *name, uint64_t *cb) {
+    int cfg = name && strstr(name, "challengerift_config.dat") != NULL, dat = !cfg && name && strstr(name, "challengerift_") != NULL;
+    if ((!cfg && !dat) || !cb || !*cb) {
+        static int n; if (n++ < 16) LOG("[d3mods] publisher file \"%s\" asked (user %d): left to the game", name ? name : "(null)", user);
+        o_pubfile(user, name, cb); return;
+    }
+    blz_str_t *s;
+    if (cfg) {
+        g_cr_week = (uint64_t)time(NULL) / 604800u; g_cr_file = cr_pick(g_cr_week);
+        uint64_t f[7] = {0}; uint32_t seen = pb_top(k_rift_cfg, sizeof k_rift_cfg, f, 7);
+        size_t n = pb_put(g_cr_cfg, 1, g_cr_week);                 // challenge_number
+        n += pb_put(g_cr_cfg + n, 2, 0);                           // challenge_start_unix_time
+        n += pb_put(g_cr_cfg + n, 3, 0);                           // challenge_last_broadcast_unix_time
+        n += pb_put(g_cr_cfg + n, 4, 0x7fffffff);                  // challenge_end_unix_time_console
+        n += pb_put(g_cr_cfg + n, 5, f[5]);                        // challenge_hash
+        if (seen >> 6 & 1) { g_cr_cfg[n++] = 6 << 3 | 5; uint32_t x = (uint32_t)f[6]; memcpy(g_cr_cfg + n, &x, 4); n += 4; }   // challenge_nephalem_orb_multiplier
+        g_cr_cfg_str.p = g_cr_cfg; g_cr_cfg_str.size = g_cr_cfg_str.cap = n; s = &g_cr_cfg_str;
+        LOG("[d3mods] challenge rift: \"%s\" asked (user %d) -> config answered: challenge %llu (this week), rift file %02u of %d", name, user,
+            (unsigned long long)g_cr_week, g_cr_file, (int)NRIFT);
+    } else {
+        if (!g_cr_week) { g_cr_week = (uint64_t)time(NULL) / 604800u; g_cr_file = cr_pick(g_cr_week); }
+        g_cr_dat_str.p = k_rifts[g_cr_file].p; g_cr_dat_str.size = g_cr_dat_str.cap = k_rifts[g_cr_file].n; s = &g_cr_dat_str;
+        LOG("[d3mods] challenge rift: \"%s\" asked (user %d) -> bundled challengerift_%02u.dat answered (%u bytes)", name, user, g_cr_file, k_rifts[g_cr_file].n);
+    }
+    uint64_t str[2] = {(uint64_t)(uintptr_t)s, 0}; int32_t result = 0;   // STORAGE_SUCCESS; no owner: the string is static
+    GFN(pubdone_t, F_PUBFILE_DONE)(cb, &result, str);
+}
+// d3hack ChallengeRiftCallback's place; here it only reports (the files were answered above)
+static void (*o_cr_data)(uint64_t, int32_t *, uint64_t, uint64_t);
+static void h_cr_data(uint64_t bind, int32_t *res, uint64_t conf, uint64_t data) {
+    int32_t r = res ? *res : -1;
+    if (r || !conf || !data) LOG("【红】[d3mods] challenge rift: the data callback got result %d (0 = ok; 2 = not connected, 3 = no challenge, 4 = bad file)", r);
+    else LOG("[d3mods] challenge rift: data callback ok: challenge %u, start %lld, end %lld, config bits %#x, weekly data bits %#x (7 = rift + hero + account)",
+             *(const uint32_t *)(uintptr_t)(conf + CD_NUMBER), (long long)*(const int64_t *)(uintptr_t)(conf + CD_START),
+             (long long)*(const int64_t *)(uintptr_t)(conf + CD_END), *(const uint32_t *)(uintptr_t)(conf + CD_BITS), *(const uint32_t *)(uintptr_t)(data + CD_BITS));
+    o_cr_data(bind, res, conf, data);
+}
+typedef uint32_t (*u_void_t)(void);
+// d3hack ChallengeRiftHandleChallengeRewardsHook's place, without its re-arming of the player's last rewarded challenge: report only
+static void (*o_cr_rewards)(uint64_t, int32_t, uint32_t *);
+static void h_cr_rewards(uint64_t player, int32_t ms, uint32_t *info) {
+    uint64_t g = GFN(p_void_t, F_GAMEGLOBALS)();
+    uint32_t last = player ? *(const uint32_t *)(uintptr_t)(player + PL_LAST_REWARD) : 0, cur = g ? *(const uint32_t *)(uintptr_t)(g + GG_CHALLENGE) : 0;
+    int32_t target = g ? *(const int32_t *)(uintptr_t)(g + GG_TARGET_MS) : 0;
+    o_cr_rewards(player, ms, info);
+    if (info) LOG("[d3mods] challenge rift finished: challenge %u, time %d ms, target %d ms, the player's last rewarded challenge %u -> status %u "
+                  "(1 = reward earned, 2 = already rewarded for this challenge, 0 = slower than the target), reward item %#x", cur, ms, target, last, info[3], info[1]);
+}
+// d3hack ChallengeRiftRewardEarned_SaveToProfileHook: tag the reward with the season when there is one (the game does it only with the lobby connected)
+static void (*o_cr_save)(int32_t, uint64_t);
+static void h_cr_save(int32_t user, uint64_t reward) {
+    if (!reward) { o_cr_save(user, reward); return; }
+    uint32_t *bits = (uint32_t *)(uintptr_t)(reward + RW_BITS), *earned = (uint32_t *)(uintptr_t)(reward + RW_SEASON);
+    uint32_t season = GFN(u_void_t, F_SEASON_NUM)(), was = *bits;
+    if (season) { *bits |= 8u; *earned = season; }
+    o_cr_save(user, reward);
+    LOG("[d3mods] challenge rift: reward of challenge %u for user %d passed to the profile save: season %u, season_earned %u, bits %#x -> %#x%s",
+        *(const uint32_t *)(uintptr_t)(reward + RW_CHALLENGE), user, season, *earned, was, *bits,
+        was & 4 ? "" : *bits & 4 ? " (stored: time stamp set)" : " (NOT stored: no signed-in profile, not a challenge game, or the profile already has this challenge number or a higher one)");
+}
+// d3hack ChallengeRiftGrantRewardToPlayerIfEligibleHook: in a season, an untagged reward (season_earned 0) gets the current season when no
+// reward carries it, so a seasonal hero can take it
+static void (*o_cr_grant)(uint64_t);
+static void h_cr_grant(uint64_t player) {
+    if (player) {
+        uint32_t season = GFN(u_void_t, F_SEASON_NUM)();
+        uint64_t end = player + PL_REWARDS_END, node = *(const uint64_t *)(uintptr_t)(player + PL_REWARDS_HEAD), untagged = 0;
+        int n = 0, current = 0;
+        for (; node && node != end && n < 4096; node = *(const uint64_t *)(uintptr_t)(node + NODE_NEXT), n++) {
+            uint32_t earned = *(const uint32_t *)(uintptr_t)(node + NODE_SEASON);
+            if (season && earned == season) { current = 1; break; }
+            if (!earned && !untagged) untagged = node;
+        }
+        int retag = season && n < 4096 && !current && untagged;
+        if (retag) *(uint32_t *)(uintptr_t)(untagged + NODE_SEASON) = season;
+        static int logs; if ((n || current) && logs++ < 32)
+            LOG("[d3mods] challenge rift: reward grant check: reward(s) waiting in the profile (%d looked at), season %u, seasonal game %d%s", n + current, season,
+                GFN(v_int_t, F_IS_SEASONAL)(), retag ? ", an untagged reward tagged with the season" : "");
+    }
+    o_cr_grant(player);
+}
+static void cr_install(void) {
+    for (unsigned i = 0; i < sizeof k_cr_words / sizeof *k_cr_words; i++)
+        if (g_m->text_end < k_cr_words[i].off + 4u || *(const uint32_t *)(g_m->base + k_cr_words[i].off) != k_cr_words[i].w) {
+            LOG("【红】[d3mods] challenge rift: main+%#x differs (not D3 update 2.7.7, build 2607a74f): Challenge Rift offline off", k_cr_words[i].off); return; }
+    if (!fn_ok(F_PUBFILE_DONE) || !fn_ok(F_SEASON_NUM) || !fn_ok(F_IS_SEASONAL) || !fn_ok(F_GAMEGLOBALS)) { LOG("【红】[d3mods] Challenge Rift offline off"); return; }
+    uint64_t f[7] = {0};
+    if ((pb_top(k_rift_cfg, sizeof k_rift_cfg, f, 7) & 0x22) != 0x22) { LOG("【红】[d3mods] challenge rift: bundled config malformed: Challenge Rift offline off"); return; }
+    for (unsigned i = 0; i < NRIFT; i++)
+        if ((pb_top(k_rifts[i].p, k_rifts[i].n, NULL, 5) & 0xe) != 0xe) { LOG("【红】[d3mods] challenge rift: bundled file %02u malformed: Challenge Rift offline off", i); return; }
+    if (!signin()) return;
+    if (!hook(F_PUBFILE, (void *)h_pubfile, (void **)&o_pubfile, "challenge rift files from the bundled dumps")) return;
+    g_cr = 1;
+    hook(F_CR_DATA, (void *)h_cr_data, (void **)&o_cr_data, "challenge rift data callback (log)");
+    hook(F_CR_REWARDS, (void *)h_cr_rewards, (void **)&o_cr_rewards, "challenge rift rewards (log)");
+    hook(F_CR_SAVE, (void *)h_cr_save, (void **)&o_cr_save, "challenge rift reward save (season tag)");
+    hook(F_CR_GRANT, (void *)h_cr_grant, (void **)&o_cr_grant, "challenge rift reward grant (season tag)");
+    uint64_t week = (uint64_t)time(NULL) / 604800u;
+    LOG("[d3mods] Challenge Rift offline on: %d bundled rifts, this week = challenge %llu -> rift file %02u; one reward a week by the game's own rule",
+        (int)NRIFT, (unsigned long long)week, cr_pick(week));
+}
 static float env_mult(const char *name) {
     const char *e = getenv(name);
     float v = e && *e ? strtof(e, NULL) : 1.0f;
@@ -335,11 +545,13 @@ void dm_d3_mods_install(void) {
     if (season < 0 || season > 99) { LOG("【红】[d3mods] DM_D3_SEASON=%s: not 1..99, offline season off", es); season = 0; }
     int buffs = eb && *eb && strcmp(eb, "0");
     int cheats = ec && *ec && strcmp(ec, "0");
+    const char *ecr = getenv("DM_D3_CHALLENGE");
+    int challenge = ecr && *ecr && strcmp(ecr, "0");
     float move = env_mult("DM_D3_SPEED"), atk = env_mult("DM_D3_ATKSPEED");
-    if (!season && !buffs && !cheats && move == 1.0f && atk == 1.0f) { LOG("[d3mods] off (no DM_D3_SEASON / BUFFS / CHEATS / SPEED / ATKSPEED)"); return; }
+    if (!season && !buffs && !cheats && !challenge && move == 1.0f && atk == 1.0f) { LOG("[d3mods] off (no DM_D3_SEASON / BUFFS / CHEATS / CHALLENGE / SPEED / ATKSPEED)"); return; }
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) g_m = &g_mod[i];
     if (!g_m) { LOG("【红】[d3mods] no main module: mods off"); return; }
-    if (season && patch_feature("season", "offline season")) g_season = season;
+    if (season && signin() && patch_feature("season", "offline season")) g_season = season;
     if (buffs) {
         uint32_t m = 0;
         if (has_key(eb, "auto")) {
@@ -365,11 +577,12 @@ void dm_d3_mods_install(void) {
     }
     if (move != 1.0f && hook(F_MOVESPEED, (void *)h_movespeed, (void **)&o_movespeed, "movement speed")) { g_move = move; LOG("[d3mods] movement speed x%.2f", move); }
     if (atk != 1.0f && fn_ok(F_ATTRSETF) && hook(F_ATKSPEED, (void *)h_atkspeed, (void **)&o_atkspeed, "attack speed")) { g_atk = atk; LOG("[d3mods] attack speed x%.2f", atk); }
-    if (g_season || g_buffs) {
+    if (challenge) cr_install();
+    if (g_season || g_buffs || g_cr) {
         atomic_store(&g_state, 1);
         char b[512] = ""; size_t o = 0;
         for (int i = 0; i < NBUFF; i++) if (g_buffs >> i & 1) o += (size_t)snprintf(b + o, sizeof b - o, "%s%s", o ? "," : "", k_buffs[i].key);
-        LOG("[d3mods] XVars at the first npad poll: season %d, buffs %s", g_season, o ? b : "none");
+        LOG("[d3mods] XVars at the first npad poll: season %d, buffs %s%s", g_season, o ? b : "none", g_cr ? ", ChallengeRiftEnabled" : "");
     }
 }
 
@@ -394,6 +607,12 @@ static void set_u32(uint32_t var, uint32_t v) {
 }
 static int community(void) { int c = 0; for (int i = 0; i < NBUFF; i++) if (g_buffs >> i & 1 && k_buffs[i].community) c = 1; return c; }
 static void apply(int first) {
+    if (g_xv_cr) {
+        int was = *(volatile uint8_t *)(g_m->base + V_CR_ENABLED + 0xb0) & 1;
+        set_bool(V_CR_ENABLED, 1);   // d3hack PatchBase: XVarBool_Set(&g_varChallengeRiftEnabled, true, 3)
+        if (first) LOG("[d3mods] ChallengeRiftEnabled XVar %d -> 1", was);
+    }
+    if (!g_xv_sb) return;
     if (g_season) {
         uint32_t was_n = *(volatile uint32_t *)(g_m->base + V_SEASON_NUM + 0xb0), was_s = *(volatile uint32_t *)(g_m->base + V_SEASON_STATE + 0xb0);
         set_u32(V_SEASON_NUM, (uint32_t)g_season); set_u32(V_SEASON_STATE, 1); set_bool(V_SEASON_OVR, 1);
@@ -430,7 +649,11 @@ void dm_d3_mods_pump(void) {
             for (int i = 0; ok && i < NBUFF; i++) if (g_buffs >> i & 1 && !strcmp(k_buffs[i].key, "eggworld") && *(const uint64_t *)(g_m->base + GOT_EGG_FLAG) != ma(V_EGG_FLAG)) {
                 LOG("【红】[d3mods] GOT main+%#x does not point at the easter-egg flag main+%#x", GOT_EGG_FLAG, V_EGG_FLAG); ok = 0; }
         }
-        if (!ok) { atomic_store(&g_state, -1); LOG("【红】[d3mods] season / buff XVars not set (the season code patches stay in)"); return; }
+        g_xv_sb = ok && (g_season || g_buffs);
+        if (!ok && (g_season || g_buffs)) LOG("【红】[d3mods] season / buff XVars not set (the season code patches stay in)");
+        g_xv_cr = g_cr && !memcmp(g_m->base + F_BOOL_SET, k_fn_bool_set, sizeof k_fn_bool_set) && xvar_ok(GOT_CR_ENABLED, V_CR_ENABLED, GOT_VT_BOOL, "ChallengeRiftEnabled");
+        if (g_cr && !g_xv_cr) LOG("【红】[d3mods] ChallengeRiftEnabled XVar not set (the game's default is on; the Challenge Rift hooks stay in)");
+        if (!g_xv_sb && !g_xv_cr) { atomic_store(&g_state, -1); return; }
         apply(1);
         atomic_store(&g_state, 2);
         return;

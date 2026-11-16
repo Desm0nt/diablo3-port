@@ -522,6 +522,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 if (!"1".equals(speed)) Os.setenv("DM_D3_SPEED", speed, true); else Os.unsetenv("DM_D3_SPEED");
                 String atk = p.getString("d3_atkspeed", "1");
                 if (!"1".equals(atk)) Os.setenv("DM_D3_ATKSPEED", atk, true); else Os.unsetenv("DM_D3_ATKSPEED");
+                // Challenge Rift offline (issue #27): the weekly rift from the bundled dumps, its cache once a week
+                if (p.getBoolean("d3_challenge", false)) Os.setenv("DM_D3_CHALLENGE", "1", true); else Os.unsetenv("DM_D3_CHALLENGE");
                 // Multiplayer (gear "Multiplayer", next launch): local co-op with several controllers (hle_hid.c npads No2..No4, front_android.c:
                 // 0 off = every controller is player 1, 1 = each controller its own player, the first one player 1, 2 = the touch screen is player 1,
                 // controllers players 2-4); local wireless play over the LAN (hle_ldn.c, on by default: nothing opens until the game's local play does)
@@ -1090,8 +1092,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     }
     // [D3] "Mods / cheats" (hle_d3_mods.c, GPL-2.0, partly ported from d3hack by god-jester, see docs/THIRD_PARTY.md). Saved in "doom_graphics":
     // d3_season (0 = off, else the season number) -> DM_D3_SEASON; d3_buffs (comma separated buff keys, any number) -> DM_D3_BUFFS;
-    // d3_cheats (comma separated keys) -> DM_D3_CHEATS; d3_speed / d3_atkspeed ("1" = off) -> DM_D3_SPEED / DM_D3_ATKSPEED. All apply on the
-    // next launch (applyDoomSettings). Three groups: Season, Season buffs (checkboxes), Cheats.
+    // d3_cheats (comma separated keys) -> DM_D3_CHEATS; d3_speed / d3_atkspeed ("1" = off) -> DM_D3_SPEED / DM_D3_ATKSPEED; d3_challenge ->
+    // DM_D3_CHALLENGE=1. All apply on the next launch (applyDoomSettings). Groups: Season, Challenge Rift, Season buffs (checkboxes), Cheats.
     static final int D3_SEASON_FIRST = 14, D3_SEASON_LAST = 37;   // the seasons with a known theme (hle_d3_mods.c k_themes)
     static final String[] D3_BUFF_KEYS = {"goblins", "bags", "grandeur", "nightmares", "triune", "pandemonium", "kanai", "tempests", "clones", "cube4",
         "ethereal", "shards", "swarm", "sanctified", "alchemy", "nesting", "keystones", "bloodshards", "anniversary", "eggworld"};   // hle_d3_mods.c k_buffs keys
@@ -1134,6 +1136,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             int sWas = p.getInt("d3_season", 0);
             android.widget.Spinner seasonS = d3Spinner(box, seasons, sWas >= D3_SEASON_FIRST && sWas <= D3_SEASON_LAST ? sWas - D3_SEASON_FIRST + 1 : 0);
             note(box, ui.getString(R.string.d3_season_note));
+            // Challenge Rift offline (issue #27)
+            heading(box, when(ui, R.string.d3_challenge, false));
+            CheckBox challengeC = new CheckBox(this); challengeC.setText(ui.getString(R.string.d3_challenge_on)); challengeC.setChecked(p.getBoolean("d3_challenge", false)); box.addView(challengeC);
+            note(box, ui.getString(R.string.d3_challenge_note));
             // Season buffs: every season's theme on its own, any number at once
             heading(box, when(ui, R.string.d3_buffs, false));
             java.util.List<String> bWas = java.util.Arrays.asList(p.getString("d3_buffs", "").split(","));
@@ -1174,7 +1180,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     String loot = D3_LOOT_KEYS[lootS.getSelectedItemPosition()];
                     if (!loot.isEmpty()) c.append(c.length() > 0 ? "," : "").append(loot);
                     p.edit().putInt("d3_season", s > 0 ? D3_SEASON_FIRST + s - 1 : 0).putString("d3_buffs", b.toString()).putString("d3_cheats", c.toString())
-                        .putString("d3_speed", D3_MULTS[moveS.getSelectedItemPosition()]).putString("d3_atkspeed", D3_MULTS[atkS.getSelectedItemPosition()]).apply();
+                        .putString("d3_speed", D3_MULTS[moveS.getSelectedItemPosition()]).putString("d3_atkspeed", D3_MULTS[atkS.getSelectedItemPosition()])
+                        .putBoolean("d3_challenge", challengeC.isChecked()).apply();
                 })
                 .setNegativeButton(ui.getString(R.string.d3_cancel), null).show();
         });

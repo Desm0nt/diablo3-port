@@ -152,6 +152,9 @@
     <string name="d3_cheat_legendary">可同时装备多件相同的传奇物品</string>
     <string name="d3_cheats_note">如果游戏版本不匹配，模组会自动关闭（日志中显示红色行），游戏照常运行。</string>
     <string name="d3_mods_note">此处所有选项默认关闭，下次启动时生效。部分功能移植自 god-jester 的 d3hack（Switch 模组，GPL-2.0）。尝试前请备份存档：赛季英雄和作弊获得的物品会保留在存档中。</string>
+    <string name="d3_challenge">挑战秘境</string>
+    <string name="d3_challenge_on">离线挑战秘境</string>
+    <string name="d3_challenge_note">主菜单的挑战秘境无需暴雪服务器即可游玩：内置 29 个真实的每周秘境，每周更换一个。在目标时间内通关即可获得挑战秘境宝匣（仪式祭坛需要它），与正式游戏一样每周一次。</string>
     <string name="d3_buffs">赛季增益（可同时开启多个）</string>
     <string name="d3_buffs_theme">勾选所选赛季的主题</string>
     <string name="d3_buffs_note">每个赛季的主题在游戏中都是独立的开关，因此可以同时开启多个。它们对所有英雄生效，无论是否为赛季英雄。</string>
