@@ -109,7 +109,7 @@ static void drs_log_window(const uint32_t *s, float out, uint64_t now) {
     LOG("[d3drs] 10s: DRS %s, scale now %.3f (min %.3f avg %.3f max %.3f, %u changes) -> 3D %ux%u of %ux%d%s, GPU %.2f ms avg "
         "(game target %.2f..%.2f ms, step %.2f, range %.2f..%.2f), %u frames", atomic_load(&g_drs_off) ? "off (gear / DM_D3_DRS=off)" : "auto",
         out, g_win.lo, g_win.frames ? g_win.sum / g_win.frames : 0.0, g_win.hi, g_win.changes, (uint32_t)(out * (float)w), (uint32_t)(out * (float)h), w, (int)h,
-        g_align ? " aligned" : "", g_win.frames ? g_win.gpu_sum / 1000.0 / g_win.frames : 0.0, s[0] / 1000.0, s[1] / 1000.0, step, lo, hi, g_win.frames);
+        g_align && !atomic_load(&g_drs_off) ? " aligned" : "", g_win.frames ? g_win.gpu_sum / 1000.0 / g_win.frames : 0.0, s[0] / 1000.0, s[1] / 1000.0, step, lo, hi, g_win.frames);
     memset(&g_win, 0, sizeof g_win);
 }
 // The replacement of main 0x3cd10 (void controller(state *s)), on the game's render thread once a frame
@@ -136,7 +136,9 @@ static void drs_tick(uint32_t *s) {
         *ctl = c < lo ? lo : c > hi ? hi : c;   // 0x3ce74: fcsel max, then min
     }
     scale = *ctl;
-    const int a = drs_align_now();
+    // Gear off = really full resolution: no alignment (it turned 1.0 into 0.977, 1600 of 1638, so the sub-rect + PostFX Upscale chain still
+    // ran with DRS "off" and issue #23's halos could not be told apart from it). Auto keeps the alignment (MALI-16 stripes).
+    const int a = atomic_load_explicit(&g_drs_off, memory_order_relaxed) ? 0 : drs_align_now();
     if (a > 0) {
         uint32_t w; int32_t h; drs_target(&w, &h);
         if (w >= 256 && w <= 8192) {

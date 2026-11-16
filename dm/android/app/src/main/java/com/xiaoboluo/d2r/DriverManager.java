@@ -163,6 +163,7 @@ final class DriverManager {
     private void pickFile() {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("*/*");
         i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"application/zip", "application/x-zip-compressed", "application/octet-stream"});
+        if (host.driverMultiPick()) i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);   // D3 issue #30: several zips at once
         waiting = new WeakReference<>(this);
         try { a.startActivityForResult(i, host.driverZipRequest()); }
         catch (android.content.ActivityNotFoundException e) { host.crumb("driver manager: no file picker"); android.widget.Toast.makeText(a, GearText.s(a, "folder_no_picker"), android.widget.Toast.LENGTH_LONG).show(); }
@@ -172,7 +173,21 @@ final class DriverManager {
         DriverManager m = waiting.get(); waiting = new WeakReference<>(null);
         if (u == null) { h.crumb("driver manager: file pick cancelled"); return; }
         if (m == null || m.host != h) { if (h.drivers() == null) return; m = new DriverManager(h.drivers(), null); }   // the activity was recreated meanwhile: install without the dialogs behind
-        m.installUri(u);
+        m.installUris(java.util.Collections.singletonList(u));
+    }
+    // The port's onActivityResult with GearHost.driverMultiPick(): the Intent of a RESULT_OK (null = cancelled), one zip (getData) or several (ClipData)
+    static void picked(GearHost h, Intent data) {
+        ArrayList<Uri> us = new ArrayList<>();
+        if (data != null) {
+            android.content.ClipData c = data.getClipData();
+            if (c != null) for (int i = 0; i < c.getItemCount(); i++) { Uri u = c.getItemAt(i).getUri(); if (u != null && !us.contains(u)) us.add(u); }
+            if (us.isEmpty() && data.getData() != null) us.add(data.getData());
+        }
+        if (us.isEmpty()) { picked(h, (Uri) null); return; }
+        DriverManager m = waiting.get(); waiting = new WeakReference<>(null);
+        if (m == null || m.host != h) { if (h.drivers() == null) return; m = new DriverManager(h.drivers(), null); }
+        h.crumb("driver manager: " + us.size() + " file(s) picked");
+        m.installUris(us);
     }
     private String displayName(Uri u) {
         try (android.database.Cursor c = a.getContentResolver().query(u, new String[] {android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
@@ -180,25 +195,52 @@ final class DriverManager {
         } catch (RuntimeException e) { /* below */ }
         String s = u.getLastPathSegment(); return s == null ? "driver.zip" : s.substring(s.lastIndexOf('/') + 1);
     }
-    private void installUri(Uri u) {
-        final String name = displayName(u);
-        host.crumb("driver manager: installing " + name + " from " + u);
-        final Progress pg = progress(t("Установка ", "Installing ") + name, false);
+    // One zip: the old dialog (done). Several (D3 issue #30): one after another, each with the same checks; whatever fails is skipped and the
+    // summary says which were installed and why the others were not.
+    private void installUris(java.util.List<Uri> us) {
+        final int total = us.size();
+        final String[] names = new String[total];
+        for (int i = 0; i < total; i++) names[i] = displayName(us.get(i));
+        host.crumb("driver manager: installing " + android.text.TextUtils.join(", ", names));
+        final Progress pg = progress(t("Установка ", "Installing ") + (total == 1 ? names[0] : total + t(" пакетов", " packages")), false);
         new Thread(() -> {
-            Result r; File tmp = new File(dir(), ".install.zip");
-            try {
-                dir().mkdirs();
-                try (InputStream in = a.getContentResolver().openInputStream(u); OutputStream os = new FileOutputStream(tmp)) {
-                    if (in == null) throw new IOException("cannot open " + u);
-                    byte[] buf = new byte[1 << 16]; long n = 0; int k;
-                    while ((k = in.read(buf)) > 0) { os.write(buf, 0, k); if ((n += k) > MAX_ZIP) throw new IOException("larger than " + mb(MAX_ZIP)); }
-                }
-                r = install(tmp, name, "file", name);
-            } catch (IOException e) { r = Result.fail(e.getMessage() == null ? e.toString() : e.getMessage()); }
-            finally { tmp.delete(); }
-            final Result res = r;
-            a.runOnUiThread(() -> { pg.dismiss(); done(res, name); });
+            final Result[] rs = new Result[total];
+            for (int i = 0; i < total; i++) {
+                final String name = names[i]; final int k1 = i + 1;
+                if (total > 1) a.runOnUiThread(() -> { if (pg.text != null) pg.text.setText(k1 + " / " + total + ": " + name); });
+                Result r; File tmp = new File(dir(), ".install.zip");
+                try {
+                    dir().mkdirs();
+                    try (InputStream in = a.getContentResolver().openInputStream(us.get(i)); OutputStream os = new FileOutputStream(tmp)) {
+                        if (in == null) throw new IOException("cannot open " + us.get(i));
+                        byte[] buf = new byte[1 << 16]; long n = 0; int k;
+                        while ((k = in.read(buf)) > 0) { os.write(buf, 0, k); if ((n += k) > MAX_ZIP) throw new IOException("larger than " + mb(MAX_ZIP)); }
+                    }
+                    r = install(tmp, name, "file", name);
+                } catch (IOException e) { r = Result.fail(e.getMessage() == null ? e.toString() : e.getMessage()); }
+                finally { tmp.delete(); }
+                rs[i] = r;
+            }
+            a.runOnUiThread(() -> { pg.dismiss(); if (total == 1) done(rs[0], names[0]); else doneAll(rs, names); });
         }, "dm-driver-install").start();
+    }
+    private void doneAll(Result[] rs, String[] names) {
+        StringBuilder ok = new StringBuilder(), bad = new StringBuilder(); boolean any = false;
+        for (int i = 0; i < rs.length; i++) {
+            Result r = rs[i];
+            host.crumb("driver manager: " + names[i] + (r.name != null ? " installed as " + r.name : r.cancelled ? " cancelled" : " not installed: " + r.error));
+            if (r.name != null) { any = true; ok.append("• ").append(r.name).append('\n'); }
+            else bad.append("• ").append(names[i]).append(" — ").append(r.cancelled ? t("отменено", "cancelled") : r.error).append('\n');
+        }
+        if (any) { dirty = true; fill(); if (dlRefresh != null) dlRefresh.run(); }
+        if (gone()) return;
+        StringBuilder msg = new StringBuilder();
+        if (ok.length() > 0) msg.append(t("Установлены:\n", "Installed:\n")).append(ok).append('\n');
+        if (bad.length() > 0) msg.append(t("Не установлены:\n", "Not installed:\n")).append(bad).append('\n');
+        if (any) msg.append(t("Выберите драйвер в списке «Драйвер Vulkan» в настройках (действует со следующего запуска).",
+            "Pick one in the settings' \"Vulkan driver\" list (applies on the next launch)."));
+        new AlertDialog.Builder(a).setTitle(t("Установка драйверов", "Installing drivers")).setMessage(msg.toString().trim())
+            .setPositiveButton(android.R.string.ok, null).show();
     }
 
     // ---- unpack + check (background thread)

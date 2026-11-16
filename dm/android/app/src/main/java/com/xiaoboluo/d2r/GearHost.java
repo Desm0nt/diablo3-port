@@ -30,4 +30,5 @@ interface GearHost {
     default String driverManifestUrl() { return VkDrivers.MANIFEST_URL; }
     default String driverSourcesUrl() { return VkDrivers.SOURCES_URL; }
     default int driverZipRequest() { return DriverManager.REQ_ZIP; }
+    default boolean driverMultiPick() { return false; }   // true: onActivityResult calls DriverManager.picked(host, Intent) (several zips)
 }

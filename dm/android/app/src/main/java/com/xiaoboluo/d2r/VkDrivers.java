@@ -381,15 +381,21 @@ final class VkDrivers {
             for (File f : fs) if (f.getName().endsWith(".so")) { out.add(d.getName()); break; } }
         java.util.Collections.sort(out); return out.toArray(new String[0]);
     }
-    // "<meta.json name> (<folder>)", or just the folder name when there is no readable meta.json.
+    // "<meta.json name> (<folder>)", or just the folder name when there is no readable meta.json, or when another installed package has the
+    // same meta.json name (D3 issue #30: five builds of one PanVK commit for GameHub / Winlator / adrenotools / ... all say
+    // "Mesa-PanVK-26.3.0-devel-795ca7ff"; the folder names, taken from the zip names, are what tells them apart).
     String label(String name) {
+        String t = metaName(name);
+        if (t.isEmpty()) return name;
+        for (String o : packages()) if (!o.equals(name) && t.equals(metaName(o))) return name;
+        return t + " (" + name + ")";
+    }
+    private String metaName(String name) {
         File m = new File(new File(dir(), name), "meta.json");
         try (java.io.FileInputStream in = new java.io.FileInputStream(m)) {
             byte[] b = new byte[(int) Math.min(m.length(), 65536)]; int n = in.read(b);
-            String t = new org.json.JSONObject(new String(b, 0, Math.max(n, 0), "UTF-8")).optString("name", "");
-            if (!t.isEmpty()) return t + " (" + name + ")";
-        } catch (Exception e) { /* no or unreadable meta.json */ }
-        return name;
+            return new org.json.JSONObject(new String(b, 0, Math.max(n, 0), "UTF-8")).optString("name", "").trim();
+        } catch (Exception e) { return ""; }   // no or unreadable meta.json
     }
 
     // ---- files

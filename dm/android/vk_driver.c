@@ -339,6 +339,16 @@ static void load_driver(void) {
             if (!(pl && *pl == '0')) setenv("MESA_GRALLOC_LINEAR", "1", 0);
             LOG("[vk] MESA_GRALLOC_LINEAR=%s (PanVK: 1 = plain window buffers, no AFBC; DM_VK_PANVK_LINEAR=%s)",
                 getenv("MESA_GRALLOC_LINEAR") ? getenv("MESA_GRALLOC_LINEAR") : "(unset)", pl ? pl : "(unset: on)");
+            // D3 issue #23: PanVK zenith 26.3.1 ("P0A-V19-FULLPLANE") reads window-buffer layouts only through a stable-C IMapper
+            // (/vendor/lib64/hw/mapper.<suffix>.so; candidates PANVK_MAPPER_NAMES=a,b, ro.hardware.gralloc, "mediatek"...) and refuses to
+            // guess without one -> vkCreateSwapchainKHR -1000072003. Phones whose vendor has only the HIDL gralloc4 mapper have none. Logged
+            // so a report says which case it is.
+            { char got[256] = ""; size_t used = 0; DIR *hd = opendir("/vendor/lib64/hw");
+              if (hd) { struct dirent *de; while ((de = readdir(hd))) if (!strncmp(de->d_name, "mapper.", 7) && strstr(de->d_name, ".so") && used + strlen(de->d_name) + 2 < sizeof got)
+                  used += (size_t)snprintf(got + used, sizeof got - used, "%s%s", used ? " " : "", de->d_name);
+                closedir(hd); }
+              LOG("[vk] stable-C IMapper in /vendor/lib64/hw: %s (PanVK builds that need one: PANVK_MAPPER_NAMES=%s)", hd ? (used ? got : "none") : "(cannot list)",
+                  getenv("PANVK_MAPPER_NAMES") ? getenv("PANVK_MAPPER_NAMES") : "(unset)"); }
         }
         const char *slash = strrchr(drv, '/');
         char dir[1024], hookdir[1024];

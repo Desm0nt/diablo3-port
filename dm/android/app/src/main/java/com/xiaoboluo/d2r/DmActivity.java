@@ -814,11 +814,12 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         @Override public String driverStatus() { if (!libraryLoaded) return null; try { return nativeDriverStatus(); } catch (Throwable t) { return null; } }
         @Override public float[] frameStats() { if (!libraryLoaded) return null; try { nativeFrameStats(driverStats); return driverStats; } catch (Throwable t) { return null; } }
         @Override public String defaultDriver(VkDrivers d) { return DmActivity.this.defaultDriver(); }
+        @Override public boolean driverMultiPick() { return true; }   // issue #30: several zips at once (onActivityResult below hands the Intent)
     };
     // the driver manager's file pick (DriverManager.pickFile -> ACTION_OPEN_DOCUMENT)
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request == DriverManager.REQ_ZIP) DriverManager.picked(driverHost, result == RESULT_OK && data != null ? data.getData() : null);
+        if (request == DriverManager.REQ_ZIP) DriverManager.picked(driverHost, result == RESULT_OK ? data : null);   // one zip (getData) or several (ClipData)
     }
     // The gear's driver list as DOOM 2016's (frontend-common GearPages.driver): packages that cannot run here (VkDrivers.problem) are not offered,
     // a line lists them with the reason; want = the choice to keep checked after the driver manager changed the list (null = the saved one).
