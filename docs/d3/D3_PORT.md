@@ -325,14 +325,68 @@ log2 высоты блока в GOB +108; тип 3 — само хранилищ
 |---|---|---|
 | Сезон: выкл / 14…37 | `DM_D3_SEASON=<n>` | XVar `Season.Num`=n, `State`=1, `OverrideEnabled`=1 (сеттеры игры 0xa273c0 / 0xa26fc0, флаги 3, в первом опросе npad, перепроверка раз в ~5 с); `IsSeasonsInitialized` 0x5ff00 → 1; `IsSignedInOnline` 0x56b10 → 1 (иначе создание сезонного героя 0x351160 = «SeasonNotAvailableOnline»); колбэк подтверждения сезона 0x351cc0 → «да»; `ValidateHeroForPartyMember` 0x1bf5f0 → 0; пункт «Подключиться к серверам Diablo» 0x61620 скрыт; season_created героя без данных (0x1bd140) = n |
 | Баффы сезонов: 20 флажков, сколько угодно сразу (+ кнопка «отметить тему выбранного сезона») | `DM_D3_BUFFS=<ключи>` | XVar `CommunityEvent*` (0x18ff848, 0x18fffc8…0x1900b48) — каждый бафф свой булев XVar, игра проверяет их по отдельности (дескрипторы 0x4a6404…), так что несколько сразу возможны (сезон 22 и сам включал два); `CommunityEventEnabled`=1, `SeasonOnly`=0, окно баффа (0x1771758 / 0x1771760) = [1, max], если не задано; ещё `AnniversaryEnabled` 0x18ffa70 и `EasterEggWorldEnabled` 0x18ffb28 (+ u32 0x1771820). Ставятся только выбранные. Офлайн их никто не перезаписывает: простой лобби 0x60704 пересчитывает событие только когда известно время сервера |
-| Читы-патчи | `DM_D3_CHEATS` | `difficulty` 0x5282b0 → 1; `portal` 0x9e3350; `cooldowns` 0x7397d0 / 0x7f8a60 / 0x9bc63c / 0x9bc928; `craft` 0x20636c, 0x40fa20, 0x1dcfa4, 0x236d20..30; `cube` 0x8875d0 → ret; `gem100` 0x6a265c; `gemfast` 0x349ba8; `resource` 0x47ad7c; `orbs` 0x844ce4; `legendary` 0x4fbae4 |
-| Читы-хуки | `DM_D3_CHEATS`, `DM_D3_SPEED`, `DM_D3_ATKSPEED` | `god` / `dbgflags`: хук sInitializeWorld 0x8128a0, после него на локальном сервере (ServerIsLocal 0x4c7e80 && !GameIsStartUp 0x4c7df0) EnableGod (ActorFlagSet 0x86f940 бит 0/1/4, ACD_AttributesSetInt 0x46fc00: God, Invulnerable, иммунитеты; `god` включает и `resource`) и FlagsAreFun (AppGlobals 0x1905610 +0x40/+0x44/+0x48); `equipany` — ACDInventoryItemAllowedInSlot 0x489280 → 0; `ancient` / `primal` — замена LootRollForAncientLegendary 0x88dee0 (eAncientRank +0xd8 = 1 / 2, флаги +0x64 / +0x68 = 0; поля ilvl / torment / gift из AugmentSpecifier не трогаем — их «выключенные» значения затирали бы то, что выставила игра); скорость бега — CPlayerGetMoveSpeedForStickInput 0xc8000 × k; скорость атаки — PowerGetFormulaValueAtLevel 0x6cc700, power 0x50860 × k (как в d3hack) |
+| Портал дерзаний без сети (issue #27, 16.11) | `DM_D3_CHALLENGE=1` | см. «Портал дерзаний без сети» ниже |
+| Вместе с сезоном (16.11) | — | `mail`: проверка связи почтового ящика 0x1b0600 → 1 (d3hack MailboxCheckLobbyConnection: почта открывается офлайн, по ней приходят вещи героя при смене сезона); `netlabel`: значок и надпись «Diablo Network: подключено / нет» скрыты в главном меню (0x3628dc, 0x3628f0, 0x362930 — у d3hack 0x3627ec…, сдвиг +0xf0) и в паузе (0x221324, 0x221338, 0x221378, +0); бафф `igr` — XVar `IgrEnabled` 0x18ff900 (GOT 0x1154bf0) |
+| Читы-патчи | `DM_D3_CHEATS` | `easykill` 0x97f65c (16.11; урон по цели актёра с ACTOR_EASYKILL — бит ставит режим бога: 1e15 → 1,33742e18); `reddmg` 0xbb550 (16.11; цвет всплывающих чисел урона: `ldr w9,[x28,#0x44]` → красный; у d3hack — инлайн-хук на 0xbb5e8, альфа-затухание игры у нас сохраняется); `difficulty` 0x5282b0 → 1; `portal` 0x9e3350; `cooldowns` 0x7397d0 / 0x7f8a60 / 0x9bc63c / 0x9bc928; `craft` 0x20636c, 0x40fa20, 0x1dcfa4, 0x236d20..30; `cube` 0x8875d0 → ret; `gem100` 0x6a265c; `gemfast` 0x349ba8; `resource` 0x47ad7c; `orbs` 0x844ce4; `legendary` 0x4fbae4 |
+| Читы-хуки | `DM_D3_CHEATS`, `DM_D3_SPEED`, `DM_D3_ATKSPEED` | `god` / `dbgflags`: хук sInitializeWorld 0x8128a0, после него на локальном сервере (ServerIsLocal 0x4c7e80 && !GameIsStartUp 0x4c7df0) EnableGod (ActorFlagSet 0x86f940 бит 0/1/4, ACD_AttributesSetInt 0x46fc00: God, Invulnerable, иммунитеты; `god` включает и `resource`) и FlagsAreFun (AppGlobals 0x1905610 +0x40/+0x44/+0x48); `equipany` — ACDInventoryItemAllowedInSlot 0x489280 → 0; `ancient` / `primal` — замена LootRollForAncientLegendary 0x88dee0 (eAncientRank +0xd8 = 1 / 2, флаги +0x64 / +0x68 = 0); `noprimal` / `noancient` (16.11, d3hack DisablePrimalAncientDrops / DisableAncientDrops) — хук той же функции с трамплином: ставим флаг +0x6c / +0x68 и зовём бросок игры (по коду 0x88dee0: +0x68 ≠ 0 — выход сразу, +0x6c ≠ 0 — выход после «древний», +0x64 — фиксированный шанс ремесленника; то есть в структуре d3hack флаги SharedLooteeParams стоят на 4 байта раньше настоящих: у него «DisableAncient» = +0x64, «DisablePrimal» = +0x68); скорость бега — CPlayerGetMoveSpeedForStickInput 0xc8000 × k; скорость атаки — PowerGetFormulaValueAtLevel 0x6cc700, power 0x50860 × k (как в d3hack) |
 
-Не перенесено: подмена файлов издателя (Config / Seasons / Blacklist — офлайн их колбэки не вызываются), испытания (challenge
-rifts — нужны дампы протобуфов с серверов), «гейт» 0x4cadb8 в GameCommonData::Initialize (у d3hack он включается только когда бит 18
+Журнал ошибок игры (16.11, d3hack EnableErrorTraces): хук DisplayErrorMessage(code, msg) 0xa2ad70 (у d3hack 0xa2ac70; сюда же прыгает
+DisplayInternalError 0xa2ad60) пишет красную строку `[d3mods] game error message, code …: текст` (первые 64); включён при любом моде,
+`DM_D3_ERRLOG=0` — никогда, `=1` — всегда. Строка гостя читается через pipe (плохой указатель = EFAULT, а не падение).
+
+### Портал дерзаний без сети (issue #27) — 16.11.2026
+
+Запрос: 15-я печать Алтаря обрядов стоит тайник портала дерзаний, без серверов его не получить. Данные — 29 настоящих недельных
+дампов из d3hack (`examples/config/d3hack-nx/rift_data`), вшиты в libdm: `dm/host/hle_d3_rift_data.inc` (148 КБ, генератор
+`tools/d3_rift_inc.py`, проверяет в каждом файле снимки портала / героя / аккаунта).
+
+Как игра получает портал (2.7.7): меню 0x181700 → 0x69ab0 → 0x69990 → StorageGetPublisherFile(user, "challengerift_config.dat") 0x66b10;
+колбэк файла 0x726d0 разбирает `ChallengeData` (нужен номер), 0x72880 просит `challengerift_<номер % 10>.dat`, 0x72a70 разбирает
+`WeeklyChallengeData` (нужны три снимка) и зовёт sOnGetChallengeRiftData 0x185f70 (проверка start ≤ now < end, открытие экрана).
+Слой хранилища отвечает со своего сетевого потока через 0x70850, который ставит колбэк в очередь главного потока (0x7b970).
+
+d3hack хукает sOnGetChallengeRiftData и подменяет неудачный ответ файлами с SD (старый, закомментированный вариант — хук
+StorageGetPublisherFile). У нас хук — сам StorageGetPublisherFile 0x66b10: два файла испытания отдаём сразу из вшитых дампов через
+родной 0x70850 (строка `blz::string` статическая, без владельца — все места проверяют ctrl на 0), остальные файлы издателя идут в
+функцию игры. Так ничего не зависит от того, как слой хранилища ведёт себя без сети, а оба шага разбора игры идут без изменений.
+
+- Конфиг собираем сами: `challenge_number` = номер недели (unix / 604800, смена в четверг 00:00 UTC), start 0, last broadcast 0,
+  end 0x7fffffff (значения d3hack), hash и множитель сфер из дампа. Файл данных = номер недели % 29
+  (`DM_D3_CHALLENGE_RIFT=<n>` — взять файл n, для проверки).
+- Награда: ChallengeRiftHandleChallengeRewards 0x775cd0 даёт её, если время лучше контрольного (SGameGlobals +0x220c) и последний
+  награждённый номер игрока (Player +0x98, из профиля) меньше текущего (SGameGlobals +0x2198); SaveToProfile 0x4edc0 пишет номер в
+  профиль, только если он больше записанного. d3hack берёт случайный номер 0..900, поэтому обходит это сравнение (0x4ee18 / 0x4ef28) и
+  откатывает номер игрока вокруг функций игры — тайник у него фармится. С номером недели ничего этого не нужно: работает родное правило
+  «один тайник в неделю» (номер ≈ 3000 заведомо больше любого настоящего ≈ 450). Обход и откат **не перенесены**.
+- Перенесено как есть: метка сезона — SaveToProfile ставит `season_earned` только при подключённом лобби, а выдача в городе 0x7764e0 в
+  сезонной игре требует season_earned == текущий сезон: хук сохранения ставит метку, хук выдачи переметит запись без метки.
+- XVar `ChallengeRiftEnabled` 0x1a1c4a8 (GOT 0x1158fd8) = 1 (у игры и так 1 по умолчанию); `IsSignedInOnline` 0x56b10 → 1 (у d3hack
+  всегда; у нас общий сайт `signin` с сезоном).
+- Соответствие 2.7.6 → 2.7.7: sOnGetChallengeRiftData 0x185f70 (+0, строки ErrorChallengeNotYetStarted / Ended), StorageGetPublisherFile
+  0x66b10 (+0), SaveToProfile 0x4edc0 (+0, оба «гейта» d3hack на тех же адресах и с теми же словами), ParsePartialFromString 0xbb2b50 →
+  0xbb2c50, ChallengeData_ctor 0x564c00 → 0x564d00 и WeeklyChallengeData_ctor 0x62aae0 → 0x62abe0 (видны в 0x726d0 / 0x72880, нам не
+  нужны), HandleChallengeRewards 0x775bd0 → 0x775cd0, OpenChallengeRift 0x776250 → 0x776350 (не хукаем), GrantRewardToPlayerIfEligible
+  0x7763e0 → 0x7764e0, GameIsSeasonal 0x4c8cf0 → 0x4c8df0, OnlineServiceGetSeasonNum 0x72df90 → 0x72e090, SGameGlobalsGet 0x7b2890 →
+  0x7b2990. Первые слова функций — в `k_fns`, раскладки (смещения полей, вызовы) — 44 слова `k_cr_words`; несовпадение = выкл + красная строка.
+- Строки лога для прогона на телефоне: `Challenge Rift offline on: 29 bundled rifts, this week = challenge N -> rift file NN`;
+  `challenge rift: "challengerift_config.dat" asked … -> config answered`; `… -> bundled challengerift_NN.dat answered`;
+  `data callback ok: challenge N …, weekly data bits 0x7`; красная `the game refused it: Error…` (хук 0x185aa0);
+  `challenge rift finished: … -> status 1 / 2 / 0`; `reward of challenge N … passed to the profile save … (stored …)`;
+  `reward grant check: …`. Если строки `asked` нет вовсе — меню не дошло до запроса (перед ним проверки 0x7f270 «есть лобби» и флаг UI).
+- Статически **не проверено**: что 0x7f270 в главном меню офлайн даёт 1 (иначе запрос не уходит); что очередь 0x7b970 разбирается в
+  меню; проходит ли создание игры-испытания без сети (0x1987a0 и дальше); первые «гейты» SaveToProfile — 0x56a30(user) и 0x4cafe0()
+  (режим игры == 6). На телефоне не запускалось.
+
+Не перенесено: подмена файлов издателя (Config / Seasons / Blacklist — офлайн их колбэки не вызываются), «гейт» 0x4cadb8 в GameCommonData::Initialize (у d3hack он включается только когда бит 18
 и так стоит — пустая операция), дюп предметов / unlock-all и хуки атрибутов из `hooks/lobby.hpp` (у d3hack только под debug.enable_crashes),
-сайты с неуверенным соответствием 2.7.6 → 2.7.7 (drop anything, any gem any slot, auto pickup, guaranteed legendaries, gem lvl150),
-ImGui-оверлей, resolution hack (свой `DM_D3_WIDE`). На телефоне ещё **не проверено**.
+drop anything, any gem any slot, auto pickup, guaranteed legendaries, gem lvl150 (решение хозяина 16.11: слишком читерские),
+поля [loot_modifiers] ForcedILevel / TieredLootRunLevel / DisableTormentDrops / DisableTormentCheck / SuppressGiftGeneration (d3hack
+пишет их в хуке броска «древности» по смещениям на 4 байта раньше настоящих полей и уже после выбора предмета и уровня — эффекта в коде
+не видно), SpoofNetworkFunctions (tagnx: подмена nn::account для онлайна на забаненных консолях — у нас онлайна нет), включение
+собственного лога игры (LocalLoggingEnable + патч 0x5f0, путь debug.txt — пишет на SD через файловые хуки d3hack), отладочный показ
+ошибок выделения памяти (0xa2ad04 / 0xa37c70), отладочные флаги отрисовки (Enum_GB_Types, параметры командной строки — у d3hack
+выключены сборкой), ParagonCap (d3hack всегда пишет 0), ImGui-оверлей, оверлеи FPS / разрешения, resolution hack (свой `DM_D3_WIDE`).
+Новые части от 16.11 на телефоне ещё **не проверены**.
 
 ## Очередь заданий игры на хосте (`DM_D3_JOBS`), issue #18 — 13.11.2026
 

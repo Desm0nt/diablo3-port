@@ -12,15 +12,18 @@
 //
 // Everything is off by default; the front end passes the choices at start:
 //   DM_D3_SEASON=<n>     offline season n (1..99; unset / 0 = off): the game's season XVars Season.Num = n, Season.State = 1 (in progress),
-//                        Season.OverrideEnabled = 1, and the checks that need Blizzard's servers answer "yes" (see k_sites "season")
+//                        Season.OverrideEnabled = 1, and the checks that need Blizzard's servers answer "yes" (see k_sites "season");
+//                        with it the mailbox opens offline ("mail") and the Diablo Network status label is hidden ("netlabel")
 //   DM_D3_BUFFS=<list>   season buffs / events, comma separated keys of k_buffs (any number at once: every buff is its own XVar and the
 //                        game checks each one on its own), "auto" = the theme of season DM_D3_SEASON (k_themes: seasons 14..37); unset = off.
 //                        Buffs apply to every hero (CommunityEventSeasonOnly = 0)
 //   DM_D3_CHEATS=<list>  comma separated keys: code patches of k_sites (difficulty, portal, cooldowns, craft, cube, gem100, gemfast,
-//                        resource, orbs, legendary) and hooks (god, dbgflags, equipany, ancient, primal); unset = none
+//                        resource, orbs, legendary, easykill, reddmg) and hooks (god, dbgflags, equipany; legendary drops: ancient,
+//                        primal, noprimal, noancient); unset = none
 //   DM_D3_SPEED=<x>      movement speed multiplier (d3hack MovementSpeedMultiplier; 1 / unset = off, 0.1..10)
 //   DM_D3_ATKSPEED=<x>   attack speed multiplier (d3hack AttackSpeedMultiplier; 1 / unset = off, 0.1..10)
 //   DM_D3_CHALLENGE=1    Challenge Rift offline (see "Challenge Rift" below); unset / 0 = off
+//   DM_D3_ERRLOG=1 / 0   the game's error messages in our log (d3hack [debug] EnableErrorTraces): on with any mod above, 0 = never, 1 = always
 // d3hack's 2.7.6 sites were moved to this update (2.7.7, main build-id 2607a74f) by matching each site's code: most of main is shifted by
 // 0, +0x10, +0x70 or +0x100. Every code site and every hooked / called game function is checked word for word, every XVar by its GOT
 // slot, vtable and registered name; on any mismatch that feature stays off with a red log line.
@@ -39,7 +42,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <sys/mman.h>
+#include <unistd.h>
 #include <time.h>
 
 // ---- code sites: original words -> patch words, grouped by feature (the season group is DM_D3_SEASON, the others DM_D3_CHEATS keys)
@@ -56,6 +61,15 @@ static const site_t k_sites[] = {
     {"season", 0x61620, 2, {0xf81e0ff3, 0xa9017bfd}, {0x52800000, 0xd65f03c0}},   // main / pause menu "Connect to Diablo Servers" entry -> hidden
     {"season", 0x1bd140, 1, {0xb9409115}, {0x52800015}},                          // SetGameParamsForHero, hero without data: season_created =
                                                                                   //   ldr w21,[x8,#0x90] -> mov w21,#n (n filled in at install)
+    // with the offline season (d3hack hooks/season_events.hpp MailboxCheckLobbyConnection; PatchBase "hideonline" 04..11)
+    {"mail", 0x1b0600, 2, {0xd10443ff, 0xa90e57fc}, {0x52800020, 0xd65f03c0}},     // the mailbox's lobby-connection check 0x1b0600 (+0) -> 1: the mail opens
+                                                                                   //   offline (a hero's items come by mail when its season is swapped)
+    {"netlabel", 0x3628dc, 1, {0x320003e1}, {0x52800001}},                         // main menu (d3hack 0x3627ec, +0xf0): "connected" icon SetVisible(1) -> (0)
+    {"netlabel", 0x3628f0, 1, {0x320003e1}, {0x52800001}},                         //   "disconnected" icon SetVisible(1) -> (0)
+    {"netlabel", 0x362930, 2, {0xf9408908, 0xaa0003e1}, {0xf9402908, 0x52800001}}, //   the status text: SetText(str) -> SetVisible(0)
+    {"netlabel", 0x221324, 1, {0x320003e1}, {0x52800001}},                         // pause menu (+0): the same three
+    {"netlabel", 0x221338, 1, {0x320003e1}, {0x52800001}},
+    {"netlabel", 0x221378, 2, {0xf9408908, 0xaa0003e1}, {0xf9402908, 0x52800001}},
     // cheats (d3hack PortCheatCodes / PatchBase)
     {"difficulty", 0x5282b0, 2, {0x93407c48, 0x36000123}, {0x52800020, 0xd65f03c0}},   // PlayerCanPlayHandicap -> 1: every difficulty unlocked
     {"portal", 0x9e3350, 1, {0x1e380018}, {0x52800018}},                               // town portal / Book of Cain cast time: fcvtzs w24 -> 0
@@ -74,8 +88,14 @@ static const site_t k_sites[] = {
     {"resource", 0x47ad7c, 1, {0x97ffff41}, {0xd503201f}},                             // resource spend: bl ResourceAttributeSetFloat -> nop
     {"orbs", 0x844ce4, 1, {0x2a1f03e3}, {0x52807ce3}},                                 // extra greater rift progress orbs on elite kills: 0 -> 999
     {"legendary", 0x4fbae4, 1, {0x540002e0}, {0x14000017}},                            // same legendary already equipped: b.eq -> b (allowed)
+    {"easykill", 0x97f65c, 2, {0x528bf529, 0x72ab0c69}, {0x528f78e9, 0x72abb289}},     // damage against an ACTOR_EASYKILL actor's target (god mode sets the
+                                                                                       //   bit): 1e15 (0x58635fa9) -> 1.33742e18 (0x5d947bc7)   0x97f55c +0x100
+    {"reddmg", 0xbb550, 1, {0xb9404789}, {0x52801fe9}},                                // floating damage numbers: colour = ldr w9,[x28,#0x44] -> red (d3hack's
+                                                                                       //   inline hook at 0xbb5e8 writes red through x3; here the load is
+                                                                                       //   patched, the fading alpha byte the game writes after it stays)   +0
 };
-static const char *const k_patch_cheats[] = {"difficulty", "portal", "cooldowns", "craft", "cube", "gem100", "gemfast", "resource", "orbs", "legendary"};
+static const char *const k_patch_cheats[] = {"difficulty", "portal", "cooldowns", "craft", "cube", "gem100", "gemfast", "resource", "orbs", "legendary",
+                                             "easykill", "reddmg"};
 
 // ---- game functions: hooked (h) or called (c), first 4 words checked (2.7.6 -> 2.7.7 address in the comment)
 enum {
@@ -104,6 +124,9 @@ enum {
     F_SEASON_NUM = 0x72e090,   // c u32 OnlineServiceGetSeasonNum(void)                                                                0x72df90 +0x100
     F_IS_SEASONAL = 0x4c8df0,  // c BOOL GameIsSeasonal(void)                                                                          0x4c8cf0 +0x100
     F_GAMEGLOBALS = 0x7b2990,  // c SGameGlobals *SGameGlobalsGet(void)                                                                0x7b2890 +0x100
+    F_CR_FAILED  = 0x185aa0,   // h void (const char *error): the Challenge Rift screen's error (d3hack sym_print_challenge_rift_failed)   0x185aa0 +0
+    F_ERRMSG     = 0xa2ad70,   // h DisplayErrorMessage(ErrorCode, const char *msg) (d3hack sym_print_error; 0xa2ad60 DisplayInternalError(msg, file,
+                               //   line, code) jumps here)                                                                               0xa2ac70 +0x100
 };
 typedef struct { uint32_t off; uint32_t w[4]; } fn_t;
 static const fn_t k_fns[] = {
@@ -118,15 +141,23 @@ static const fn_t k_fns[] = {
     {F_CR_DATA,   {0xa9ba6ffc, 0xa90167fa, 0xa9025ff8, 0xa90357f6}}, {F_CR_SAVE,  {0xf81c0ff7, 0xa90157f6, 0xa9024ff4, 0xa9037bfd}},
     {F_CR_GRANT,  {0xd10203ff, 0xf90023f7, 0xa90557f6, 0xa9064ff4}}, {F_CR_REWARDS, {0xf81a0ffb, 0xa90167fa, 0xa9025ff8, 0xa90357f6}},
     {F_SEASON_NUM, {0x900050e0, 0xf9463000, 0x140be4f6, 0x00000000}}, {F_IS_SEASONAL, {0xa9bf7bfd, 0x910003fd, 0xd0006408, 0xf9446908}},
-    {F_GAMEGLOBALS, {0xa9bf7bfd, 0x910003fd, 0x90004cc8, 0xf9446908}},
+    {F_GAMEGLOBALS, {0xa9bf7bfd, 0x910003fd, 0x90004cc8, 0xf9446908}}, {F_CR_FAILED, {0xd10103ff, 0xf90013f3, 0xa9037bfd, 0x9100c3fd}},
+    {F_ERRMSG,    {0xf81c0ffc, 0xa90157f6, 0xa9024ff4, 0xa9037bfd}},
 };
 // attribute ids (d3hack attributes.hpp; checked in 2.7.7 against the attribute table the game builds at 0x67b390's callers: id * 0x40)
 enum { A_INVULNERABLE = 0x69, A_APS_TOTAL = 0xc9, A_IMMUNE_KNOCKBACK = 0x12d, A_STUN_IMMUNE = 0x134, A_FREEZE_IMMUNE = 0x13a,
        A_SLOWDOWN_IMMUNE = 0x14b, A_GETHIT_IMMUNE = 0x14c, A_FEAR_IMMUNE = 0x231, A_IMMUNE_CHARM = 0x2c7, A_IMMUNE_BLIND = 0x2c8,
        A_GOD = 0x44d, A_ITEMS_INDESTRUCTIBLE = 0x4c0, A_RECEIVED_SEASONAL_LEGENDARY = 0x519 };
 enum { ACTOR_GOD_MODE_BIT = 0, ACTOR_EASYKILL_BIT = 1, ACTOR_NO_COLLISION_BIT = 4 };
-// struct offsets (d3hack types/common.hpp; LootSpecifier +0x64 / +0x68 / +0xd8 match the reads / writes of 0x88dee0)
-enum { PLAYER_ID_ACD = 0x4, ACD_ID_OWNER = 0x14, LS_DISABLE_ANCIENT = 0x64, LS_DISABLE_PRIMAL = 0x68, LS_ANCIENT_RANK = 0xd8 };
+// struct offsets (d3hack types/common.hpp). LootSpecifier as LootRollForAncientLegendary 0x88dee0 uses it: +0x68 set = return at once (no
+// ancient), +0x64 set = the crafter's fixed chance, +0x6c set = stop after "ancient" (no primal roll), +0xd8 the rank it writes. So the
+// SharedLooteeParams flags sit 4 bytes after d3hack's struct (its commented-out first field nLevel exists: +0x28 is compared with 70 there):
+// d3hack's bDisableAncientDrops (+0x64) is really bForceCrafterAncientLegendaryChance, its bDisablePrimalAncientDrops (+0x68) is
+// bDisableAncientDrops, and bDisablePrimalAncientDrops is +0x6c.
+enum { PLAYER_ID_ACD = 0x4, ACD_ID_OWNER = 0x14, LS_CRAFTER_CHANCE = 0x64, LS_NO_ANCIENT = 0x68, LS_NO_PRIMAL = 0x6c, LS_ANCIENT_RANK = 0xd8 };
+static const struct { uint32_t off, w; } k_loot_words[] = {   // the reads named above
+    {0x88def8, 0xb9406808}, {0x88defc, 0x340000e8}, {0x88df70, 0xb9406668}, {0x88e02c, 0xb900da68}, {0x88e034, 0xb9406e68}, {0x88e038, 0x35fff648},
+};
 
 // ---- XVars (main bss; vtable = *(GOT) + 0x10; name copied to +8 by the registration 0xa26b30; value at +0xb0)
 enum { GOT_VT_BOOL = 0x115a388, GOT_VT_U32 = 0x115a398, F_BOOL_SET = 0xa26fc0, F_U32_SET = 0xa273c0,
@@ -161,6 +192,7 @@ static const buff_t k_buffs[] = {
     {"bloodshards", 0x1900080, "CommunityEventDoubleBloodShards", 0, 1},
     {"anniversary", 0x18ffa70, "AnniversaryEnabled", 0x1154c00, 0},      // d3hack event_ann
     {"eggworld",    0x18ffb28, "EasterEggWorldEnabled", 0x1152cc8, 0},   // d3hack event_egg_xvar (+ the u32 flag V_EGG_FLAG)
+    {"igr",         0x18ff900, "IgrEnabled", 0x1154bf0, 0},              // d3hack event_igr (config IgrEnabled: the Internet Game Room buff)
 };
 enum { NBUFF = sizeof k_buffs / sizeof *k_buffs };
 // the theme each season had (public season history; seasons without a theme buff are not listed)
@@ -178,6 +210,7 @@ static _Atomic int g_state;       // 0 not installed / nothing to do, 1 XVars pe
 static int g_cr;                  // Challenge Rift offline on (the publisher-file hook is in)
 static int g_xv_sb, g_xv_cr;      // XVars checked and ours to set: season / buffs, ChallengeRiftEnabled
 static int g_god, g_dbgflags, g_rank;   // hooks' settings (g_rank: 0 off, 1 ancient, 2 primal)
+static int g_deny;                      // legendary drops: 1 no primal, 2 no ancient (and so no primal)
 static float g_move = 1, g_atk = 1;
 
 static int has_key(const char *list, const char *key) {   // comma separated, case-sensitive keys
@@ -298,15 +331,23 @@ static int32_t h_inslot(uint64_t item, uint64_t loc, int32_t skip, int32_t swapp
     (void)o_inslot(item, loc, skip, swapping);
     return 0;   // GAMEERROR_NONE
 }
-// d3hack hooks/util.hpp ForceAncient (replaces LootRollForAncientLegendary) + AugmentSpecifier. Only the ancient fields are written: d3hack
-// also writes its [loot_modifiers] values into ForcedILevel / TieredLootRunLevel / torment / gift fields, whose "off" values would overwrite
-// what the game set, so they are left alone here.
+// d3hack hooks/util.hpp ForceAncient (replaces LootRollForAncientLegendary) + AugmentSpecifier ([loot_modifiers] AncientRank). Only the
+// ancient fields are written. d3hack also writes ForcedILevel / TieredLootRunLevel / DisableTormentDrops / DisableTormentCheck /
+// SuppressGiftGeneration here; those are not ported: its struct puts them 4 bytes before the real fields (see LS_* above), and at this step
+// the item and its level are already chosen, so no effect of them could be confirmed in the code.
 static void h_ancient(uint64_t spec, int32_t looter) {
-    *(int32_t *)(uintptr_t)(spec + LS_DISABLE_ANCIENT) = 0;   // bDisableAncientDrops
-    *(int32_t *)(uintptr_t)(spec + LS_DISABLE_PRIMAL) = 0;    // bDisablePrimalAncientDrops
+    *(int32_t *)(uintptr_t)(spec + LS_CRAFTER_CHANCE) = 0;    // what d3hack writes as bDisableAncientDrops = 0
+    *(int32_t *)(uintptr_t)(spec + LS_NO_ANCIENT) = 0;        // what d3hack writes as bDisablePrimalAncientDrops = 0
     *(int32_t *)(uintptr_t)(spec + LS_ANCIENT_RANK) = g_rank; // eAncientRank = AncientRankValue (1 ancient, 2 primal)
     uint64_t acd = GFN(p_id_t, F_ACDGET)(looter);
     if (acd) GFN(seti_t, F_ATTRSETI)(acd, A_RECEIVED_SEASONAL_LEGENDARY, 0);   // tKey.nValue = RECEIVED_SEASONAL_LEGENDARY; ACD_AttributesSetInt(.., 0)
+}
+// d3hack [loot_modifiers] DisableAncientDrops / DisablePrimalAncientDrops, at the offsets the game reads (LS_* above): the flag is set and the
+// game's own roll runs (no ancient: it returns at once; no primal: the ancient roll stays, the primal one is skipped)
+static void (*o_ancient)(uint64_t, int32_t);
+static void h_deny(uint64_t spec, int32_t looter) {
+    *(int32_t *)(uintptr_t)(spec + (g_deny == 2 ? LS_NO_ANCIENT : LS_NO_PRIMAL)) = 1;
+    o_ancient(spec, looter);
 }
 // d3hack _lobby.hpp FlagsAreFun
 static void flags_are_fun(void) {
@@ -344,6 +385,35 @@ static void h_initworld(int32_t sno, uint64_t world) {
     if (g_dbgflags) flags_are_fun();
     if (g_god) enable_god();
     static int n; if (n++ < 4) LOG("[d3mods] world %#x set up: %s%s", (unsigned)sno, g_god ? "god mode on " : "", g_dbgflags ? "debug flags on" : "");
+}
+// ---- the game's error messages in our log (d3hack hooks/debug.hpp Print_Error / Print_ChallengeRiftFailed, [debug] EnableErrorTraces)
+static const char *peek_str(uint64_t p, char *buf, size_t n) {   // a guest string that may be a bad pointer: copied through a pipe (EFAULT, no fault)
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static int fd[2] = {-1, -1};
+    if (p < 0x10000) return "(null)";
+    pthread_mutex_lock(&mu);
+    size_t got = 0;
+    if (fd[0] >= 0 || !pipe(fd))
+        while (got < n - 1) {
+            size_t want = 0x1000 - (size_t)((p + got) & 0xfff); if (want > n - 1 - got) want = n - 1 - got;   // one page at a time
+            ssize_t w = write(fd[1], (const void *)(uintptr_t)(p + got), want);
+            if (w <= 0 || read(fd[0], buf + got, (size_t)w) != w) break;
+            if (memchr(buf + got, 0, (size_t)w)) { got += (size_t)w; break; }
+            got += (size_t)w;
+        }
+    pthread_mutex_unlock(&mu);
+    buf[got] = 0;
+    return got ? buf : "(unreadable)";
+}
+static void (*o_errmsg)(uint32_t, uint64_t, uint64_t, uint64_t);
+static void h_errmsg(uint32_t code, uint64_t msg, uint64_t a2, uint64_t a3) {
+    static _Atomic int n; char b[400];
+    if (atomic_fetch_add(&n, 1) < 64) LOG("【红】[d3mods] game error message, code %#x: %s", code, peek_str(msg, b, sizeof b));
+    o_errmsg(code, msg, a2, a3);
+}
+static void (*o_cr_failed)(uint64_t);
+static void h_cr_failed(uint64_t err) {
+    char b[128]; LOG("【红】[d3mods] challenge rift: the game refused it: %s", peek_str(err, b, sizeof b));
+    o_cr_failed(err);
 }
 // ---- Challenge Rift offline (DM_D3_CHALLENGE=1; d3hack [challenge_rifts])
 // How the game gets a Challenge Rift (2.7.7): the menu (0x181700) asks 0x69ab0 -> 0x69990 -> StorageGetPublisherFile(user,
@@ -519,6 +589,7 @@ static void cr_install(void) {
     if (!hook(F_PUBFILE, (void *)h_pubfile, (void **)&o_pubfile, "challenge rift files from the bundled dumps")) return;
     g_cr = 1;
     hook(F_CR_DATA, (void *)h_cr_data, (void **)&o_cr_data, "challenge rift data callback (log)");
+    hook(F_CR_FAILED, (void *)h_cr_failed, (void **)&o_cr_failed, "challenge rift error (log)");
     hook(F_CR_REWARDS, (void *)h_cr_rewards, (void **)&o_cr_rewards, "challenge rift rewards (log)");
     hook(F_CR_SAVE, (void *)h_cr_save, (void **)&o_cr_save, "challenge rift reward save (season tag)");
     hook(F_CR_GRANT, (void *)h_cr_grant, (void **)&o_cr_grant, "challenge rift reward grant (season tag)");
@@ -548,10 +619,16 @@ void dm_d3_mods_install(void) {
     const char *ecr = getenv("DM_D3_CHALLENGE");
     int challenge = ecr && *ecr && strcmp(ecr, "0");
     float move = env_mult("DM_D3_SPEED"), atk = env_mult("DM_D3_ATKSPEED");
-    if (!season && !buffs && !cheats && !challenge && move == 1.0f && atk == 1.0f) { LOG("[d3mods] off (no DM_D3_SEASON / BUFFS / CHEATS / CHALLENGE / SPEED / ATKSPEED)"); return; }
+    const char *el = getenv("DM_D3_ERRLOG");
+    int errlog = el && *el ? strcmp(el, "0") != 0 : -1;   // -1 = with any mod
+    if (!season && !buffs && !cheats && !challenge && move == 1.0f && atk == 1.0f && errlog <= 0) { LOG("[d3mods] off (no DM_D3_SEASON / BUFFS / CHEATS / CHALLENGE / SPEED / ATKSPEED)"); return; }
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) g_m = &g_mod[i];
     if (!g_m) { LOG("【红】[d3mods] no main module: mods off"); return; }
-    if (season && signin() && patch_feature("season", "offline season")) g_season = season;
+    if (season && signin() && patch_feature("season", "offline season")) {
+        g_season = season;
+        patch_feature("mail", "mailbox offline");
+        patch_feature("netlabel", "Diablo Network status label hidden");
+    }
     if (buffs) {
         uint32_t m = 0;
         if (has_key(eb, "auto")) {
@@ -568,7 +645,11 @@ void dm_d3_mods_install(void) {
             if (has_key(ec, k_patch_cheats[i]) || (!strcmp(k_patch_cheats[i], "resource") && has_key(ec, "god"))) patch_feature(k_patch_cheats[i], "cheat");   // d3hack: super god mode implies infinite MP
         if (has_key(ec, "equipany")) hook(F_INSLOT, (void *)h_inslot, (void **)&o_inslot, "equip anything in any slot");
         int rank = has_key(ec, "primal") ? 2 : has_key(ec, "ancient") ? 1 : 0;
-        if (rank && fn_ok(F_ACDGET) && fn_ok(F_ATTRSETI) && hook(F_ANCIENT, (void *)h_ancient, NULL, rank == 2 ? "every legendary primal" : "every legendary ancient")) g_rank = rank;
+        int deny = rank ? 0 : has_key(ec, "noancient") ? 2 : has_key(ec, "noprimal") ? 1 : 0, loot_ok = 1;
+        for (unsigned i = 0; (rank || deny) && i < sizeof k_loot_words / sizeof *k_loot_words; i++)
+            if (*(const uint32_t *)(g_m->base + k_loot_words[i].off) != k_loot_words[i].w) { LOG("【红】[d3mods] legendary drops: main+%#x differs: off", k_loot_words[i].off); loot_ok = 0; break; }
+        if (rank && loot_ok && fn_ok(F_ACDGET) && fn_ok(F_ATTRSETI) && hook(F_ANCIENT, (void *)h_ancient, NULL, rank == 2 ? "every legendary primal" : "every legendary ancient")) g_rank = rank;
+        if (deny && loot_ok && hook(F_ANCIENT, (void *)h_deny, (void **)&o_ancient, deny == 2 ? "no ancient legendaries" : "no primal legendaries")) g_deny = deny;
         int god = has_key(ec, "god"), dbg = has_key(ec, "dbgflags");
         if ((god || dbg) && called_fns_ok()) {
             if (*(const uint64_t *)(g_m->base + GOT_APPGLOBALS) != (uint64_t)(uintptr_t)(g_m->base + O_APPGLOBALS)) LOG("【红】[d3mods] GOT main+%#x does not point at AppGlobals main+%#x: god / debug flags off", GOT_APPGLOBALS, O_APPGLOBALS);
@@ -578,6 +659,7 @@ void dm_d3_mods_install(void) {
     if (move != 1.0f && hook(F_MOVESPEED, (void *)h_movespeed, (void **)&o_movespeed, "movement speed")) { g_move = move; LOG("[d3mods] movement speed x%.2f", move); }
     if (atk != 1.0f && fn_ok(F_ATTRSETF) && hook(F_ATKSPEED, (void *)h_atkspeed, (void **)&o_atkspeed, "attack speed")) { g_atk = atk; LOG("[d3mods] attack speed x%.2f", atk); }
     if (challenge) cr_install();
+    if (errlog) hook(F_ERRMSG, (void *)h_errmsg, (void **)&o_errmsg, "game error messages (log)");
     if (g_season || g_buffs || g_cr) {
         atomic_store(&g_state, 1);
         char b[512] = ""; size_t o = 0;

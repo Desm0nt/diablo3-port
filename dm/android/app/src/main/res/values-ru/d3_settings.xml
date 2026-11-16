@@ -158,12 +158,17 @@
     <string name="d3_buffs_note">Тема каждого сезона — отдельный переключатель в игре, поэтому можно включить несколько вместе. Действуют на всех героев, сезонных и обычных.</string>
     <string name="d3_buff_anniversary">Юбилейное событие (по d3hack: праздничные подарки и т.п.)</string>
     <string name="d3_buff_eggworld">Мир-пасхалка (по d3hack: флаг коровьего уровня)</string>
+    <string name="d3_buff_igr">Бафф IGR (бонус игровых клубов)</string>
     <string name="d3_cheat_god">Режим бога (неуязвимость, иммунитеты, вещи не ломаются, проход сквозь монстров, бесконечный ресурс)</string>
+    <string name="d3_cheat_easykill">Режим бога бьёт сильнее: урон с одного удара 1 337 420 трлн вместо 1 000 трлн (нужен режим бога)</string>
     <string name="d3_cheat_dbgflags">Отладочные флаги d3hack: каждый удар критический / добивающий / сокрушающий, древние всегда выпадают и всегда первозданные, отладочные данные в подсказках предметов</string>
     <string name="d3_cheat_equipany">Надеть что угодно в любую ячейку</string>
+    <string name="d3_cheat_reddmg">Красные всплывающие числа урона</string>
     <string name="d3_loot">Легендарная добыча</string>
     <string name="d3_loot_ancient">Все легендарки древние</string>
     <string name="d3_loot_primal">Все легендарки первозданные</string>
+    <string name="d3_loot_noprimal">Без первозданных легендарок</string>
+    <string name="d3_loot_noancient">Без древних и первозданных легендарок</string>
     <string name="d3_speed">Скорость бега</string>
     <string name="d3_atkspeed">Скорость атаки</string>
 </resources>

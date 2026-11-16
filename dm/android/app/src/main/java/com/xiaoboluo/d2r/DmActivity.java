@@ -1096,22 +1096,22 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // DM_D3_CHALLENGE=1. All apply on the next launch (applyDoomSettings). Groups: Season, Challenge Rift, Season buffs (checkboxes), Cheats.
     static final int D3_SEASON_FIRST = 14, D3_SEASON_LAST = 37;   // the seasons with a known theme (hle_d3_mods.c k_themes)
     static final String[] D3_BUFF_KEYS = {"goblins", "bags", "grandeur", "nightmares", "triune", "pandemonium", "kanai", "tempests", "clones", "cube4",
-        "ethereal", "shards", "swarm", "sanctified", "alchemy", "nesting", "keystones", "bloodshards", "anniversary", "eggworld"};   // hle_d3_mods.c k_buffs keys
+        "ethereal", "shards", "swarm", "sanctified", "alchemy", "nesting", "keystones", "bloodshards", "anniversary", "eggworld", "igr"};   // hle_d3_mods.c k_buffs keys
     static final int[] D3_BUFF_LABELS = {R.string.d3_buff_goblins, R.string.d3_buff_bags, R.string.d3_buff_grandeur, R.string.d3_buff_nightmares,
         R.string.d3_buff_triune, R.string.d3_buff_pandemonium, R.string.d3_buff_kanai, R.string.d3_buff_tempests, R.string.d3_buff_clones,
         R.string.d3_buff_cube4, R.string.d3_buff_ethereal, R.string.d3_buff_shards, R.string.d3_buff_swarm, R.string.d3_buff_sanctified,
         R.string.d3_buff_alchemy, R.string.d3_buff_nesting, R.string.d3_buff_keystones, R.string.d3_buff_bloodshards, R.string.d3_buff_anniversary,
-        R.string.d3_buff_eggworld};
+        R.string.d3_buff_eggworld, R.string.d3_buff_igr};
     // season -> its theme buffs (hle_d3_mods.c k_themes), for "Tick the chosen season's theme"
     static final String[] D3_THEMES = {"14 goblins", "15 bags", "16 grandeur", "17 nightmares", "18 triune", "19 pandemonium", "20 kanai", "21 tempests",
         "22 clones cube4", "24 ethereal", "25 shards", "26 swarm", "27 sanctified", "28 alchemy", "29 nesting", "30 shards", "31 kanai", "32 ethereal",
         "33 clones cube4", "34 sanctified", "35 pandemonium", "36 shards", "37 kanai"};
-    static final String[] D3_CHEAT_KEYS = {"god", "dbgflags", "difficulty", "portal", "cooldowns", "resource", "craft", "cube", "gem100", "gemfast",
-        "orbs", "legendary", "equipany"};   // hle_d3_mods.c k_sites features and hooks
-    static final int[] D3_CHEAT_LABELS = {R.string.d3_cheat_god, R.string.d3_cheat_dbgflags, R.string.d3_cheat_difficulty, R.string.d3_cheat_portal,
+    static final String[] D3_CHEAT_KEYS = {"god", "easykill", "dbgflags", "difficulty", "portal", "cooldowns", "resource", "craft", "cube", "gem100", "gemfast",
+        "orbs", "legendary", "equipany", "reddmg"};   // hle_d3_mods.c k_sites features and hooks
+    static final int[] D3_CHEAT_LABELS = {R.string.d3_cheat_god, R.string.d3_cheat_easykill, R.string.d3_cheat_dbgflags, R.string.d3_cheat_difficulty, R.string.d3_cheat_portal,
         R.string.d3_cheat_cooldowns, R.string.d3_cheat_resource, R.string.d3_cheat_craft, R.string.d3_cheat_cube, R.string.d3_cheat_gem100,
-        R.string.d3_cheat_gemfast, R.string.d3_cheat_orbs, R.string.d3_cheat_legendary, R.string.d3_cheat_equipany};
-    static final String[] D3_LOOT_KEYS = {"", "ancient", "primal"};   // also in d3_cheats (hooks LootRollForAncientLegendary)
+        R.string.d3_cheat_gemfast, R.string.d3_cheat_orbs, R.string.d3_cheat_legendary, R.string.d3_cheat_equipany, R.string.d3_cheat_reddmg};
+    static final String[] D3_LOOT_KEYS = {"", "ancient", "primal", "noprimal", "noancient"};   // also in d3_cheats (hooks LootRollForAncientLegendary)
     static final String[] D3_MULTS = {"1", "1.25", "1.5", "2", "3"};
     private android.widget.Spinner d3Spinner(LinearLayout box, String[] items, int at) {
         android.widget.Spinner sp = new android.widget.Spinner(this);
@@ -1163,8 +1163,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 cheatC[i] = new CheckBox(this); cheatC[i].setText(ui.getString(D3_CHEAT_LABELS[i])); cheatC[i].setChecked(cWas.contains(D3_CHEAT_KEYS[i])); box.addView(cheatC[i]);
             }
             TextView lootT = new TextView(this); lootT.setText(ui.getString(R.string.d3_loot)); lootT.setPadding(0, 16, 0, 0); box.addView(lootT);
-            int lootAt = cWas.contains("primal") ? 2 : cWas.contains("ancient") ? 1 : 0;
-            android.widget.Spinner lootS = d3Spinner(box, new String[] {ui.getString(R.string.d3_off), ui.getString(R.string.d3_loot_ancient), ui.getString(R.string.d3_loot_primal)}, lootAt);
+            int lootAt = 0; for (int i = 1; i < D3_LOOT_KEYS.length; i++) if (lootAt == 0 && cWas.contains(D3_LOOT_KEYS[i])) lootAt = i;
+            android.widget.Spinner lootS = d3Spinner(box, new String[] {ui.getString(R.string.d3_off), ui.getString(R.string.d3_loot_ancient), ui.getString(R.string.d3_loot_primal),
+                ui.getString(R.string.d3_loot_noprimal), ui.getString(R.string.d3_loot_noancient)}, lootAt);
             TextView moveT = new TextView(this); moveT.setText(ui.getString(R.string.d3_speed)); moveT.setPadding(0, 16, 0, 0); box.addView(moveT);
             android.widget.Spinner moveS = d3Spinner(box, multLabels(ui), java.util.Arrays.asList(D3_MULTS).indexOf(p.getString("d3_speed", "1")));
             TextView atkT = new TextView(this); atkT.setText(ui.getString(R.string.d3_atkspeed)); atkT.setPadding(0, 16, 0, 0); box.addView(atkT);

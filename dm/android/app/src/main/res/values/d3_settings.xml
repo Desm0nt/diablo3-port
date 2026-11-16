@@ -160,12 +160,17 @@
     <string name="d3_buffs_note">Each season\'s theme is a separate switch in the game, so several can be on together. They apply to every hero, seasonal or not.</string>
     <string name="d3_buff_anniversary">Anniversary event (d3hack: holiday gifts and the like)</string>
     <string name="d3_buff_eggworld">Easter-egg world (d3hack: the cow level flag)</string>
+    <string name="d3_buff_igr">IGR buff (the Internet Game Room bonus)</string>
     <string name="d3_cheat_god">God mode (invulnerable, immune, items never break, walk through monsters, unlimited resource)</string>
+    <string name="d3_cheat_easykill">God mode hits harder: one-hit damage 1,337,420 T instead of 1,000 T (needs God mode)</string>
     <string name="d3_cheat_dbgflags">d3hack debug flags: every hit a critical / overkill / crushing blow, ancient rolls always succeed and roll primal, item debug info in tooltips</string>
     <string name="d3_cheat_equipany">Equip anything in any slot</string>
+    <string name="d3_cheat_reddmg">Red floating damage numbers</string>
     <string name="d3_loot">Legendary drops</string>
     <string name="d3_loot_ancient">Every legendary ancient</string>
     <string name="d3_loot_primal">Every legendary primal</string>
+    <string name="d3_loot_noprimal">No primal legendaries</string>
+    <string name="d3_loot_noancient">No ancient or primal legendaries</string>
     <string name="d3_speed">Movement speed</string>
     <string name="d3_atkspeed">Attack speed</string>
 </resources>

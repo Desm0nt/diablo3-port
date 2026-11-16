@@ -160,12 +160,17 @@
     <string name="d3_buffs_note">每个赛季的主题在游戏中都是独立的开关，因此可以同时开启多个。它们对所有英雄生效，无论是否为赛季英雄。</string>
     <string name="d3_buff_anniversary">周年活动（d3hack：节日礼物等）</string>
     <string name="d3_buff_eggworld">彩蛋世界（d3hack：奶牛关标志）</string>
+    <string name="d3_buff_igr">IGR 增益（网吧特权加成）</string>
     <string name="d3_cheat_god">无敌模式（不受伤害、免疫控制、物品永不损坏、可穿过怪物、无限资源）</string>
+    <string name="d3_cheat_easykill">无敌模式伤害更高：一击伤害由 1,000 T 提高到 1,337,420 T（需开启无敌模式）</string>
     <string name="d3_cheat_dbgflags">d3hack 调试标志：每次攻击都是暴击 / 过量击杀 / 压碎打击，远古判定必定成功并为太古，物品提示中显示调试信息</string>
     <string name="d3_cheat_equipany">任何物品可装备在任意栏位</string>
+    <string name="d3_cheat_reddmg">红色伤害飘字</string>
     <string name="d3_loot">传奇掉落</string>
     <string name="d3_loot_ancient">所有传奇均为远古</string>
     <string name="d3_loot_primal">所有传奇均为太古</string>
+    <string name="d3_loot_noprimal">不掉落太古传奇</string>
+    <string name="d3_loot_noancient">不掉落远古和太古传奇</string>
     <string name="d3_speed">移动速度</string>
     <string name="d3_atkspeed">攻击速度</string>
 </resources>
