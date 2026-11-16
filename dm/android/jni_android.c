@@ -35,6 +35,7 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>   // [D3] present-thread auto-off: the crashing thread's name (crash_report_hook)
 #include <sys/system_properties.h>
 #include "../host/dm_cpu.h"   // [DOOM] getauxval + dm_cpu_lse() for the boot cpu line
 
@@ -95,6 +96,11 @@ static char g_log_path[1200], g_crash_flag[1200];
 // archive's data checksum once (d3_cpk_crc, DmActivity.cpkVerify) before the game starts. g_frame_seen: nativeFrameStats saw frames.
 static char g_crc_flag[1200];
 static _Atomic int g_frame_seen;
+// [D3] present-thread (PERF-D07) is on by default with an automatic way back: a crash on the present thread itself (thread name
+// "dm-present") or the engine's fatal "Game presentation failed: ... (present thread)" appends one byte to <files>/pt-crashes; at the
+// next start DmActivity counts them and from the second one on starts with DM_GFX_PRESENT_THREAD=0 (log line "present thread: ...").
+// A new APK version starts the count again.
+static char g_ptc_flag[1200];
 static _Atomic int g_pump_busy;
 static char g_crash_note[384];   // the last FATAL line: copied into the crash marker (read in the signal handler, racy by design)
 static long g_log_head = -1, g_log_max = 32l << 20;
@@ -141,6 +147,12 @@ static size_t s_cat(char *o, const char *s) { size_t n = 0; while (s[n]) { o[n] 
 static void crash_report_hook(int phase, int sig, uint64_t addr, uint64_t pc) {
     if (phase == 0) {   // the marker first: <files>/dm-crash.txt "signal=<n> addr=<hex> pc=<hex>\n<last FATAL line>\n"
         if (g_crc_flag[0] && !atomic_load(&g_frame_seen)) { int c = open(g_crc_flag, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600); if (c >= 0) close(c); }
+        if (g_ptc_flag[0]) {   // [D3] present-thread auto-off: is this crash the present thread's?
+            char tn[17] = {0}; prctl(PR_GET_NAME, (unsigned long)tn, 0, 0, 0);
+            int pt = !memcmp(tn, "dm-present", 10);
+            if (!pt) for (size_t i = 0; g_crash_note[i] && !pt; i++) pt = !memcmp(g_crash_note + i, "(present thread)", 16);
+            if (pt) { int c = open(g_ptc_flag, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600); if (c >= 0) { if (write(c, "x", 1) < 0) {} fsync(c); close(c); } }
+        }
         int fd = g_crash_flag[0] ? open(g_crash_flag, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
         if (fd < 0) return;
         char b[640]; size_t n = 0;
@@ -230,6 +242,7 @@ static void log_init(void) {
     snprintf(g_crash_flag, sizeof g_crash_flag, "%s/dm-crash.txt", g_files);
 #ifdef DM_GAME_D3
     snprintf(g_crc_flag, sizeof g_crc_flag, "%s/cpk-crc.next", g_files);
+    snprintf(g_ptc_flag, sizeof g_ptc_flag, "%s/pt-crashes", g_files);
 #endif
     crash_set_report_hook(crash_report_hook);
     int fds[2]; if (pipe(fds)) return;

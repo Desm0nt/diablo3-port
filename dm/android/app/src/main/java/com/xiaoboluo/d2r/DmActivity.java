@@ -509,6 +509,15 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 // The game's dynamic resolution (hle_d3_drs.c, issue #23): on = its own DRS (3D down to 0.7 when the GPU is late), off = always
                 // full resolution; also switched live from the gear (nativeSetD3Drs)
                 Os.setenv("DM_D3_DRS", p.getBoolean("d3_drs", true) ? "auto" : "off", true);
+                // present-thread (PERF-D07: fence / acquire / blit / queue present on the thread dm-present, off the translation thread) is on by
+                // default; from the second crash of the present thread itself (files/pt-crashes, one byte each, jni_android.c crash_report_hook)
+                // it is off again (presents inline as before 0.2.22). A new APK version counts again.
+                { File ptc = new File(getFilesDir(), "pt-crashes"); final int vc = BuildConfig.VERSION_CODE;
+                  if (p.getInt("pt_crash_vc", 0) != vc) { if (ptc.delete()) crumb("present thread: crash count reset for version " + vc); p.edit().putInt("pt_crash_vc", vc).apply(); }
+                  final long n = ptc.length(); final boolean on = n < 2;
+                  Os.setenv("DM_GFX_PRESENT_THREAD", on ? "1" : "0", true);
+                  if (n > 0) crumb("present thread: " + n + " crash(es) of the present thread in this version (files/pt-crashes): "
+                      + (on ? "still on (automatically off from the second)" : "automatically off, presents inline (DM_GFX_PRESENT_THREAD=0)")); }
                 // Camera zoom-out (hle_d3_zoom.c, issue #31): 100..140 %, a wider view of the gameplay camera; also live from the gear (nativeSetD3Zoom)
                 Os.setenv("DM_D3_ZOOM", String.valueOf(Math.max(100, Math.min(140, p.getInt("d3_zoom", 100)))), true);
                 // Widescreen only: loading screens' 16:9 art presented alone, stretched to the screen (hle_d3.c ls_present_crop)
