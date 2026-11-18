@@ -3,6 +3,7 @@
 //   g++ -std=c++17 -Wall -idirafter <ndk>/toolchains/llvm/prebuilt/<host>/sysroot/usr/include -o vendor_policy_test vendor_policy_test.cpp
 #include "../xbg_vendor_policy.h"
 #include <stdio.h>
+#include <initializer_list>
 
 static int failures;
 #define CHECK(expression) do { if(!(expression)){printf("FAIL line %d: %s\n",__LINE__,#expression);++failures;} } while(0)
@@ -109,6 +110,20 @@ int main(){
     p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_MALI,VK_FORMAT_R16G16B16_SNORM,&p);CHECK(p.bufferFeatures==all);
     CHECK(xbg_sim_parse("novertex3")==XBG_SIM_NOVERTEX3);
 
+    // [tile] tile-GPU defaults: on for Mali / PowerVR, off for Adreno and every other family
+    for(XbgGpuFamily f:{XBG_GPU_MALI,XBG_GPU_POWERVR}){CHECK(xbg_tile_family(f));CHECK(xbg_noload_default(f));CHECK(xbg_tile_barrier_default(f));CHECK(xbg_store_none_default(f));CHECK(xbg_store_dead_default(f));CHECK(xbg_lazy_tile_default(f));}
+    for(XbgGpuFamily f:{XBG_GPU_ADRENO,XBG_GPU_XCLIPSE,XBG_GPU_MALEOON,XBG_GPU_OTHER}){CHECK(!xbg_tile_family(f));CHECK(!xbg_noload_default(f));CHECK(!xbg_tile_barrier_default(f));CHECK(!xbg_store_none_default(f));CHECK(!xbg_store_dead_default(f));CHECK(!xbg_lazy_tile_default(f));}
+    {   // store-op twins: colour 0, colour 1, depth/stencil last
+        VkAttachmentDescription d[3]{};for(auto &x:d){x.storeOp=VK_ATTACHMENT_STORE_OP_STORE;x.stencilStoreOp=VK_ATTACHMENT_STORE_OP_STORE;}
+        CHECK(!xbg_store_twin(d,3,0,0,VK_ATTACHMENT_STORE_OP_NONE,true));
+        CHECK(xbg_store_twin(d,3,(1u<<4)|(2u<<4),1u<<2,VK_ATTACHMENT_STORE_OP_NONE,true));
+        CHECK(d[0].storeOp==VK_ATTACHMENT_STORE_OP_STORE);CHECK(d[1].storeOp==VK_ATTACHMENT_STORE_OP_DONT_CARE);
+        CHECK(d[2].storeOp==VK_ATTACHMENT_STORE_OP_NONE);CHECK(d[2].stencilStoreOp==VK_ATTACHMENT_STORE_OP_NONE);
+        CHECK(d[1].stencilStoreOp==VK_ATTACHMENT_STORE_OP_STORE);   // a colour attachment's stencil op is never touched
+        VkAttachmentDescription e[1]{};e[0].storeOp=e[0].stencilStoreOp=VK_ATTACHMENT_STORE_OP_STORE;
+        CHECK(xbg_store_twin(e,1,3u,2u,VK_ATTACHMENT_STORE_OP_NONE,true));   // dead wins over none
+        CHECK(e[0].storeOp==VK_ATTACHMENT_STORE_OP_NONE);CHECK(e[0].stencilStoreOp==VK_ATTACHMENT_STORE_OP_DONT_CARE);
+    }
     if(failures){printf("%d failure(s)\n",failures);return 1;}
     printf("vendor_policy_test: all checks passed\n");return 0;
 }

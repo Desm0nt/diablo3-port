@@ -128,6 +128,47 @@ inline bool xbg_ubo_dynamic_default(XbgGpuFamily f){return f!=XBG_GPU_POWERVR;}
 // but Adreno (whose pipelines stay as they were). DM_GFX_NOOUT_MASK.
 inline bool xbg_noout_mask_default(XbgGpuFamily f){return f!=XBG_GPU_ADRENO;}
 
+// [nonadreno][tile] Tile-based GPUs (Mali, PowerVR) read every LOAD attachment into the tile memory and write every STORE one back
+// at each render pass instance (Arm GPU Best Practices 101897 section 7.3; from the DOOM 2016 port). D3 draws ~45 passes a frame at
+// 1600x900. On Adreno with TU_DEBUG=sysmem none of this costs anything, so every default below is "off" on vendor 0x5143: Adreno
+// records the same commands as before.
+inline bool xbg_tile_family(XbgGpuFamily f){return f==XBG_GPU_MALI || f==XBG_GPU_POWERVR;}
+// DM_GFX_NOLOAD: a pass whose first draw provably overwrites every colour pixel (first_draw_covers) begins with colour loadOp
+// DONT_CARE instead of LOAD (the full-screen post-process passes).
+inline bool xbg_noload_default(XbgGpuFamily f){return xbg_tile_family(f);}
+// DM_GFX_TILE_BARRIER: dependencies between passes wait in the fragment stages only (Arm 101897 section 3.9: ALL_COMMANDS ->
+// ALL_COMMANDS drains the pipeline), so the vertex / tiling work of the next pass overlaps the fragment work of the previous one.
+// Image reads from pre-fragment stages keep the full barrier.
+inline bool xbg_tile_barrier_default(XbgGpuFamily f){return xbg_tile_family(f);}
+// DM_GFX_STORE_NONE: an attachment aspect that no draw or clear of the render pass instance writes ends it with STORE_OP_NONE
+// (VK_EXT/KHR_load_store_op_none): no write-back of a read-only depth / stencil (depth-tested transparents, decals, particles).
+inline bool xbg_store_none_default(XbgGpuFamily f){return xbg_tile_family(f);}
+// DM_GFX_STORE_DEAD: STORE_OP_DONT_CARE for an aspect whose contents the guest command stream provably overwrites (a full clear)
+// before anything can read them (store_scan).
+inline bool xbg_store_dead_default(XbgGpuFamily f){return xbg_tile_family(f);}
+// DM_GFX_LAZY_TWIN_FLUSH / DM_GFX_LAZY_KEEP (D3; with DM_GFX_LAZY_CLEAR): a pass that holds only full clears is recorded through its
+// load-op twin (loadOp CLEAR instead of LOAD + vkCmdClearAttachments), and a read barrier for another image does not end a pending
+// clear pass, so the draw that follows shares its pass. Exact on every GPU; on by default where a LOAD costs (tile-based GPUs).
+inline bool xbg_lazy_tile_default(XbgGpuFamily f){return xbg_tile_family(f);}
+// Store-op twins (DM_GFX_STORE_NONE / DM_GFX_STORE_DEAD): attachment k's bit 2k is its colour or depth aspect, bit 2k+1 its stencil.
+// none: aspects no draw / clear of the instance writes -> none_op (STORE_OP_NONE; DONT_CARE only with DM_GFX_STORE_NONE=2);
+// dead: aspects whose contents are provably overwritten before any read -> DONT_CARE (wins over none). Only store ops change, so
+// the twin is compatible with the base pass, its framebuffers and pipelines. Returns whether anything changed.
+inline bool xbg_store_twin(VkAttachmentDescription *d,uint32_t n,uint32_t none,uint32_t dead,VkAttachmentStoreOp none_op,bool depth_last){
+    bool any=false;
+    for(uint32_t k=0;k<n && k<16;k++){
+        const bool ds=depth_last && k+1==n;
+        const uint32_t a=1u<<(2*k),s=2u<<(2*k);
+        if(dead&a){d[k].storeOp=VK_ATTACHMENT_STORE_OP_DONT_CARE;any=true;}
+        else if(none&a){d[k].storeOp=none_op;any=true;}
+        if(ds){
+            if(dead&s){d[k].stencilStoreOp=VK_ATTACHMENT_STORE_OP_DONT_CARE;any=true;}
+            else if(none&s){d[k].stencilStoreOp=none_op;any=true;}
+        }
+    }
+    return any;
+}
+
 inline bool xbg_sim_format_in(VkFormat f,VkFormat lo,VkFormat hi){return int(f)>=int(lo) && int(f)<=int(hi);}
 // Narrow the format features the driver reported to what the simulated device reports.
 inline void xbg_sim_format_features(uint32_t sim,VkFormat f,VkFormatProperties *p){
