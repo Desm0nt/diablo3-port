@@ -1535,11 +1535,14 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             if (resumed) immersiveBars();
         });
         dialog.setOnShowListener(d -> {
+            // Latin keyboards (Gboard, SwiftKey, ...) keep the word under the cursor as a composing span for as long as the cursor stays at
+            // its end, even with NO_SUGGESTIONS, so "composing" used to block OK with "finish choosing characters" until the player moved the
+            // cursor (TL2 issue #15, TL2 3ee6ad2). Composing no longer disables OK: the rule check runs on the visible text, and OK ends the
+            // composition itself (below) before it reads the text.
             Runnable check = () -> {
-                boolean composing = BaseInputConnection.getComposingSpanStart(input.getText()) >= 0;
                 int error = nameRule ? TextInputRules.nameError(input.getText().toString()) : 0;
-                input.setError(composing ? getString(R.string.dmNamePickIme) : error == 1 ? getString(R.string.dmNameTooShort) : error == 2 ? getString(R.string.dmNameEdge) : null);
-                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(!composing && error == 0);
+                input.setError(error == 1 ? getString(R.string.dmNameTooShort) : error == 2 ? getString(R.string.dmNameEdge) : null);
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(error == 0);
             };
             Runnable settle = () -> {
                 Editable text = input.getText();
@@ -1578,6 +1581,15 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 public void afterTextChanged(Editable text) { settle.run(); }
             });
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                Editable text = input.getText();
+                if (BaseInputConnection.getComposingSpanStart(text) >= 0) {   // OK ends a running composition: keep the text, drop the span
+                    BaseInputConnection.removeComposingSpans(text);
+                    android.view.inputmethod.InputMethodManager imm = (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                    if (imm != null) imm.restartInput(input);
+                    String normalized = TextInputRules.normalize(text.toString(), maxChars, nameRule, numericMax);
+                    if (!normalized.contentEquals(text)) { input.setText(normalized); input.setSelection(input.length()); }
+                    if (nameRule && TextInputRules.nameError(input.getText().toString()) != 0) { check.run(); return; }
+                }
                 finished[0] = true;
                 nativeTextResult(id, true, input.getText().toString());
                 dialog.dismiss();
