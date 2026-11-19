@@ -6259,6 +6259,7 @@ Pass p;create_pass(p,c);
 // after all earlier work, so reusing the buffers needs no per-slot copies. One descriptor set, pipelines per (format, options)
 // through specialization constants. Created at the first decoded texture; on failure the CPU decoder is used.
 namespace bcgpu {
+VkCommandPool kat_pool{};VkFence kat_fence{};VkCommandBuffer kat_cb{};   // [nonadreno] DM_GFX_BC_SELFTEST (one command buffer, reset per test)
 bool tried=false,ok=false;VkBuffer in_buf{},out_buf{};VkDeviceMemory in_mem{},out_mem{};size_t in_bytes=0,out_bytes=0;
 VkDescriptorSetLayout set_layout{};VkPipelineLayout layout{};VkDescriptorPool pool{};VkDescriptorSet set{};VkShaderModule module{};
 std::map<uint32_t,VkPipeline> pipelines;
@@ -6269,6 +6270,7 @@ void shutdown(){
     if(module)vkDestroyShaderModule(cfg.device,module,nullptr);if(pool)vkDestroyDescriptorPool(cfg.device,pool,nullptr);
     if(layout)vkDestroyPipelineLayout(cfg.device,layout,nullptr);if(set_layout)vkDestroyDescriptorSetLayout(cfg.device,set_layout,nullptr);
     for(VkBuffer b:{in_buf,out_buf})if(b)vkDestroyBuffer(cfg.device,b,nullptr);for(VkDeviceMemory m:{in_mem,out_mem})if(m)vkFreeMemory(cfg.device,m,nullptr);
+    if(kat_pool)vkDestroyCommandPool(cfg.device,kat_pool,nullptr);if(kat_fence)vkDestroyFence(cfg.device,kat_fence,nullptr);kat_pool={};kat_fence={};kat_cb={};
     in_buf=out_buf={};in_mem=out_mem={};module={};pool={};layout={};set_layout={};set={};in_bytes=out_bytes=0;tried=ok=false;
 }
 bool make_buffer(size_t n,VkBuffer &b,VkDeviceMemory &m){
@@ -6296,28 +6298,97 @@ bool prepare(){
     VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};mi.codeSize=sizeof(xbg_bc_decode_cs);mi.pCode=xbg_bc_decode_cs;VK(vkCreateShaderModule(cfg.device,&mi,nullptr,&module));
     ok=true;xbg_logf("NVN BC decode: GPU decoder ready (scratch in=%.1fMB out=%.1fMB, SPIR-V %zu bytes)",i/1048576.0,o/1048576.0,sizeof(xbg_bc_decode_cs));return true;
 }
+// [nonadreno] DM_GFX_BC_SELFTEST (DOOM 2016 06.11, BUGS_AND_FIXES §2.24, docs/port-kb TEX-02): every new decode pipeline first decodes the
+// known-answer blocks of xbg_bc_gpu.h (xbg_bc_kat_blocks: the 20 BC6H mode-1 blocks a driver got wrong, every BC6H / BC7 mode; 2048
+// blocks, one region) on this device, in its own command buffer submitted and waited for at once, and compares them with the CPU
+// decoder. A GPU / driver that decodes any block differently does not get the pipeline: =1 (default) the format is decoded on the CPU
+// from then on (BcUpload's "no GPU pipeline" path, the same bytes), =2 the mismatch is only logged and the GPU decode kept (A/B), =0 no
+// test. Runs once per (format, options), at the first texture of that format, under the engine lock (every queue submission of this
+// engine and the present take it), ordered behind every earlier submission by the queue. Only GPUs without BC decode at all (Mali,
+// PowerVR, DM_GFX_SIM_GPU=nobc). Log: NVN BC decode: self-test fmt=... bad=... modes=... -> gpu|cpu.
+int selftest_flag=-1;
+int selftest_mode(){if(selftest_flag<0){const char *e=getenv("DM_GFX_BC_SELFTEST");selftest_flag=e?std::clamp(atoi(e),0,2):1;}return selftest_flag;}
+bool selftest(VkPipeline pipe,uint32_t fmt,uint32_t opt){
+    if(!selftest_mode())return true;
+    xbg_bc_format info;if(xbg_bc_format_info(fmt,&info))return true;
+    const uint32_t bpp=info.bytes_per_pixel,bb=info.bytes_per_block,bx=64,by=32,n=bx*by;
+    std::vector<uint8_t> raw;xbg_bc_kat_blocks(fmt,bb,n,raw);
+    XbgBcGpuBatch batch;batch.add(raw.data(),bx,by,1,bb,bpp);
+    const size_t in_b=batch.input_bytes(),out_b=batch.out;if(in_b>in_bytes || out_b>out_bytes)return true;
+    if(!kat_pool){VkCommandPoolCreateInfo cp{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};cp.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT|VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;cp.queueFamilyIndex=cfg.queue_family;
+        VkFenceCreateInfo fc{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if(vkCreateCommandPool(cfg.device,&cp,nullptr,&kat_pool)!=VK_SUCCESS || vkCreateFence(cfg.device,&fc,nullptr,&kat_fence)!=VK_SUCCESS){xbg_logf("NVN BC decode: self-test pool/fence failed, skipped");return true;}}
+    Arena arena;Buffer st=arena.alloc(in_b),rb=arena.alloc(out_b);batch.write_input(st.mapped);st.flush();
+    if(!kat_cb){VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};ca.commandPool=kat_pool;ca.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ca.commandBufferCount=1;
+        if(vkAllocateCommandBuffers(cfg.device,&ca,&kat_cb)!=VK_SUCCESS){kat_cb={};arena.release();return true;}}
+    VkCommandBuffer cb=kat_cb;vkResetCommandBuffer(cb,0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};bi.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;vkBeginCommandBuffer(cb,&bi);
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};mb.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;mb.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
+    auto full=[&]{vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&mb,0,nullptr,0,nullptr);};
+    full();VkBufferCopy c{st.offset,0,in_b};vkCmdCopyBuffer(cb,st.buffer,in_buf,1,&c);full();
+    const uint32_t push[4]={uint32_t(batch.regions()),batch.blocks,bpp,bb/4};
+    vkCmdBindPipeline(cb,VK_PIPELINE_BIND_POINT_COMPUTE,pipe);vkCmdBindDescriptorSets(cb,VK_PIPELINE_BIND_POINT_COMPUTE,layout,0,1,&set,0,nullptr);
+    vkCmdPushConstants(cb,layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),push);vkCmdDispatch(cb,(batch.blocks+63)/64,1,1);
+    full();c={0,rb.offset,out_b};vkCmdCopyBuffer(cb,out_buf,rb.buffer,1,&c);
+    VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};hb.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;hb.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&hb,0,nullptr,0,nullptr);vkEndCommandBuffer(cb);
+    vkResetFences(cfg.device,1,&kat_fence);VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};si.commandBufferCount=1;si.pCommandBuffers=&cb;
+    VkResult r=ptq::submit(cfg.queue,1,&si,kat_fence);   // [present-thread] under the presenter's queue lock
+    if(r==VK_SUCCESS)r=vkWaitForFences(cfg.device,1,&kat_fence,VK_TRUE,5000000000ull);   // dm_wait_for_fences: retries Mali's INIT_FAILED
+    bool good=true;unsigned bad=0;uint32_t modes=0;char first[200]="";
+    if(r!=VK_SUCCESS){xbg_logf("NVN BC decode: self-test fmt=%#x opt=%u not run (VkResult %d)",fmt,opt,int(r));}
+    else{rb.invalidate();const uint8_t *o=static_cast<const uint8_t*>(rb.mapped);const bool snorm=fmt==0x4a || fmt==0x4c;
+        for(uint32_t i=0;i<n;i++){
+            uint8_t cpu[128];const uint8_t *blk=raw.data()+size_t(i)*bb;if(xbg_decode_block(fmt,blk,bb,cpu,sizeof cpu))continue;
+            bool ok=true;int bad_row=-1;
+            for(uint32_t row=0;row<4 && ok;row++){const uint8_t *g=o+((size_t(i/bx)*4+row)*bx*4+size_t(i%bx)*4)*bpp,*e=cpu+row*4*bpp;
+                if(!memcmp(g,e,4*bpp))continue;
+                if(snorm){bool close=true;for(uint32_t k=0;k+1<4*bpp;k+=2){int16_t a,b2;memcpy(&a,g+k,2);memcpy(&b2,e+k,2);if(abs(int(a)-int(b2))>1)close=false;}if(close)continue;}
+                ok=false;bad_row=int(row);
+                if(!bad){int m=-1;if(fmt==0x4d || fmt==0x4e){m=8;for(int k=0;k<8;k++)if(blk[0]>>k&1){m=k;break;}}else if(fmt==0x4f || fmt==0x50)m=(blk[0]&2)?(blk[0]&31):(blk[0]&3);
+                    char rh[40],eh[40],gh[40];for(uint32_t k=0;k<bb;k++)snprintf(rh+2*k,3,"%02x",blk[k]);for(uint32_t k=0;k<std::min<uint32_t>(16,4*bpp);k++){snprintf(eh+2*k,3,"%02x",e[k]);snprintf(gh+2*k,3,"%02x",g[k]);}
+                    snprintf(first,sizeof first," first: block %u mode %d row %d raw=%s cpu=%s gpu=%s",i,m,bad_row,rh,eh,gh);}}
+            if(!ok){++bad;int m=0;if(fmt==0x4d || fmt==0x4e){m=8;for(int k=0;k<8;k++)if(blk[0]>>k&1){m=k;break;}}else if(fmt==0x4f || fmt==0x50)m=(blk[0]&2)?(blk[0]&31):(blk[0]&3);modes|=1u<<(m&31);}
+        }
+        good=bad==0;}
+    arena.release();
+    xbg_logf("NVN BC decode: self-test fmt=%#x opt=%u blocks=%u bad=%u modes=%#x%s -> %s",fmt,opt,n,bad,modes,first,good?"gpu":selftest_mode()==2?"gpu (DM_GFX_BC_SELFTEST=2 keeps it)":"cpu (this format is decoded on the CPU)");
+    return good;
+}
 VkPipeline pipeline(uint32_t fmt,uint32_t opt){
     if(!tried)prepare();if(!ok)return VK_NULL_HANDLE;
     const uint32_t key=fmt|opt<<8;auto it=pipelines.find(key);if(it!=pipelines.end())return it->second;
     const uint32_t spec[2]={fmt,opt};const VkSpecializationMapEntry map[2]={{0,0,4},{1,4,4}};VkSpecializationInfo si{2,map,sizeof(spec),spec};
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};ci.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};ci.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;ci.stage.module=module;ci.stage.pName="main";ci.stage.pSpecializationInfo=&si;ci.layout=layout;
     VkPipeline p{};const uint64_t t0=timing_clock();VkResult r;{gpguard::Lock serial;r=vkCreateComputePipelines(cfg.device,pipeline_cache,1,&ci,nullptr,&p);}
-    if(r!=VK_SUCCESS)p={};pipelines[key]=p;
-    xbg_logf("NVN BC decode: pipeline fmt=%#x opt=%u result=%d ms=%.1f",fmt,opt,int(r),(timing_clock()-t0)/1e6);return p;
+    if(r!=VK_SUCCESS)p={};
+    xbg_logf("NVN BC decode: pipeline fmt=%#x opt=%u result=%d ms=%.1f",fmt,opt,int(r),(timing_clock()-t0)/1e6);
+    if(p && !selftest(p,fmt,opt) && selftest_mode()==1){vkDestroyPipeline(cfg.device,p,nullptr);p={};}   // BcUpload then decodes this format on the CPU
+    pipelines[key]=p;return p;
+}
+// [nonadreno] DM_GFX_BC_BARRIER (DOOM 2016 06.11): the barriers between the steps of a batch. full (default): each step waits behind an
+// ALL_COMMANDS -> ALL_COMMANDS memory barrier (every earlier write made available and visible to every later access), the most
+// conservative form, so a driver that maps the narrow stage / access pairs to too few cache flushes or waits cannot hand a step stale
+// scratch bytes; the steps depend on each other anyway, so it costs nothing measurable. narrow: the former pairs (previous batch ->
+// copy in, copy -> compute, compute -> copy out), the A/B for the Mali-simulation black patches (DOOM 2016 BUGS_AND_FIXES §2.24).
+int barrier_mode=-1;
+bool barriers_full(){if(barrier_mode<0){const char *e=getenv("DM_GFX_BC_BARRIER");barrier_mode=e && !strcmp(e,"narrow")?0:1;xbg_logf("NVN BC decode: barriers=%s (DM_GFX_BC_BARRIER)",barrier_mode?"full":"narrow");}return barrier_mode!=0;}
+void step_barrier(VkCommandBuffer cmd,bool full,VkPipelineStageFlags src,VkPipelineStageFlags dst,VkAccessFlags src_access,VkAccessFlags dst_access){
+    VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    if(full){src=dst=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;src_access=VK_ACCESS_MEMORY_WRITE_BIT;dst_access=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;}
+    b.srcAccessMask=src_access;b.dstAccessMask=dst_access;vkCmdPipelineBarrier(cmd,src,dst,0,1,&b,0,nullptr,0,nullptr);
 }
 // Copy the batch's input into the scratch, decode, copy the pixels into the image (in TRANSFER_DST_OPTIMAL).
 void record(VkCommandBuffer cmd,const BcJob &j){
-    VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    b.srcAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;b.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT|VK_ACCESS_SHADER_WRITE_BIT;   // the previous batch read both buffers
-    vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&b,0,nullptr,0,nullptr);
+    const bool full=barriers_full();
+    step_barrier(cmd,full,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT,VK_ACCESS_TRANSFER_WRITE_BIT|VK_ACCESS_SHADER_WRITE_BIT);   // the previous batch read both buffers
     VkBufferCopy region{j.offset,0,j.size};vkCmdCopyBuffer(cmd,j.buffer,in_buf,1,&region);
-    b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&b,0,nullptr,0,nullptr);
+    step_barrier(cmd,full,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT);
     const uint32_t push[4]={j.regions,j.blocks,j.bpp,j.block_words};
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,j.pipeline);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,layout,0,1,&set,0,nullptr);
     vkCmdPushConstants(cmd,layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),push);vkCmdDispatch(cmd,(j.blocks+63)/64,1,1);
-    b.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&b,0,nullptr,0,nullptr);
+    step_barrier(cmd,full,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_TRANSFER_READ_BIT);
     vkCmdCopyBufferToImage(cmd,out_buf,j.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,uint32_t(j.copies.size()),j.copies.data());
 }
 }
