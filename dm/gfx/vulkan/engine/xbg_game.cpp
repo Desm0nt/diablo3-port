@@ -3511,7 +3511,8 @@ const std::array<Shader*,6> &program_shaders(const prog_t *prog){
 } // namespace
 
 extern "C" void xbg_logf(const char *fmt,...){CPU_SCOPE(Log);char text[1024];va_list a;va_start(a,fmt);vsnprintf(text,sizeof(text),fmt,a);va_end(a);if(cfg.log)cfg.log(cfg.userdata,text);else fprintf(stderr,"[xbg] %s\n",text);}
-extern "C" __attribute__((noreturn)) void xbg_fatalf(const char *fmt,...){va_list a;va_start(a,fmt);vsnprintf(error_text,sizeof(error_text),fmt,a);va_end(a);failed=true;xbg_logf("FATAL: %s",error_text);crumbs::report("fatal");if(cfg.fatal)cfg.fatal(cfg.userdata,error_text);abort();}
+#include "xbg_device_fault.h"   // [device-fault] FN-64: the driver's report of a lost device (port-common device-fault)
+extern "C" __attribute__((noreturn)) void xbg_fatalf(const char *fmt,...){va_list a;va_start(a,fmt);vsnprintf(error_text,sizeof(error_text),fmt,a);va_end(a);failed=true;xbg_logf("FATAL: %s",error_text);if(xbg_device_fault_text(error_text))xbg_device_fault_report(cfg.device,xbg_logf,"fatal");crumbs::report("fatal");if(cfg.fatal)cfg.fatal(cfg.userdata,error_text);abort();}
 extern "C" int xbg_backend_failed(){return failed;}
 extern "C" const char *xbg_game_last_error(){return error_text;}
 extern "C" int xbg_device_integer(int p,int *out){

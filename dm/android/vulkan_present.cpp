@@ -10,6 +10,7 @@ extern "C" void dm_aperf_present(ANativeWindow*,float);
 #endif
 #include "../gfx/vulkan/nvn_vk.h"
 #include "../gfx/xtrace.h"
+#include "../gfx/vulkan/engine/xbg_device_fault.h"   // [device-fault] FN-64 (port-common device-fault)
 #include "../host/cpu_topo.h"   // [cpu-place] the translator's pin comes from the placement plan unless a marker sets it
 #include <android/log.h>
 #include <android/native_window.h>
@@ -895,6 +896,8 @@ extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t byte
       if(cbc.customBorderColors && cbc.customBorderColorWithoutFormat){dext.push_back(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);cbc.pNext=draw.pNext;draw.pNext=&cbc;dm_vk_custom_border=1;}}
      __android_log_print(ANDROID_LOG_INFO,"dm-vulkan","Custom border colour ext=%d colors=%u withoutFormat=%u -> %s",int(has),unsigned(cbc.customBorderColors),unsigned(cbc.customBorderColorWithoutFormat),dm_vk_custom_border?"enabled":"off (nearest canonical colour)");}
 #endif
+    xbg_device_fault_enable(physical,available,dext,&draw.pNext);__android_log_print(ANDROID_LOG_INFO,"dm-vulkan","NVN device fault: %s",dm_vk_device_fault_why);   // [device-fault] FN-64: VK_EXT_device_fault when the driver has it (DM_GFX_DEVICE_FAULT=0: off)
+    pc_note("device-fault",dm_vk_device_fault,"%s; FN-64",dm_vk_device_fault_why);   // [pc]
     float priority=1;VkDeviceQueueCreateInfo qc{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};qc.queueFamilyIndex=family;qc.queueCount=1;qc.pQueuePriorities=&priority;VkDeviceCreateInfo dc{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};dc.pNext=&draw;dc.pEnabledFeatures=&features.features;dc.queueCreateInfoCount=1;dc.pQueueCreateInfos=&qc;dc.enabledExtensionCount=uint32_t(dext.size());dc.ppEnabledExtensionNames=dext.data();if((r=vkCreateDevice(physical,&dc,nullptr,&device)))return fail("vkCreateDevice",r);vkGetDeviceQueue(device,family,0,&queue);
     for(;;){
         wait_window();
