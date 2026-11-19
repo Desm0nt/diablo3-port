@@ -11,6 +11,8 @@
 #include "xbg_game_internal.h"
 #include "xbg_cpu_timing.h"
 #include "xbg_completion_wait.h"
+#define XBG_CB_BARRIER_REPORT 1   // [pc] pvr-cb-barrier: its decision goes to boot.log through pc_note
+#include "xbg_cb_barrier.h"   // [pvr-cb-barrier] FN-63: optional full barrier at the start of every primary command buffer (port-common)
 #ifdef DM_COMPLETION_WAIT_SELFTEST
 extern "C" int xbg_completion_wait_selftest(char *report,size_t bytes);
 #endif
@@ -1108,7 +1110,7 @@ Slot &recording_slot(){
         s.readback.cached=readback_cached;
         if(!s.fence){VkFenceCreateInfo f{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};VK(vkCreateFence(cfg.device,&f,nullptr,&s.fence));}
         if(!s.timestamps && timestamp_bits){VkQueryPoolCreateInfo q{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};q.queryType=VK_QUERY_TYPE_TIMESTAMP;q.queryCount=2;VK(vkCreateQueryPool(cfg.device,&q,nullptr,&s.timestamps));}
-        bind_cache_reset();if(s.pool){if(s.reset_queued){poolreset::finish(s);s.reset_queued=false;if(s.reset_result==VK_TIMEOUT)xbg_fatalf("The GPU did not finish this slot's work within %llu ms (fence wait timed out), so the device is hung",(unsigned long long)(std::max<uint64_t>(cfg.fence_timeout_ns,10000000000ull)/1000000ull));else VK(s.reset_result);}else VK(vkResetCommandPool(cfg.device,s.pool,0));}else{VK(vkResetCommandBuffer(s.cmd,0));if(s.pro)VK(vkResetCommandBuffer(s.pro,0));}VkCommandBufferBeginInfo b{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};b.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;VK(vkBeginCommandBuffer(s.cmd,&b));
+        bind_cache_reset();if(s.pool){if(s.reset_queued){poolreset::finish(s);s.reset_queued=false;if(s.reset_result==VK_TIMEOUT)xbg_fatalf("The GPU did not finish this slot's work within %llu ms (fence wait timed out), so the device is hung",(unsigned long long)(std::max<uint64_t>(cfg.fence_timeout_ns,10000000000ull)/1000000ull));else VK(s.reset_result);}else VK(vkResetCommandPool(cfg.device,s.pool,0));}else{VK(vkResetCommandBuffer(s.cmd,0));if(s.pro)VK(vkResetCommandBuffer(s.pro,0));}VkCommandBufferBeginInfo b{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};b.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;VK(xbg_cb_begin(s.cmd,&b,properties.vendorID));
         if(s.timestamps){vkCmdResetQueryPool(s.cmd,s.timestamps,0,2);vkCmdWriteTimestamp(s.cmd,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,s.timestamps,0);}
         s.recording=true;s.ops=0;if(mid_chunk_ns)slot_rec_begin=timing_clock();
         const uint64_t frame=stats.presents.load()+1;
@@ -1150,7 +1152,7 @@ void submit_slots(bool wait){
         VkCommandBuffer cbs[2]{s.cmd,VK_NULL_HANDLE};uint32_t ncb=1;
         if(!s.pro_ops.empty() || !s.pro_images.empty()){
             if(!s.pro){VkCommandBufferAllocateInfo pa{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};pa.commandPool=s.pool?s.pool:command_pool;pa.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;pa.commandBufferCount=1;VK(vkAllocateCommandBuffers(cfg.device,&pa,&s.pro));}
-            VkCommandBufferBeginInfo pb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};pb.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;VK(vkBeginCommandBuffer(s.pro,&pb));
+            VkCommandBufferBeginInfo pb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};pb.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;VK(xbg_cb_begin(s.pro,&pb,properties.vendorID));
             // Earlier submissions first (the other slot still reads these ranges), then the copies, then this submission.
             VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};before.srcAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;before.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
             vkCmdPipelineBarrier(s.pro,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&before,0,nullptr,0,nullptr);
