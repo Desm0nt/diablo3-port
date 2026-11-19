@@ -640,3 +640,48 @@ stack, first 0x…; HLE-06)` при первом таком выходе. Вме
   wait_ms≤0.3 …`; ждём `present_cpu_ms` ниже на 0,8–2 мс, `submit_cpu_ms` тот же; нет `Game presentation failed`. Пройти: домой и назад,
   блокировка, поворот, загрузка, ⚙ «Апскейл» на лету, иконки на кнопках HUD (`[d3icons] cropped …`), выход в меню и из игры. `=2`: fps
   как при 0.
+
+## Общие модули port-common, пакет 12: device-fault (APP-16), pvr-cb-barrier (PVR-11), TEX-02, bc-astc-gpu (TEX-18) — 19.11.2026 (`main`)
+
+Все четыре — для GPU без BC и для диагностики; на Adreno путь рисования не меняется (там BC нативный, `DM_GFX_NATIVE_BC=1`, `bc_store`
+отдаёт `BC_NATIVE`, до `bcgpu` / `bcastc` дело не доходит). На телефоне ещё не запускались.
+
+- **`device-fault` (FN-64, `ad2a095`, sync_common, 4 правки).** `VK_EXT_device_fault` включается на любом устройстве, где драйвер его даёт
+  с фичей `deviceFault` (`DM_GFX_DEVICE_FAULT=0` — выкл.). При потере устройства / сбое fence / зависании GPU `xbg_fatalf` один раз пишет отчёт
+  драйвера: тип ошибки, адрес GPU с точностью, коды вендора. Строки: `NVN device fault: enabled (...)` или причина (на стоковом драйвере
+  Qualcomm обычно `driver has no VK_EXT_device_fault`), `[pc] device-fault: applied|skipped (...; FN-64)`.
+- **`pvr-cb-barrier` (FN-63, `a356a30`, sync_common).** Полный барьер (ALL_COMMANDS → ALL_COMMANDS) сразу после `vkBeginCommandBuffer`
+  первичных буферов движка (буфер слота и его пролог) через `xbg_cb_begin`. `DM_GFX_PVR_CB_BARRIER`: 0 / не задан — выкл. (по умолчанию,
+  буферы как раньше), 1 — только PowerVR (0x1010), 2 — любой GPU. Строка `[pc] pvr-cb-barrier: applied|skipped (...; FN-63)` при первом
+  буфере. Кандидат, не подтверждённый фикс; безопасного режима в D3 нет — включать вручную. Самотест GPU (`xbg_selftest.cpp`) и старый
+  2D-рендерер (`xbg_vulkan.cpp`) барьер не получают.
+- **TEX-02 (`cbf591a`, вручную как TL2 `c01a30e` = DOS2 `4016472`).** Декодер BC на GPU у D3 был версией 05.11 (байт в байт как у TL2 до
+  того коммита). `xbg_bc_gpu.glsl`, `xbg_bc_gpu.h`, `xbg_bc_decode.comp`, `xbg_bc_decode_spv.h` и тесты теперь байт в байт как у DOOM 2016.
+  `bcgpu`: самотест `DM_GFX_BC_SELFTEST` (1 по умолчанию: каждый новый конвейер декодирует 2048 известных блоков на устройстве и
+  сверяет с CPU; расхождение — этот формат на CPU; 2 — только лог; 0 — выкл.), отправка самотеста через `ptq::submit` (замок очереди
+  present-потока, как в TL2 HEAD), `DM_GFX_BC_BARRIER=full` (по умолчанию; `narrow` — старые пары барьеров). Строки:
+  `NVN BC decode: self-test fmt=… bad=… -> gpu|cpu`, `NVN BC decode: barriers=full (DM_GFX_BC_BARRIER)`.
+- **`bc-astc-gpu` (FN-60 + FN-61, `9a92c70`, вручную по `migration/bc-astc-gpu.md`).** BC1 / BC2 / BC3 / BC7 на пути GPU-декода
+  создаются как `VK_FORMAT_ASTC_4x4_UNORM / _SRGB`; после декода каждой партии — ещё один compute-проход (кодер после GameNative), в
+  картинку копируются блоки ASTC: 1 байт на тексель вместо 4 у RGBA8. Решение по семейству за самотестом на 285 блоках
+  (`xbg_astc_ref_decode.h` взят из DOOM 2016) и самотестами TEX-02. `DM_GFX_BC_ASTC` auto (по умолчанию; на Qualcomm выкл.) / 1 / 0
+  (старый путь RGBA8 байт в байт), `DM_GFX_BC_ASTC_CANDS` 3 / 1, `DM_GFX_BC_ASTC_VT` 0 / 1. Отличия от D16 в `xbg_game.cpp`: нет
+  `BcVerify` / `bcv::attach` / `subst_cpu` (поэтому `pc_check` пишет «present, DIVERGED 3/18» — так и должно быть), в `BcUpload`
+  добавлено поле `partial` (его пишет `copy_from_buffer`), шимы `vkCmd*` / `ptq::submit` / `gpguard::Lock`, `fb_snapshot` копирует `bc_astc`.
+  `DM_GFX_BC_DECODE=cpu` выключает и его (кодер нужен GPU-декод). `DM_GFX_BC_BATCH_MB` задаёт и буфер ASTC (четверть выхода декода),
+  `DM_GFX_BC_PARTIAL` — частичные загрузки тоже идут через кодер, `DM_GFX_BC6_E5` не задет (BC4 / BC5 / BC6H остаются как были).
+- **Как это сочетается с кэшем ASTC (`DM_GFX_ASTC_CACHE`, `astc/d3-astc.pack`).** Порядок для BC-текстуры: `astccache::lookup` нашёл —
+  картинка из пака (блоки astcenc 4x4 / 5x5 / 6x6, `decoded=false`), этот модуль не участвует; не нашёл — `bc_store` → GPU-декод →
+  `bcastc::image_format` → ASTC 4x4 с GPU, иначе RGBA8. При повторной загрузке `astccache::would_hit` по-прежнему пересоздаёт
+  декодированную картинку (а ASTC с GPU тоже `decoded=true`) из пака. Приоритет: пак astcenc (собран setup'ом, лучше) > ASTC с GPU > RGBA8.
+  Копии между картинкой из пака и любой другой по-прежнему пропускаются (`NVN astc cache: copy skipped`); копии ASTC-с-GPU ↔ RGBA8 одного
+  семейства — `NVN BC astc: copy skipped` (ожидаем 0).
+- Проверено без телефона: NDK-сборка и APK после каждого модуля (13 предупреждений = база), `t_device_fault` 36/36, `t_cb_barrier` 21/21,
+  `bc_gpu_decode_test` all passed, `bc_astc_encode_test` (run_host_test.sh) all passed, `vendor_policy_test` / `adreno_policy_test` passed,
+  строки всех модулей есть в `libdm.so` APK.
+- На телефоне (с разрешения хозяина, сохранения назад). Adreno без env: `NVN device fault: …`, `[pc] device-fault: …`, `[pc] pvr-cb-barrier:
+  skipped (off …)`, `[pc] bc-astc-gpu: skipped (the device samples BC: …)`, картинка и fps как в 0.2.23. Adreno с `DM_GFX_SIM_GPU=mali
+  DM_GFX_BC_ASTC=1` (A/B с `DM_GFX_BC_ASTC=0`): `NVN BC decode: self-test fmt=… -> gpu`, `NVN BC astc: self-test blocks=285 … -> gpu`,
+  `[pc] bc-astc-gpu: applied (…)`, `NVN BC astc: images=… created X MB (RGBA8 would be Y MB)`, `NVN BC decode vram=` ниже, чем при `=0`;
+  ⚙ проверить листву с альфой, атласы UI, карты нормалей. Настоящий Mali / PowerVR — без env (auto). `DM_GFX_PVR_CB_BARRIER=2` на Adreno —
+  та же картинка, fps в пределах шума.
