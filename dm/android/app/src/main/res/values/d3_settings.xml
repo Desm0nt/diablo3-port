@@ -175,4 +175,8 @@
     <string name="d3_atkspeed">Attack speed</string>
     <string name="d3_zoom" formatted="true">Camera zoom-out: %1$d %%</string>
     <string name="d3_zoom_note">Moves the camera back to show more around the hero: the same angle, the interface keeps its size. 100 % = as on the Switch, about 120 % = as far as on the PC. More of the world on the screen means more GPU load.</string>
+    <string name="d3_present">Frame output on its own thread</string>
+    <string name="d3_present_auto">Auto</string>
+    <string name="d3_present_on">On</string>
+    <string name="d3_present_note">Hands finished frames to the screen on a separate thread, so the game has more time for the next frame (helps most on a hot phone or a slower processor). Auto: on, and switched off by itself only if that thread really crashes twice; the phone closing the game to save battery does not count. On: always on. Off: frames are shown the old way.</string>
 </resources>

@@ -514,9 +514,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 // it is off again (presents inline as before 0.2.22). A new APK version counts again.
                 { File ptc = new File(getFilesDir(), "pt-crashes"); final int vc = BuildConfig.VERSION_CODE;
                   if (p.getInt("pt_crash_vc", 0) != vc) { if (ptc.delete()) crumb("present thread: crash count reset for version " + vc); p.edit().putInt("pt_crash_vc", vc).apply(); }
-                  final long n = ptc.length(); final boolean on = n < 2;
+                  // Gear "Frame output on its own thread" (pref d3_present): 0 auto (above), 1 always on (crash count ignored), 2 off.
+                  // Only a crash of dm-present itself counts: an OS kill (battery saver, low memory) never reaches the crash hook.
+                  final int mode = Math.max(0, Math.min(2, p.getInt("d3_present", 0)));
+                  final long n = ptc.length(); final boolean on = mode == 1 || (mode == 0 && n < 2);
                   Os.setenv("DM_GFX_PRESENT_THREAD", on ? "1" : "0", true);
-                  if (n > 0) crumb("present thread: " + n + " crash(es) of the present thread in this version (files/pt-crashes): "
+                  if (mode != 0) crumb("present thread: " + (mode == 1 ? "on" : "off") + " by the gear (d3_present=" + mode + ")" + (n > 0 ? ", " + n + " crash(es) of it in this version" : ""));
+                  else if (n > 0) crumb("present thread: " + n + " crash(es) of the present thread in this version (files/pt-crashes): "
                       + (on ? "still on (automatically off from the second)" : "automatically off, presents inline (DM_GFX_PRESENT_THREAD=0)")); }
                 // Camera zoom-out (hle_d3_zoom.c, issue #31): 100..140 %, a wider view of the gameplay camera; also live from the gear (nativeSetD3Zoom)
                 Os.setenv("DM_D3_ZOOM", String.valueOf(Math.max(100, Math.min(140, p.getInt("d3_zoom", 100)))), true);
@@ -989,6 +993,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             // The game's dynamic resolution (hle_d3_drs.c DM_D3_DRS); live
             CheckBox drsC = new CheckBox(this); drsC.setText(when(ui, R.string.d3_drs, true)); drsC.setChecked(p.getBoolean("d3_drs", true)); box.addView(drsC);
             note(box, ui.getString(R.string.d3_drs_note));
+            // Frame output on its own thread (PERF-D07, DM_GFX_PRESENT_THREAD): auto = on, off by itself after two crashes of that thread
+            heading(box, when(ui, R.string.d3_present, false));
+            RadioGroup presentG = radios(box, new String[] {ui.getString(R.string.d3_present_auto), ui.getString(R.string.d3_present_on), ui.getString(R.string.d3_off)}, 9700, Math.max(0, Math.min(2, p.getInt("d3_present", 0))), true);
+            note(box, ui.getString(R.string.d3_present_note));
             // Camera zoom-out (hle_d3_zoom.c DM_D3_ZOOM, issue #31): 100..140 %, saved and applied live while the slider moves
             final int zoomWas = Math.max(100, Math.min(140, p.getInt("d3_zoom", 100)));
             final TextView zoomT = heading(box, ui.getString(R.string.d3_label_fmt, ui.getString(R.string.d3_zoom, zoomWas), ui.getString(R.string.d3_when_now)));
@@ -1099,7 +1107,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     .putBoolean("d3_stretch_loading", stretchL.isChecked()).putBoolean("d3_logs", logsC.isChecked())
                     .putInt("mp_pads", picked(mpG, 9400, 3)).putBoolean("mp_lan", lanC.isChecked()).putInt("cpu_cores", picked(cpuG, 9500, D3_CPU_MODES.length))
                     .putBoolean("d3_native_res", nativeC.isChecked()).putInt("d3_upscale", picked(upG, 9600, 2)).putBoolean("d3_aniso", anisoC.isChecked())
-                    .putBoolean("d3_drs", drsC.isChecked()).apply();
+                    .putBoolean("d3_drs", drsC.isChecked()).putInt("d3_present", picked(presentG, 9700, 3)).apply();
                 if (libraryLoaded && started) try { nativeCpuCores(d3CpuCores()); } catch (UnsatisfiedLinkError e) { /* a library without the module */ }
                 if (libraryLoaded && started) try { nativeSetAniso(anisoC.isChecked() ? 4 : 0); nativeSetUpscale(picked(upG, 9600, 2)); } catch (UnsatisfiedLinkError e) { /* an older library */ }
                 if (libraryLoaded && started) try { nativeSetD3Drs(drsC.isChecked()); } catch (UnsatisfiedLinkError e) { /* an older library */ }
