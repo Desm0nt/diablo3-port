@@ -95,8 +95,13 @@ uint64_t front_screen_size(void) {
 #include <time.h>
 #include <unistd.h>
 static uint64_t g_pad_keys, g_pad_trig; static float g_pad_ax[8]; static int g_pad_dev = -1;   // UI thread only
+// [D3] issue #36: the gear's "Controller face buttons" (pref d3_pad_layout) sets DM_PAD_LAYOUT at start and switches it live
+// (DmActivity.nativeSetPadLayout); UI thread only, as the rest of the pad state. A swap happens with the settings dialog up, nothing held.
+static int g_pad_label = -1;
+void front_android_set_pad_layout(int label) { g_pad_label = label ? 1 : 0; LOG("[input] face buttons: %s", label ? "by the printed letter (label)" : "by position (Switch)"); }
 static uint64_t key_bit(int32_t k) {
-    static int label = -1; if (label < 0) { const char *e = getenv("DM_PAD_LAYOUT"); label = e && !strcmp(e, "label"); }
+    if (g_pad_label < 0) { const char *e = getenv("DM_PAD_LAYOUT"); g_pad_label = e && !strcmp(e, "label"); }
+    const int label = g_pad_label;
     switch (k) {
     case AKEYCODE_BUTTON_A: return label ? DM_BTN_A : DM_BTN_B; case AKEYCODE_BUTTON_B: return label ? DM_BTN_B : DM_BTN_A;
     case AKEYCODE_BUTTON_X: return label ? DM_BTN_X : DM_BTN_Y; case AKEYCODE_BUTTON_Y: return label ? DM_BTN_Y : DM_BTN_X;

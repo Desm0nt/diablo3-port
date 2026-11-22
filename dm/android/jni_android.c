@@ -848,6 +848,9 @@ JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativePadKey(JNIEnv
     (void)env; (void)cls;
     return front_android_pad_key(device, keycode, down) ? JNI_TRUE : JNI_FALSE;
 }
+// [D3] issue #36: face buttons by position (Switch: bottom = B) or by the printed letter (Xbox A = A), live from the gear
+void front_android_set_pad_layout(int label);
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetPadLayout(JNIEnv *env, jclass cls, jboolean label) { (void)env; (void)cls; front_android_set_pad_layout(label ? 1 : 0); }
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativePadAxes(JNIEnv *env, jclass cls, jint device, jfloat x, jfloat y, jfloat z, jfloat rz,
                                                                        jfloat lt, jfloat rt, jfloat hx, jfloat hy) {
     (void)env; (void)cls;

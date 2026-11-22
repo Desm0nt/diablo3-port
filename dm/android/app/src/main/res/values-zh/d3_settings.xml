@@ -179,4 +179,8 @@
     <string name="d3_present_auto">自动</string>
     <string name="d3_present_on">开</string>
     <string name="d3_present_note">由单独的线程把完成的画面交给屏幕，游戏有更多时间准备下一帧（在手机发热或处理器较弱时最有用）。自动：开启，只有当该线程真正崩溃两次时才会自行关闭；手机为省电关闭游戏不算在内。开：始终开启。关：按旧方式输出画面。</string>
+    <string name="d3_pad_layout">手柄 A/B/X/Y 键</string>
+    <string name="d3_pad_layout_switch">同 Switch（下方 = B）</string>
+    <string name="d3_pad_layout_letter">按字母（Xbox：A = A）</string>
+    <string name="d3_pad_layout_note">游戏中把手柄的哪个键当作 A。同 Switch：按位置，下方键 = B，右侧键 = A（在 Xbox 手柄上游戏的 A 是 B 键）。按字母：印着 A 的键就是 A，印着 X 的键就是 X。暂停菜单也随之改变。</string>
 </resources>

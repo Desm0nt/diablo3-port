@@ -179,4 +179,8 @@
     <string name="d3_present_auto">Auto</string>
     <string name="d3_present_on">On</string>
     <string name="d3_present_note">Hands finished frames to the screen on a separate thread, so the game has more time for the next frame (helps most on a hot phone or a slower processor). Auto: on, and switched off by itself only if that thread really crashes twice; the phone closing the game to save battery does not count. On: always on. Off: frames are shown the old way.</string>
+    <string name="d3_pad_layout">Controller face buttons</string>
+    <string name="d3_pad_layout_switch">As on Switch (bottom = B)</string>
+    <string name="d3_pad_layout_letter">By letter (Xbox: A = A)</string>
+    <string name="d3_pad_layout_note">Which controller button is A in the game. As on Switch: by position, the bottom button is B and the right one is A (on an Xbox pad the game\'s A is the B key). By letter: the button printed A is A, the one printed X is X. The pause menu follows it.</string>
 </resources>

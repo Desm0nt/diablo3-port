@@ -100,6 +100,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native boolean nativePadKey(int device, int keyCode, boolean down);
     static native void nativePadAxes(int device, float x, float y, float z, float rz, float lt, float rt, float hatX, float hatY);
     static native void nativePadRemoved(int device);
+    static native void nativeSetPadLayout(boolean label);   // [D3] issue #36: face buttons by the printed letter (true) or by position (live; front_android.c key_bit)
     static native String nativeDriverStatus();          // [D3] "<requested>\t<active>\t<reason>\t<details>" (vk_driver.c), "" before the driver loads
     static native void nativeLog(String text);          // [DOOM] a "[java] ..." breadcrumb line into boot.log (jni_android.c)
     static native String nativeStartDetail();            // [D3] details of a failed start (-11: the damaged archives, one per line; jni_android.c d3_check_archives)
@@ -522,6 +523,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                   if (mode != 0) crumb("present thread: " + (mode == 1 ? "on" : "off") + " by the gear (d3_present=" + mode + ")" + (n > 0 ? ", " + n + " crash(es) of it in this version" : ""));
                   else if (n > 0) crumb("present thread: " + n + " crash(es) of the present thread in this version (files/pt-crashes): "
                       + (on ? "still on (automatically off from the second)" : "automatically off, presents inline (DM_GFX_PRESENT_THREAD=0)")); }
+                // Gear "Controller face buttons" (issue #36, pref d3_pad_layout): 0 by position as on the Switch (bottom = B), 1 by the printed
+                // letter (an Xbox pad's A = A); also live from the gear (nativeSetPadLayout); the pause menu follows it (PauseMenu.byLetter)
+                { final boolean byLetter = p.getInt("d3_pad_layout", 0) == 1; Os.setenv("DM_PAD_LAYOUT", byLetter ? "label" : "position", true); PauseMenu.byLetter = byLetter; }
                 // Camera zoom-out (hle_d3_zoom.c, issue #31): 100..140 %, a wider view of the gameplay camera; also live from the gear (nativeSetD3Zoom)
                 Os.setenv("DM_D3_ZOOM", String.valueOf(Math.max(100, Math.min(140, p.getInt("d3_zoom", 100)))), true);
                 // Widescreen only: loading screens' 16:9 art presented alone, stretched to the screen (hle_d3.c ls_present_crop)
@@ -1045,6 +1049,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             android.widget.Button delDrv = new android.widget.Button(this); delDrv.setText(ui.getString(R.string.d3_driver_delete));
             if (userDrv.length > 0) box.addView(delDrv);
             CheckBox rumble = new CheckBox(this); rumble.setText(when(ui, R.string.d3_rumble, false)); rumble.setChecked(p.getBoolean("rumble", false)); box.addView(rumble);
+            // Controller face buttons (issue #36): by position as on the Switch, or by the letter printed on the pad (Xbox layout)
+            heading(box, when(ui, R.string.d3_pad_layout, true));
+            RadioGroup padLayG = radios(box, new String[] {ui.getString(R.string.d3_pad_layout_switch), ui.getString(R.string.d3_pad_layout_letter)}, 9800, Math.max(0, Math.min(1, p.getInt("d3_pad_layout", 0))), true);
+            note(box, ui.getString(R.string.d3_pad_layout_note));
             CheckBox fps = new CheckBox(this); fps.setText(when(ui, R.string.d3_fps_counter, true)); fps.setChecked(cp.getBoolean("fps", true)); box.addView(fps);
             CheckBox logsC = new CheckBox(this); logsC.setText(when(ui, R.string.d3_logs, false)); logsC.setChecked(p.getBoolean("d3_logs", true)); box.addView(logsC);   // CrashLog.logsOn
             note(box, ui.getString(R.string.d3_logs_note));
@@ -1107,7 +1115,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     .putBoolean("d3_stretch_loading", stretchL.isChecked()).putBoolean("d3_logs", logsC.isChecked())
                     .putInt("mp_pads", picked(mpG, 9400, 3)).putBoolean("mp_lan", lanC.isChecked()).putInt("cpu_cores", picked(cpuG, 9500, D3_CPU_MODES.length))
                     .putBoolean("d3_native_res", nativeC.isChecked()).putInt("d3_upscale", picked(upG, 9600, 2)).putBoolean("d3_aniso", anisoC.isChecked())
-                    .putBoolean("d3_drs", drsC.isChecked()).putInt("d3_present", picked(presentG, 9700, 3)).apply();
+                    .putBoolean("d3_drs", drsC.isChecked()).putInt("d3_present", picked(presentG, 9700, 3)).putInt("d3_pad_layout", picked(padLayG, 9800, 2)).apply();
+                PauseMenu.byLetter = picked(padLayG, 9800, 2) == 1;
+                if (libraryLoaded && started) try { nativeSetPadLayout(PauseMenu.byLetter); } catch (UnsatisfiedLinkError e) { /* an older library */ }
                 if (libraryLoaded && started) try { nativeCpuCores(d3CpuCores()); } catch (UnsatisfiedLinkError e) { /* a library without the module */ }
                 if (libraryLoaded && started) try { nativeSetAniso(anisoC.isChecked() ? 4 : 0); nativeSetUpscale(picked(upG, 9600, 2)); } catch (UnsatisfiedLinkError e) { /* an older library */ }
                 if (libraryLoaded && started) try { nativeSetD3Drs(drsC.isChecked()); } catch (UnsatisfiedLinkError e) { /* an older library */ }

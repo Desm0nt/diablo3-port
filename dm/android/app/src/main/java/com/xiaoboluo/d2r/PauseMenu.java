@@ -74,8 +74,11 @@ final class PauseMenu extends View {
         return true;
     }
     // a controller's key while the menu shows; true when taken
+    // [D3] issue #36: the gear's face buttons "by letter" (Xbox): the bottom button (KEYCODE_BUTTON_A) picks, the right one goes back
+    static boolean byLetter;
     boolean key(int code) {
         int n = Math.max(1, rows.length);
+        if (byLetter) code = code == KeyEvent.KEYCODE_BUTTON_A ? KeyEvent.KEYCODE_BUTTON_B : code == KeyEvent.KEYCODE_BUTTON_B ? KeyEvent.KEYCODE_BUTTON_A : code;
         switch (code) {
             case KeyEvent.KEYCODE_DPAD_UP: hi = (Math.max(hi, 0) + n - 1) % n; invalidate(); return true;
             case KeyEvent.KEYCODE_DPAD_DOWN: hi = (hi + 1) % n; invalidate(); return true;
