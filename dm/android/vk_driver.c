@@ -339,6 +339,23 @@ static void load_driver(void) {
             if (!(pl && *pl == '0')) setenv("MESA_GRALLOC_LINEAR", "1", 0);
             LOG("[vk] MESA_GRALLOC_LINEAR=%s (PanVK: 1 = plain window buffers, no AFBC; DM_VK_PANVK_LINEAR=%s)",
                 getenv("MESA_GRALLOC_LINEAR") ? getenv("MESA_GRALLOC_LINEAR") : "(unset)", pl ? pl : "(unset: on)");
+            // [DOS2 issue #7, KB DRV-12] PanVK JimVulkan r10 (panvk-jim-1.6.0) EMULATES BC on phone Malis, which have no BC decoder in the texture
+            // unit (ARM's driver reports textureCompressionBC = 0, so the engine decodes BC itself): src/panfrost/vulkan/panvk_bc_emu.[ch], profile
+            // "no BC decoder at all" = every BC format via a hidden second plane (BC1/2/3/7 -> ASTC 4x4 by a compute shader after each copy into the
+            // image, BC4/5 -> EAC, BC6H -> RGBA16F), and it reports textureCompressionBC = 1 and the BC format features, so the engine hands it raw
+            // BC images. On a Mali-G77 that gave wrong colours on some textures (bright green / red / yellow patches), the stock ARM driver on the
+            // same phone is clean. Owner's rule (23.11.2026): a driver never transcodes the game's compressed textures itself, the port has its
+            // own route (GPU BC decode / BC -> ASTC / ASTC cache). PANVK_NO_BC_EMU=1 (that driver's own switch, read once at device creation)
+            // turns the emulation off: the driver then reports what the hardware decodes and the engine takes the same BC route as on the stock
+            // driver. Other PanVK builds (zenith 26.3.1, upstream Mesa) do not emulate and ignore the variable. Reference: DOS2 dos2-vk 564ca480.
+            // DM_VK_PANVK_BC_EMU=1 keeps the driver's emulation (for an A/B); a PANVK_NO_BC_EMU from dm/env is kept.
+            {
+                const char *be = getenv("DM_VK_PANVK_BC_EMU");
+                const int keep_emu = be && *be == '1';
+                if (!keep_emu) setenv("PANVK_NO_BC_EMU", "1", 0);
+                LOG("[vk] PANVK_NO_BC_EMU=%s (PanVK JimVulkan: 1 = no in-driver BC emulation, the engine decodes BC as on the stock driver; DM_VK_PANVK_BC_EMU=%s)",
+                    getenv("PANVK_NO_BC_EMU") ? getenv("PANVK_NO_BC_EMU") : "(unset)", be ? be : "(unset: emulation off)");
+            }
             // D3 issue #23: PanVK zenith 26.3.1 ("P0A-V19-FULLPLANE") reads window-buffer layouts only through a stable-C IMapper
             // (/vendor/lib64/hw/mapper.<suffix>.so; candidates PANVK_MAPPER_NAMES=a,b, ro.hardware.gralloc, "mediatek"...) and refuses to
             // guess without one -> vkCreateSwapchainKHR -1000072003. Phones whose vendor has only the HIDL gralloc4 mapper have none.
