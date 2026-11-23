@@ -109,6 +109,9 @@ final class DriverManager {
             + " (API " + android.os.Build.VERSION.SDK_INT + ")\n" + VkDrivers.hardwareSummary() + "\n"
             + t("Выбор драйвера — в списке «Драйвер Vulkan» в настройках, действует со следующего запуска. Драйверы не для Adreno — экспериментальные; если игра с драйвером дважды не дойдёт до первого кадра, включится системный.",
                 "Pick the driver in the settings' \"Vulkan driver\" list; it applies on the next launch. Drivers for GPUs other than Adreno are experimental; if the game fails to reach its first frame twice with one, the system driver is used again."));
+        CheckBox force = new CheckBox(a); force.setText(t("Разрешить драйверы, не подходящие этому телефону", "Allow drivers this phone does not support"));
+        force.setChecked(vk.forcing()); box.addView(force);   // pref "driver_force": rejected packages stay installed and selectable
+        force.setOnCheckedChangeListener((b, on) -> { host.gamePrefs().edit().putBoolean("driver_force", on).apply(); dirty = true; fill(); if (changed != null) changed.run(); });
         Button file = button(box, t("Установить из файла (zip)…", "Install from file (zip)…"));
         Button dl = button(box, t("Скачать…", "Download…")); if (host.driverSourcesUrl() == null) dl.setVisibility(android.view.View.GONE);
         heading(box, t("Установленные пакеты", "Installed packages"));
@@ -245,7 +248,7 @@ final class DriverManager {
 
     // ---- unpack + check (background thread)
     private static final class Result {
-        String name, error, sha; boolean verified, cancelled;
+        String name, error, sha, warning; boolean verified, cancelled;
         static Result fail(String e) { Result r = new Result(); r.error = e; return r; }
     }
     // A folder name from a zip name: "Turnip-v27.0.0-20261108.zip" -> "Turnip-v27.0.0-20261108" (letters, digits, . _ -; no leading dot).
@@ -261,15 +264,18 @@ final class DriverManager {
         try (InputStream in = new FileInputStream(zip)) { VkDrivers.unzipDriver(in, stage); }
         catch (IOException e) { VkDrivers.deleteDriverTree(stage); return Result.fail(t("это не пакет драйвера adrenotools (", "this is not an adrenotools driver package (") + e.getMessage() + ")"); }
         // checked while staged (".stage-" adds no family word, so the folder name counts as at every start); an installed package of the
-        // same name is replaced only by one that can run here
+        // same name is replaced only by one that can run here, unless "driver_force" is on: then a rejected package replaces it too and
+        // the dialog carries the reason as a warning
         String why = vk.problem(stage.getName());
-        if (why != null) { VkDrivers.deleteDriverTree(stage); return Result.fail(t("не подходит этому телефону: ", "it cannot run on this phone: ") + vk.reasonText(why)); }
+        if (why != null && !vk.forcing()) { VkDrivers.deleteDriverTree(stage); return Result.fail(t("не подходит этому телефону: ", "it cannot run on this phone: ") + vk.reasonText(why)); }
         VkDrivers.writeOrigin(stage, kind, detail);
         VkDrivers.deleteDriverTree(out);
         if (!stage.renameTo(out)) { VkDrivers.deleteDriverTree(stage); return Result.fail("rename failed: " + out); }
         SharedPreferences p = host.gamePrefs(); Set<String> rm = new HashSet<>(p.getStringSet("driver_removed", Collections.emptySet()));
         if (rm.remove(name)) p.edit().putStringSet("driver_removed", rm).apply();
-        Result r = new Result(); r.name = name; return r;
+        Result r = new Result(); r.name = name;
+        if (why != null) { r.warning = t("не подходит этому телефону: ", "it cannot run on this phone: ") + vk.reasonText(why); }   // kept because "driver_force" is on
+        return r;
     }
     private void done(Result r, String what) {
         if (r.cancelled) { host.crumb("driver manager: " + what + " cancelled"); return; }
@@ -280,7 +286,8 @@ final class DriverManager {
             ? t("Установлен: ", "Installed: ") + vk.label(r.name) + "\n\n" + t("Выберите его в списке «Драйвер Vulkan» в настройках (действует со следующего запуска).",
                 "Pick it in the settings' \"Vulkan driver\" list (applies on the next launch).")
             : t("Не установлено: ", "Not installed: ") + r.error;
-        if (r.sha != null) msg += "\n\nSHA-256 " + r.sha + "\n" + (r.verified ? t("совпадает с GitHub", "matches GitHub") : t("GitHub не дал контрольной суммы для сверки", "GitHub gave no checksum to compare with"));
+        if (r.warning != null) { msg += "\n\n" + t("Предупреждение: ", "Warning: ") + r.warning; }
+        if (r.sha != null) msg +="\n\nSHA-256 " + r.sha + "\n" + (r.verified ? t("совпадает с GitHub", "matches GitHub") : t("GitHub не дал контрольной суммы для сверки", "GitHub gave no checksum to compare with"));
         new AlertDialog.Builder(a).setTitle(what).setMessage(msg).setPositiveButton(android.R.string.ok, null).show();
     }
 

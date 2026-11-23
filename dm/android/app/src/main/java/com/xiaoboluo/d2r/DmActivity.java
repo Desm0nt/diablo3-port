@@ -621,23 +621,16 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         if (!turnipPossible()) return "";   // non-Adreno: the bundled Turnip is never the default
         File dir = new File(getFilesDir(), "drivers");
         int m = adrenoModel(gpuModel());
-        if (m == 0) return qualcommSoc() ? pkgIfPresent(dir, DEFAULT_DRIVER) : "";
-        if (m < 600) return "";
+        if (m <= 0) return qualcommSoc() ? pkgIfPresent(dir, DEFAULT_DRIVER) : "";
+        if (AdrenoModel.tooOldForTurnip(m)) return "";   // DRV-11: a two-digit model (Adreno22, SG6275P) falls through to DEFAULT_DRIVER
         String auto = autoDriverForGpu(dir); if (auto != null) return auto;
         if (m == 710 || m == 720 || m == 722) return pkgIfPresent(dir, DRIVER_A710);
         if (m >= 800 && m < 900) return pkgIfPresent(dir, DRIVER_A8XX);
         return pkgIfPresent(dir, DEFAULT_DRIVER);
     }
     private static String pkgIfPresent(File dir, String name) { return hasDriverLib(new File(dir, name)) ? name : ""; }
-    // "Adreno750v2" -> 750; 0 = no readable model; -1 = a model that is not an Adreno.
-    static int adrenoModel(String gpu) {
-        if (gpu == null || gpu.isEmpty()) return 0;
-        String g = gpu.toLowerCase(Locale.ROOT); int at = g.indexOf("adreno"); if (at < 0) return -1;
-        int i = at + 6, v = 0, n = 0;
-        while (i < g.length() && !Character.isDigit(g.charAt(i)) && n == 0 && i < at + 12) i++;
-        while (i < g.length() && Character.isDigit(g.charAt(i)) && n < 4) { v = v * 10 + (g.charAt(i++) - '0'); n++; }
-        return n > 0 ? v : -1;
-    }
+    // "Adreno750v2" -> 750, "Adreno22" -> 22; 0 = no readable model; -1 = a model that is not an Adreno (AdrenoModel.of, Android-free).
+    static int adrenoModel(String gpu) { return AdrenoModel.of(gpu); }
     // Can Turnip (Mesa freedreno, Adreno only) work on this phone at all? It drives the GPU through Qualcomm's kernel driver KGSL, so the
     // device node (or its sysfs class) must exist, and the GPU must be an Adreno 6xx or newer (a readable gpu_model), or, when the model
     // is unreadable, the SoC must be a Qualcomm one. vk_driver.c repeats the KGSL check.
@@ -645,7 +638,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static boolean turnipPossible() {
         if (!kgsl()) return false;
         int m = adrenoModel(gpuModel());
-        return m == 0 ? qualcommSoc() : m >= 600;
+        if (m <= 0) return qualcommSoc();   // unreadable, or not an Adreno string
+        return !AdrenoModel.tooOldForTurnip(m);   // DRV-11: "Adreno22" (SG6275P) is newer than a6xx, not older
     }
     // "gpu_model=Adreno750v2 kgsl=true mali=false SoC=QTI SM8650" (logs, crash reports, the driver notice)
     static String hardwareSummary() {
