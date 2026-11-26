@@ -1931,7 +1931,15 @@ static int pace_adapt_enabled(void) {
 // [D3] DM_PRESENT_MAX_HZ=<cap> (the gear's frame rate limit, D3: 30 / 60; ported from the DOOM 2016 port): the auto mode presents
 // at the largest integer fraction of the refresh rate not above the cap (nvn_pace_cap_hz) instead of the "at least 60" tier.
 // 0 / unset = the old rule (other games: unchanged). DM_PRESENT_HZ still pins a fixed rate; DM_PACE_ADAPT=1 keeps its own 60 cap.
+// [pace-vote] nvn_present_cap_set: the gear's limit changed while the game runs (PaceVote.setCap -> perf_android.c): it replaces the
+// start value from then on (10..240, else no cap); the present period and the window's vote follow at the next present.
+static _Atomic int g_cap_live = -1;
+void nvn_present_cap_set(int hz) {
+    int v = hz >= 10 && hz <= 240 ? hz : 0;
+    if (atomic_exchange(&g_cap_live, v) != v) LOG("[nvn] frame rate limit %d Hz from the gear (live; was DM_PRESENT_MAX_HZ at start)", v);
+}
 static double present_cap_hz(void) {
+    int live = atomic_load(&g_cap_live); if (live >= 0) return live;
     static double v = -1;
     if (v < 0) { const char *e = getenv("DM_PRESENT_MAX_HZ"); v = e && *e ? atof(e) : 0; if (!(v >= 10 && v <= 240)) v = 0; }
     return v;
@@ -1948,6 +1956,16 @@ static double present_auto_hz(double screen_hz) {
     return dm_pace_hz(screen_hz, 60);
 }
 static int g_hz = -1, g_display_mode, g_hz_auto;   // g_hz_auto：有窗口、没用 DM_PRESENT_HZ 钉住——帧率跟着窗口所在屏的刷新率取整除档（每帧重读，换屏即换） | g_hz_auto: has a window and not pinned by DM_PRESENT_HZ; the frame rate takes the evenly dividing tier of the refresh rate of the screen the window is on (re-read every frame, changes with the screen)
+// [pace-vote] The frame cap the player / the game chose (Hz; 0 = uncapped), not the tier the pacer runs at now (DM_PACE_ADAPT keeps 60 here):
+// the ADPF target's period and the window's vote (perf_android.c, port-common/modules/pace-vote). DM_PRESENT_HZ pinned: that rate.
+double dm_pace_cap_hz(void) {
+    if (g_hz >= 0 && !g_hz_auto) return g_hz;
+#ifdef __ANDROID__
+    if (mtl_fps_target() == 30) return 30;
+#endif
+    if (present_cap_hz() > 0) return present_cap_hz();
+    return 60;
+}
 void nvn_present_config(int hz, int display_mode) { g_hz = hz; g_display_mode = display_mode; g_hz_auto = 0; }
 double front_display_refresh(char *name, size_t n);
 static void present_cfg(const win_t *o) {

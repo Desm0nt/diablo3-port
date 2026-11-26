@@ -38,7 +38,17 @@
 // - Display rate: the vote vulkan_present.cpp makes at surface creation (marker gfx-frame-rate, default 120 Hz) is re-applied here whenever the
 //   window or the wanted rate changes, with ANativeWindow_setFrameRateWithChangeStrategy(ONLY_IF_SEAMLESS) where available (Android 12), so a
 //   thermal step never blanks the screen for a mode switch.
-// Switches (env file): DM_NO_ADPF=1 / DM_ADPF=0 no hint session; DM_ADPF_TARGET_MS, DM_ADPF_BUDGET_MS=33.33, DM_ADPF_POWER_EFF=0,
+// - [pace-vote] (port-common/modules/pace-vote, KB PNH-C05 / PNH-C03; rules adapted from peanuts-native 85eeb7a (igawa6), GPL-3.0-or-later):
+//   - ADPF target = the period of the frame cap the player / the game chose (dm_pace_cap_hz, hle_nvn.c: 60 -> 16.67 ms, 30 -> 33.33), never
+//     shorter than one screen refresh (DM_ADPF_TARGET=game, default). The old rule min(present period, DM_ADPF_BUDGET_MS) let a game that
+//     dropped to 30 aim at 33.3 ms: the clocks were held right under 30 and it never stepped back to 60. DM_ADPF_TARGET=old: the old rule.
+//   - the window's frame-rate vote: 60 Hz for a cap of 30 (and 20 / 15 / 12 / 10: whole fractions of 60) where the display has a 60 Hz
+//     mode (a 30 fps cap on a 120 Hz panel came as 25 / 42 ms pairs at peanuts); every other cap (60, above, 40 / 45, uncapped) keeps the
+//     marker (120), the owner's rule of 26.11 (pace_vote.h pv_vote_hz). Followed live (the gear, eco_fps), held at its highest
+//     for DM_VOTE_HOLD_MS (5000) before it goes down, re-applied every 5 s (a new surface votes the marker in vulkan_present.cpp).
+//     PaceVote.java asks the window for the display mode of that rate (preferredDisplayModeId, same resolution) while the activity is in
+//     front: the content vote alone left peanuts' panel at 120 Hz. DM_VOTE_HZ=max: the marker vote, no mode request (old).
+// Switches (env file): DM_NO_ADPF=1 / DM_ADPF=0 no hint session; DM_ADPF_TARGET=game (old), DM_VOTE_HZ=cap (max), DM_VOTE_HOLD_MS=5000; DM_ADPF_TARGET_MS, DM_ADPF_BUDGET_MS=33.33, DM_ADPF_POWER_EFF=0,
 // DM_ADPF_SCAN_MS=5000, DM_ADPF_MAX_THREADS=6, DM_ADPF_DIAG_MS=10000; DM_ADPF_BOOST=1 (0 off, 2 public NDK call only), DM_ADPF_BOOST_MS=500,
 // DM_ADPF_BOOST_FRAMES=3; DM_GAME_STATE=1 (0 off); DM_THERMAL_VOTE=0 keep the marker vote whatever the temperature.
 // Hook: dm_aperf_present(window, frame_rate_vote) once per present on the presenting thread (vulkan_present.cpp present(), before
@@ -48,6 +58,7 @@
 #include "../host/dm.h"
 #include "touch_android.h"
 #include "perf_boost.h"
+#include "pace_vote.h"
 #include <android/native_window.h>
 #include <dirent.h>
 #include <dlfcn.h>
@@ -73,6 +84,10 @@ __attribute__((weak)) int thr_guest_threads(int32_t *tid, uint8_t *kind, char (*
 __attribute__((weak)) int dm_loadscreen_up(void);
 __attribute__((weak)) int dm_android_scene_game(void);
 __attribute__((weak)) int dm_ldn_lan_on(void);
+// [pace-vote] the frame cap the player / the game chose (Hz, 0 = uncapped; hle_nvn.c) and the screen's refresh (Hz, 0 = unknown; nvn_vk.c)
+__attribute__((weak)) double dm_pace_cap_hz(void);
+__attribute__((weak)) double mtl_display_refresh(void);
+__attribute__((weak)) void nvn_present_cap_set(int hz);   // hle_nvn.c: the gear's frame rate limit while the game runs (PaceVote.setCap)
 
 // ---------------- ADPF ----------------
 typedef struct APerformanceHintManager APerformanceHintManager;
@@ -98,6 +113,8 @@ static APerformanceHintManager *g_hint_mgr;
 static APerformanceHintSession *g_hint; static int64_t g_hint_target; static int32_t g_hint_tids[8]; static int g_hint_n;
 static uint8_t g_hint_low[8];   // consecutive scans each member spent below 5% of a core
 static int g_adpf_power = 0, g_adpf_auto, g_adpf_period_mode, g_adpf_max_threads = 6;
+static int g_adpf_game = 1;                // [pace-vote] DM_ADPF_TARGET=game (default): the cap's period; old = min(period, budget)
+static _Atomic int64_t g_period_min;       // [pace-vote] the shortest present period of this session (ns; 0 = none yet)
 static int64_t g_adpf_target_ns, g_adpf_budget_ns = 33333333, g_adpf_scan_ns = 5000000000LL, g_adpf_diag_ns = 10000000000LL;
 static int g_boost = 1, g_boost_frames = 3; static int64_t g_boost_ns = 500000000;
 static char g_job_names[128] = "JobWorker";
@@ -142,6 +159,7 @@ static void adpf_cfg_read(void) {
         else if (atof(e) > 0.5 && atof(e) < 500) g_adpf_target_ns = (int64_t)(atof(e) * 1e6);
     }
     if ((e = getenv("DM_ADPF_BUDGET_MS")) && *e && atof(e) > 0.5 && atof(e) < 500) g_adpf_budget_ns = (int64_t)(atof(e) * 1e6);
+    if ((e = getenv("DM_ADPF_TARGET")) && *e) g_adpf_game = strcmp(e, "old") != 0 && strcmp(e, "0") != 0;
     if ((e = getenv("DM_ADPF_SCAN_MS")) && *e && atoi(e) >= 500) g_adpf_scan_ns = (int64_t)atoi(e) * 1000000;
     if ((e = getenv("DM_ADPF_DIAG_MS")) && *e) g_adpf_diag_ns = (int64_t)(atoi(e) > 0 ? atoi(e) : 0) * 1000000;
     if ((e = getenv("DM_ADPF_MAX_THREADS")) && *e) { int v = atoi(e); g_adpf_max_threads = v < 1 ? 1 : v > 8 ? 8 : v; }
@@ -149,16 +167,21 @@ static void adpf_cfg_read(void) {
     if ((e = getenv("DM_ADPF_BOOST_MS")) && *e && atoi(e) >= 100) g_boost_ns = (int64_t)atoi(e) * 1000000;
     if ((e = getenv("DM_ADPF_BOOST_FRAMES")) && *e && atoi(e) >= 1) g_boost_frames = atoi(e);
     if ((e = getenv("DM_CPU_JOB_NAMES")) && *e) snprintf(g_job_names, sizeof g_job_names, "%s", e);
-    LOG("[perf] ADPF switches: DM_ADPF_TARGET_MS=%s DM_ADPF_BUDGET_MS=%.2f DM_ADPF_POWER_EFF=%d DM_ADPF_SCAN_MS=%lld DM_ADPF_MAX_THREADS=%d DM_ADPF_DIAG_MS=%lld"
+    LOG("[perf] ADPF switches: DM_ADPF_TARGET=%s DM_ADPF_TARGET_MS=%s DM_ADPF_BUDGET_MS=%.2f DM_ADPF_POWER_EFF=%d DM_ADPF_SCAN_MS=%lld DM_ADPF_MAX_THREADS=%d DM_ADPF_DIAG_MS=%lld"
         " DM_ADPF_BOOST=%d DM_ADPF_BOOST_MS=%lld DM_ADPF_BOOST_FRAMES=%d; job workers = guest names %s*",
-        g_adpf_auto ? "auto" : g_adpf_period_mode ? "period" : g_adpf_target_ns ? "fixed" : "budget(default)", g_adpf_budget_ns / 1e6, g_adpf_power,
+        g_adpf_game ? dm_pace_cap_hz ? "game (cap period)" : "game (no cap hook: shortest period)" : "old (min(period, budget))",
+        g_adpf_auto ? "auto" : g_adpf_period_mode ? "period" : g_adpf_target_ns ? "fixed" : "unset", g_adpf_budget_ns / 1e6, g_adpf_power,
         (long long)(g_adpf_scan_ns / 1000000), g_adpf_max_threads, (long long)(g_adpf_diag_ns / 1000000), g_boost, (long long)(g_boost_ns / 1000000),
         g_boost_frames, g_job_names);
 }
-// The target the session gets for a present period p (ns): fixed / auto value, the period itself (old), or the period capped at the frame budget.
+// The target the session gets for a present period p (ns): fixed / auto value, the period itself, [pace-vote] the period of the game's
+// cap (DM_ADPF_TARGET=game, default; pace_vote.h pv_adpf_target_ns), or the period capped at the frame budget (DM_ADPF_TARGET=old).
+static double cap_hz_now(void) { return dm_pace_cap_hz ? dm_pace_cap_hz() : 0; }
+static double screen_hz_now(void) { return mtl_display_refresh ? mtl_display_refresh() : 0; }
 static int64_t adpf_target(int64_t p) {
     if (g_adpf_target_ns) return g_adpf_target_ns;
     if (g_adpf_period_mode) return p;
+    if (g_adpf_game) return pv_adpf_target_ns(cap_hz_now(), screen_hz_now(), atomic_load(&g_period_min));
     return p < g_adpf_budget_ns ? p : g_adpf_budget_ns;
 }
 static const char *boost_path(void) {
@@ -194,8 +217,9 @@ static void hint_init(int64_t period) {
     g_hint_tids[0] = (int32_t)gettid(); g_hint_n = 1;
     hint_create(target);
     if (g_hint && H.wd_create && H.wd_start && H.wd_total && H.wd_cpu && H.wd_gpu && H.report2) g_wd = H.wd_create();
-    LOG("[perf] ADPF session %s (target %.2f ms = min(period %.2f, budget %.2f), thread %d%s%s)", g_hint ? "open" : "refused", target / 1e6, period / 1e6,
-        g_adpf_budget_ns / 1e6, g_hint_tids[0], H.set_threads ? ", threads join by load" : "", g_wd ? ", GPU time reported" : "");
+    LOG("[perf] ADPF session %s (target %.2f ms: %s, period %.2f, cap %.0f Hz, screen %.1f Hz, budget %.2f, thread %d%s%s)", g_hint ? "open" : "refused",
+        target / 1e6, g_adpf_target_ns ? "fixed" : g_adpf_period_mode ? "period" : g_adpf_game ? "cap period (DM_ADPF_TARGET=game)" : "min(period, budget)",
+        period / 1e6, cap_hz_now(), screen_hz_now(), g_adpf_budget_ns / 1e6, g_hint_tids[0], H.set_threads ? ", threads join by load" : "", g_wd ? ", GPU time reported" : "");
 }
 // EPIPE from a report: the system dropped the session (binder death, HAL restart). Close it and open a new one 5 s later (at most 8 times).
 static void hint_lost(int64_t now) {
@@ -474,42 +498,107 @@ void dm_aperf_start(void) {
 // ---------------- display rate vote ----------------
 static int32_t (*g_set_rate)(ANativeWindow *, float, int8_t);
 static int32_t (*g_set_rate2)(ANativeWindow *, float, int8_t, int8_t);   // Android 12: with a change strategy
-static float vote_for(float marker, double period) {
+// [pace-vote] the display's refresh rates at its current resolution (PaceVote.java hands them over twice a second, UI thread) and the vote
+// for its mode request (milli-Hz; -1 = DM_VOTE_HZ=max: no request)
+static float g_modes[16]; static _Atomic int g_nmodes; static _Atomic int g_pv_want_mhz;
+static int vote_cap_mode(void) {   // DM_VOTE_HZ=cap (default): the vote follows the frame cap; max (or 0): the marker as before
+    static _Atomic int v = -1; int r = atomic_load(&v); if (r >= 0) return r;
+    const char *e = getenv("DM_VOTE_HZ"); r = !(e && (!strcmp(e, "max") || !strcmp(e, "0")));
+    atomic_store(&v, r);
+    LOG("[perf] DM_VOTE_HZ=%s: %s", r ? "cap" : "max", r ? "the window votes 60 Hz for a cap of 30 / 20 / 15 (a 60 Hz mode), the marker for every other cap" : "the marker vote (old)");
+    return r;
+}
+static int64_t vote_hold_ns(void) {
+    static int64_t v = -1; if (v >= 0) return v;
+    const char *e = getenv("DM_VOTE_HOLD_MS"); v = e && *e && atoi(e) >= 0 ? (int64_t)atoi(e) * 1000000 : 5000000000LL;
+    return v;
+}
+static int modes_now(float *m) { int n = atomic_load(&g_nmodes); if (n > 16) n = 16; if (n > 0) memcpy(m, g_modes, (size_t)n * sizeof *m); return n; }
+static float vote_for(float marker, double period, double *cap_out) {
     if (marker <= 0) return 0;   // marker gfx-frame-rate = 0: no vote at all
     static int thermal_vote = -1; if (thermal_vote < 0) { const char *e = getenv("DM_THERMAL_VOTE"); thermal_vote = !(e && !atoi(e)); }
     static int hot; int s = atomic_load(&g_tstatus);
     if (s >= TH_SEVERE) hot = 1; else if (s >= 0 && s <= TH_MODERATE) hot = 0;
-    if (!thermal_vote || !hot) return marker;
-    double fps = period > 0 ? 1 / period : 60; if (fps < 1) fps = 60;
-    double v = fps; while (v < 59.5) v += fps;   // the lowest multiple of the game's rate that is at least 60 Hz
-    return v < marker ? (float)v : marker;
+    float base = marker;
+    if (vote_cap_mode()) {   // [pace-vote] the cap's display rate (pace_vote.h pv_vote_hz); a port without a cap hook: the present rate
+        double cap = dm_pace_cap_hz ? dm_pace_cap_hz() : period > 0 ? 1 / period : 0;
+        float m[16]; int n = modes_now(m);
+        base = pv_vote_hz(cap, m, n, marker); *cap_out = cap;
+    }
+    if (!thermal_vote || !hot) return base;
+    return pv_thermal_hz(base, period);   // the lowest multiple of the game's rate that is at least 60 Hz
 }
-static void vote(ANativeWindow *w, float hz) {
+static void vote(ANativeWindow *w, float hz, double cap, int log) {
     static int resolved; if (!resolved) { resolved = 1; void *lib = dlopen("libnativewindow.so", RTLD_NOW);
         if (lib) { g_set_rate = dlsym(lib, "ANativeWindow_setFrameRate"); g_set_rate2 = dlsym(lib, "ANativeWindow_setFrameRateWithChangeStrategy"); } }
     int r = g_set_rate2 ? g_set_rate2(w, hz, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT, 0 /* ONLY_IF_SEAMLESS */)
           : g_set_rate ? g_set_rate(w, hz, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT) : -1;
-    LOG("[perf] window frame-rate vote %.0f Hz%s (thermal %s)", (double)hz, r ? " refused" : "", th_name(atomic_load(&g_tstatus)));
+    if (!log) return;
+    if (cap < 0) { LOG("[perf] window frame-rate vote %.0f Hz%s (thermal %s)", (double)hz, r ? " refused" : "", th_name(atomic_load(&g_tstatus))); return; }
+    char ml[128] = ""; float m[16]; int n = modes_now(m); size_t o = 0;
+    for (int i = 0; i < n && o < sizeof ml; i++) o += (size_t)snprintf(ml + o, sizeof ml - o, "%s%.2f", i ? " " : "", (double)m[i]);
+    LOG("[perf] window frame-rate vote %.0f Hz%s (cap %.0f Hz, DM_VOTE_HZ=cap; modes %s; thermal %s)", (double)hz, r ? " refused" : "", cap,
+        n ? ml : "not known yet", th_name(atomic_load(&g_tstatus)));
+}
+// Per present: the vote for this window, sent again when the window or the rate changes, [pace-vote] and every 5 s in cap mode (a surface
+// made again votes the marker in vulkan_present.cpp create_surface, maybe on the same ANativeWindow pointer).
+static void pace_vote_tick(ANativeWindow *w, float marker, double period, int64_t t) {
+    static ANativeWindow *voted_w; static float voted; static int64_t voted_t; static pv_hold_t hold;
+    double cap = -1; const int capm = vote_cap_mode();
+    float want = vote_for(marker, period, &cap);
+    if (capm) want = pv_hold(&hold, want, t, vote_hold_ns());   // up at once, down after DM_VOTE_HOLD_MS at the lower rate
+    atomic_store(&g_pv_want_mhz, capm ? (int)lroundf(want * 1000) : -1);
+    if (!w || want <= 0) return;
+    const int changed = w != voted_w || fabsf(want - voted) > 0.5f;
+    if (changed || (capm && t - voted_t >= 5000000000LL)) { vote(w, want, capm ? cap : -1, changed); voted_w = w; voted = want; voted_t = t; }
+}
+// [pace-vote] PaceVote.java: the modes in, the vote out (Hz; 0 = no request, < 0 = off: DM_VOTE_HZ=max); a line in boot.log; the gear's limit.
+JNIEXPORT jfloat JNICALL Java_com_xiaoboluo_d2r_PaceVote_nativeVote(JNIEnv *env, jclass cls, jfloatArray modes) {
+    (void)cls;
+    if (modes) {
+        jsize n = (*env)->GetArrayLength(env, modes); if (n > 16) n = 16;
+        float m[16]; if (n > 0) { (*env)->GetFloatArrayRegion(env, modes, 0, n, m); memcpy(g_modes, m, (size_t)n * sizeof *m); }
+        atomic_store(&g_nmodes, n > 0 ? (int)n : 0);
+    }
+    int v = atomic_load(&g_pv_want_mhz);
+    return v < 0 ? -1.0f : v / 1000.0f;
+}
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_PaceVote_nativeNote(JNIEnv *env, jclass cls, jstring s) {
+    (void)cls; const char *c = s ? (*env)->GetStringUTFChars(env, s, NULL) : NULL;
+    LOG("[perf] pace-vote (java): %s", c ? c : "?");
+    if (c) (*env)->ReleaseStringUTFChars(env, s, c);
+}
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_PaceVote_nativeSetCap(JNIEnv *env, jclass cls, jint hz) {
+    (void)env; (void)cls;
+    if (nvn_present_cap_set) nvn_present_cap_set((int)hz);
+    else LOG("[perf] pace-vote: frame rate limit %d from the gear: this tree has no live limit (next start)", (int)hz);
 }
 
 // ---------------- per present ----------------
 // Performance hints are skipped when DM_ADPF=0 or when the process runs under an ARM translation layer (LDPlayer /
 // emulators: libhoudini / libndk_translation bridge these platform calls and crash in them); real devices keep them.
+static int g_off_xlat;   // [pace-vote] the hints are off for a translation layer (the vote stays as vulkan_present.cpp made it there)
 static int perf_off(void) {
     static int off = -1;
     if (off >= 0) return off;
     const char *e = getenv("DM_ADPF"); off = e && !strcmp(e, "0");
     if (!off) {
         FILE *f = fopen("/proc/self/maps", "r"); char line[512];
-        if (f) { while (fgets(line, sizeof line, f)) if (strstr(line, "libhoudini") || strstr(line, "libndk_translation")) { off = 1; break; } fclose(f); }
+        if (f) { while (fgets(line, sizeof line, f)) if (strstr(line, "libhoudini") || strstr(line, "libndk_translation")) { off = 1; g_off_xlat = 1; break; } fclose(f); }
     }
     if (off) LOG("[perf] performance hints off (%s)", e && !strcmp(e, "0") ? "DM_ADPF=0" : "ARM translation layer detected");
     return off;
 }
 void dm_aperf_present(ANativeWindow *w, float marker_vote) {
-    if (perf_off()) return;
     double period = dm_present_period();
-    int64_t p = period > 0 && period < 1 ? (int64_t)(period * 1e9) : 16666667, t = perf_now();
+    int64_t t = perf_now();
+    // [pace-vote] the shortest present period of the session (the ADPF target of a port without a cap hook) and the window's vote, also with
+    // the hints off by DM_ADPF=0 (the vote is the display's, not the hint session's)
+    if (period > 0.004 && period < 0.2) { int64_t pn = (int64_t)(period * 1e9), m = atomic_load(&g_period_min); if (!m || pn < m) atomic_store(&g_period_min, pn); }
+    const int off = perf_off();
+    if (!g_off_xlat) pace_vote_tick(w, marker_vote, period, t);
+    if (off) return;
+    int64_t p = period > 0 && period < 1 ? (int64_t)(period * 1e9) : 16666667;
     hint_init(p);
     p = adpf_target(p);   // [adpf] the hint target: min(period, budget) by default (DM_ADPF_TARGET_MS: fixed / auto / period)
     static unsigned frames; static int64_t prev_t, next_scan, next_ls;
@@ -558,7 +647,4 @@ void dm_aperf_present(ANativeWindow *w, float marker_vote) {
     }
     if (g_hint_mgr) adpf_diag(t, g_hint_target ? g_hint_target : p);
     prev_t = t;
-    static ANativeWindow *voted_w; static float voted;
-    float want = vote_for(marker_vote, period);
-    if (w && want > 0 && (w != voted_w || fabsf(want - voted) > 0.5f)) { vote(w, want); voted_w = w; voted = want; }
 }
