@@ -10,6 +10,7 @@ extern "C" void dm_aperf_present(ANativeWindow*,float);
 #endif
 #include "../gfx/vulkan/nvn_vk.h"
 #include "../gfx/xtrace.h"
+#include "gpu_floor.h"   // [gpu-floor] PNH-C01: GPU clock floor while frames run late (port-common gpu-floor)
 #include "../gfx/vulkan/engine/xbg_device_fault.h"   // [device-fault] FN-64 (port-common device-fault)
 #include "../host/cpu_topo.h"   // [cpu-place] the translator's pin comes from the placement plan unless a marker sets it
 #include <android/log.h>
@@ -670,6 +671,8 @@ int present_body(VkImage source,VkFormat source_format,uint32_t width,uint32_t h
 #ifdef DM_GAME_DOOM
     dm_aperf_present(active,frame_rate_vote);   // ADPF work report + display rate vote (perf_android.c)
 #endif
+    dm_gpu_floor_present(physical,device,queue);   // [gpu-floor] PNH-C01: the floor while frames run late (DM_GPU_FLOOR=auto|1|0), at every present
+    {int a=0;const char *w=dm_gpu_floor_report(&a);if(w)pc_note("gpu-floor",a,"%s; PNH-C01",w);}   // [pc]
     XTRACE_BEGIN("dm-queue-present");VkResult pr=vkQueuePresentKHR(queue,&pi);XTRACE_END();
     // 呈现失败时先排空，拆除路径要求队列空闲。
     // Drain a failed present before teardown, which requires an idle queue.
@@ -852,6 +855,7 @@ extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t byte
 #endif
     }
     std::vector<const char*> dext={VK_KHR_SWAPCHAIN_EXTENSION_NAME};if(mirror)dext.push_back(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
+    if(dm_gpu_floor_want_hint(physical,available.data(),uint32_t(available.size()))){dext.push_back("VK_QCOM_queue_perf_hint");draw.pNext=dm_gpu_floor_chain(draw.pNext);}dm_gpu_floor_before_device();   // [gpu-floor] PNH-C01: Qualcomm's queue perf hint where the driver has it, else the KGSL contexts this process owns before the device (DM_GPU_FLOOR=0: off)
     // NVN min/max reduction samplers (depth pyramids): extension only (the instance is Vulkan 1.1); without it reductions sample as average.
     if(minmax)dext.push_back(VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME);
     // [DOOM] GPU-driven culling writes DrawElementsIndirect arguments and counts on the GPU; replayed as vkCmdDraw*IndirectCount.
