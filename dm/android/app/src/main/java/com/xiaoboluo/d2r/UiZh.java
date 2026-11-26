@@ -164,7 +164,24 @@ final class UiZh {
         "Drag a button (every button on its own)", "拖动按钮（每个按钮单独移动）",
         "Drag a button (its group moves as one)", "拖动按钮（整组一起移动）",
         "; a second finger resizes it; − / + with none chosen resize all; Hide takes the chosen out of the game; Add… brings L3 / R3 and hidden ones; Name… sets a label", "；第二根手指调整大小；未选中按钮时 − / + 调整全部；“隐藏”把所选按钮移出游戏；“添加…”可加入 L3 / R3 和已隐藏的按钮；“命名…”设置按钮文字",
-        "Up to %d characters; empty = the default (%s)", "最多 %d 个字符；留空 = 默认（%s）"
+        "Up to %d characters; empty = the default (%s)", "最多 %d 个字符；留空 = 默认（%s）",
+        // [front] FpsOverlay: the throttle dot's explanation (long press on the counter)
+        "The phone is hot and has cut its clocks: the frame rate may drop", "手机过热，已大幅降低频率：帧率可能下降",
+        "The phone is warm and has lowered its clocks a little", "手机已发热，频率略有降低",
+        "No throttling: the phone runs at full speed", "没有降频：手机正以全速运行",
+        "The phone does not report its heat", "手机未报告发热状态",
+        "Heat level the system reports: %s", "系统报告的发热等级：%s",
+        "none", "无",
+        "light", "轻微",
+        "moderate", "中等",
+        "severe", "严重",
+        "critical", "危急",
+        "emergency", "紧急",
+        "shutdown", "即将关机",
+        "Thermal headroom: %.2f (from 1.00 the phone throttles hard)", "温度余量：%.2f（达到 1.00 时手机会大幅降频）",
+        "CPU clock limit: %.1f of %.1f GHz (the highest this session)", "CPU 频率上限：%.1f / %.1f GHz（本次游戏中的最高值）",
+        "Green: full speed. Yellow: the phone is warming up. Red: it is hot. To cool it down: take off the case, play unplugged, lower the settings in ⚙.", "绿色：全速。黄色：手机正在升温。红色：手机过热。降温方法：取下手机壳、拔掉充电器游玩、在 ⚙ 中降低设置。",
+        "The dot can be turned off in ⚙.", "可在 ⚙ 中关闭此指示点。"
     };
     private static HashMap<String, String> map;
     static synchronized String get(String en) {

@@ -1048,6 +1048,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             RadioGroup padLayG = radios(box, new String[] {ui.getString(R.string.d3_pad_layout_switch), ui.getString(R.string.d3_pad_layout_letter)}, 9800, Math.max(0, Math.min(1, p.getInt("d3_pad_layout", 0))), true);
             note(box, ui.getString(R.string.d3_pad_layout_note));
             CheckBox fps = new CheckBox(this); fps.setText(when(ui, R.string.d3_fps_counter, true)); fps.setChecked(cp.getBoolean("fps", true)); box.addView(fps);
+            // [front] the throttle dot beside the counter (frontend-common FpsOverlay, pad "fps_dot", on by default; only with the counter)
+            CheckBox fpsDot = new CheckBox(this); fpsDot.setText(when(ui, R.string.d3_fps_dot, true)); fpsDot.setChecked(cp.getBoolean(FpsOverlay.PREF_DOT, true)); box.addView(fpsDot);
+            TextView fpsDotNote = note(box, ui.getString(R.string.d3_fps_dot_note));
+            int fpsIn = Math.round(28 * getResources().getDisplayMetrics().density);
+            ((LinearLayout.LayoutParams) fpsDot.getLayoutParams()).leftMargin = fpsIn; ((LinearLayout.LayoutParams) fpsDotNote.getLayoutParams()).leftMargin = fpsIn;
+            fpsDot.setEnabled(fps.isChecked()); fpsDotNote.setEnabled(fps.isChecked());
+            fps.setOnCheckedChangeListener((v, on) -> { fpsDot.setEnabled(on); fpsDotNote.setEnabled(on); });
             CheckBox logsC = new CheckBox(this); logsC.setText(when(ui, R.string.d3_logs, false)); logsC.setChecked(p.getBoolean("d3_logs", true)); box.addView(logsC);   // CrashLog.logsOn
             note(box, ui.getString(R.string.d3_logs_note));
             // [D3] Multiplayer: local co-op on this phone with several controllers (players 2-4 on their own npads, as on a docked Switch) and
@@ -1115,7 +1122,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 if (libraryLoaded && started) try { nativeCpuCores(d3CpuCores()); } catch (UnsatisfiedLinkError e) { /* a library without the module */ }
                 if (libraryLoaded && started) try { nativeSetAniso(anisoC.isChecked() ? 4 : 0); nativeSetUpscale(picked(upG, 9600, 2)); } catch (UnsatisfiedLinkError e) { /* an older library */ }
                 if (libraryLoaded && started) try { nativeSetD3Drs(drsC.isChecked()); } catch (UnsatisfiedLinkError e) { /* an older library */ }
-                cp.edit().putBoolean("fps", fps.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putBoolean("d3_hide_sticks", hideSt.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
+                cp.edit().putBoolean("fps", fps.isChecked()).putBoolean(FpsOverlay.PREF_DOT, fpsDot.isChecked()).putBoolean("d3_icons", iconsC.isChecked()).putBoolean("d3_hide_sticks", hideSt.isChecked()).putFloat("move_dz", DEADZONES[picked(dz, 4000, DEADZONES.length)])
                     .putInt("gear_mode", picked(gearG, 9000, D3_GEAR_LABELS.length)).putInt("d3_menu_swipe", picked(swG, 9300, 2)).apply();
                 if (d3Pad != null) d3Pad.reloadSettings();
                 applyAspectLayout();

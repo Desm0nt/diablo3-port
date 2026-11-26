@@ -64,6 +64,8 @@
     <string name="d3_mp_lan">Local wireless play over Wi-Fi</string>
     <string name="d3_mp_lan_note">The game\'s \"Local wireless\" play works between phones on the same Wi-Fi or hotspot. Nothing is opened until you start or search for a local game.</string>
     <string name="d3_fps_counter">FPS and frame time counter</string>
+    <string name="d3_fps_dot">Heat dot beside the counter</string>
+    <string name="d3_fps_dot_note">Green: full speed. Yellow: the phone is warming up. Red: it is hot and slows down. Long press the counter for details.</string>
     <string name="d3_logs">Write logs</string>
     <string name="d3_logs_note">Logs go to Download/Diablo3Mobile/logs (boot.log, logcat.txt, several MB each). Off: none are written there; a crash report (crash.txt) is still written if the game crashes.</string>
     <string name="d3_deadzone">On-screen sticks: game dead-zone compensation</string>

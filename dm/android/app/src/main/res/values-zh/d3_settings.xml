@@ -64,6 +64,8 @@
     <string name="d3_mp_lan">通过 Wi-Fi 进行本地无线联机</string>
     <string name="d3_mp_lan_note">游戏的\"本地无线\"联机可在连接同一 Wi-Fi 或热点的手机之间进行。在你创建或搜索本地游戏之前不会开放任何连接。</string>
     <string name="d3_fps_counter">FPS 与帧时间计数器</string>
+    <string name="d3_fps_dot">计数器旁的发热指示点</string>
+    <string name="d3_fps_dot_note">绿色：全速运行。黄色：手机正在升温。红色：手机过热并降速。长按计数器查看详情。</string>
     <string name="d3_logs">写入日志</string>
     <string name="d3_logs_note">日志保存在 Download/Diablo3Mobile/logs（boot.log、logcat.txt，每个数 MB）。关闭：不写入这些日志；游戏崩溃时仍会写入崩溃报告（crash.txt）。</string>
     <string name="d3_deadzone">屏幕摇杆：补偿游戏死区</string>

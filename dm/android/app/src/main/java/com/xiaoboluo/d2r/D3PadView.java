@@ -168,6 +168,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         dp = c.getResources().getDisplayMetrics().density;
         line.setStyle(Paint.Style.STROKE); line.setStrokeWidth(2 * dp);
         text.setTextAlign(Paint.Align.CENTER);
+        fpsView = new FpsOverlay(this, DmActivity::nativeFrameStats, this::legacyFps, () -> false);   // [front] drawn on the window: a small View
         reloadSettings();
     }
 
@@ -237,7 +238,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         menuLabel = ui.getString(R.string.d3_pad_menu); editHint = ui.getString(R.string.d3_pad_edit_hint);
         resetLabel = ui.getString(R.string.d3_pad_reset); doneLabel = ui.getString(R.string.d3_pad_done);
         deadzone = p.getFloat("move_dz", 0f);
-        boolean fps = p.getBoolean("fps", true); if (fps && !showFps) postDelayed(fpsTick, 500); showFps = fps;
+        showFps = p.getBoolean("fps", true); fpsView.set(showFps, p.getBoolean(FpsOverlay.PREF_DOT, true));
         gearMode = p.getInt("gear_mode", GEAR_NORMAL) == GEAR_NORMAL ? GEAR_NORMAL : GEAR_FADED;
         gearAlpha = clamp(p.getInt("gear_alpha", DoomPadView.GEAR_ALPHA_DEFAULT), 1, 100);
         op = clamp(p.getInt("d3_opacity", OPACITY_DEFAULT), OPACITY_MIN, OPACITY_MAX) / 100f;
@@ -327,9 +328,9 @@ public class D3PadView extends View implements FrontMenu.Pad {
     }
     // DmActivity.onResume / onPause: no polling while paused
     void setHostResumed(boolean on) { hostResumed = on; iconGate(); }
-    @Override public void onVisibilityAggregated(boolean visible) { super.onVisibilityAggregated(visible); padVisible = visible; iconGate(); }
-    @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); attached = true; iconGate(); }
-    @Override protected void onDetachedFromWindow() { attached = false; iconGate(); super.onDetachedFromWindow(); }
+    @Override public void onVisibilityAggregated(boolean visible) { super.onVisibilityAggregated(visible); padVisible = visible; iconGate(); fpsShown(); }
+    @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); attached = true; iconGate(); fpsView.sync(); }
+    @Override protected void onDetachedFromWindow() { attached = false; iconGate(); super.onDetachedFromWindow(); fpsView.sync(); }
     private static int clamp(int v, int lo, int hi) { return Math.max(lo, Math.min(hi, v)); }
     private static float clampF(float v) { return Math.max(0f, Math.min(1f, v)); }
 
@@ -563,7 +564,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         edSavedPos.clear(); for (Map.Entry<String, float[]> en : pos.entrySet()) edSavedPos.put(en.getKey(), en.getValue().clone());
         edSavedCtl.clear(); for (Ctl k : all()) edSavedCtl.put(k, new float[] {k.dx, k.dy, k.ps, k.hidden ? 1 : 0});
         edSavedLbl.clear(); for (Btn b : btns) edSavedLbl.put(b, b.custom);
-        iconGate(); invalidate();
+        iconGate(); fpsShown(); invalidate();
     }
     // save: write every place / size / hide (Save); else back to what it was when the editor opened (Cancel, Back)
     private void endEdit(boolean save, boolean notify) {
@@ -574,7 +575,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
             for (Ctl k : all()) { float[] v = edSavedCtl.get(k); if (v != null) { k.dx = v[0]; k.dy = v[1]; k.ps = v[2]; k.hidden = v[3] != 0; } }
             for (Btn b : btns) if (edSavedLbl.containsKey(b)) b.custom = edSavedLbl.get(b);
         }
-        editMode = false; edPtr = edPtr2 = edBtnDown = -1; edSel = null; iconGate(); invalidate();
+        editMode = false; edPtr = edPtr2 = edBtnDown = -1; edSel = null; iconGate(); fpsShown(); invalidate();
         Runnable d = editDone; editDone = null; if (notify && d != null) d.run();
     }
     private void clearPlaces() { pos.clear(); for (Ctl k : all()) { k.dx = k.dy = 0; k.ps = 1; k.hidden = k.defHidden; if (k instanceof Btn) ((Btn) k).custom = null; } }   // + padl3: default hides and labels
@@ -719,7 +720,9 @@ public class D3PadView extends View implements FrontMenu.Pad {
         float x = e.getX(i), y = e.getY(i);
         if (editMode) { editTouch(e, a, id, x, y); return true; }
         if (controllerMode) {   // a real controller drives the game: only the settings button, and no axes from this pad
-            if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_POINTER_DOWN) { Btn b = hit(x, y); if (b != null && b.key == SETTINGS) openSettings(); }
+            if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_POINTER_DOWN) { Btn b = hit(x, y); if (b != null && b.key == SETTINGS) openSettings(); else if (b == null) fpsView.pressDown(id, x, y); }
+            else if (a == MotionEvent.ACTION_MOVE) fpsView.pressMove(e);
+            else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_POINTER_UP || a == MotionEvent.ACTION_CANCEL) fpsView.pressUp(id, a != MotionEvent.ACTION_POINTER_UP);
             return true;
         }
         switch (a) {
@@ -732,9 +735,11 @@ public class D3PadView extends View implements FrontMenu.Pad {
             else if (uiPtr >= 0 && pinchPtr < 0 && mapOpen()) pinchStart(e, id, x, y);   // a second finger on the big map: pinch zoom
             else if (uiPtr < 0 && (gameMenuOpen() || minimapHit(x, y))) { uiPtr = id; uiX0 = x; uiY0 = y; uiT0 = SystemClock.uptimeMillis(); uiScrolling = uiPanning = false; }
             else freeDown(id, x, y);
+            if (b == null && id != left.pointer && (right == null || id != right.pointer) && id != uiPtr && id != menuPtr && id != worldPtr) fpsView.pressDown(id, x, y);   // [front] long press on the counter: the dot's explanation
             break;
         }
         case MotionEvent.ACTION_MOVE:
+            fpsView.pressMove(e);
             if (pinchPtr >= 0) pinchMove(e);
             for (int k = 0; k < e.getPointerCount(); k++) {
                 int pid = e.getPointerId(k); float px = e.getX(k), py = e.getY(k);
@@ -747,6 +752,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
             break;
         case MotionEvent.ACTION_UP: case MotionEvent.ACTION_POINTER_UP: case MotionEvent.ACTION_CANCEL: {
             boolean all = a != MotionEvent.ACTION_POINTER_UP, cancel = a == MotionEvent.ACTION_CANCEL;
+            fpsView.pressUp(id, all);
             for (Btn b : btns) if (b.pointer >= 0 && (b.pointer == id || all)) { key(b.key, false); b.pointer = -1; }
             if (left.pointer >= 0 && (id == left.pointer || all)) release(left, !cancel);
             if (right != null && right.pointer >= 0 && (id == right.pointer || all)) release(right, !cancel);
@@ -846,8 +852,13 @@ public class D3PadView extends View implements FrontMenu.Pad {
     }
 
     // ---------------- drawing ----------------
-    private boolean showFps; private final float[] fstats = new float[4];
-    private final Runnable fpsTick = new Runnable() { public void run() { if (!showFps) return; DmActivity.nativeFrameStats(fstats); invalidate(); postDelayed(this, 500); } };
+    // [front] The counter and the throttle dot are drawn by FpsOverlay in a small view of their own (frontend-common, PNH-C04: this full-screen
+    // view is no longer recorded and drawn again twice a second for them). drawFps below is the old way, used only when FpsOverlay hands the
+    // numbers over (DM_FPS_VIEW=0 for A/B runs, or a parent that is not a FrameLayout).
+    private boolean showFps, legacyFps; private final float[] fstats = new float[4];
+    private final FpsOverlay fpsView;
+    private void legacyFps(float[] s) { legacyFps = s != null; if (s != null) System.arraycopy(s, 0, fstats, 0, 4); invalidate(); }   // UI thread
+    private void fpsShown() { fpsView.shown(padVisible && !editMode); }
     // The top left screen corner as the window insets report it (Android 12+): the rounded corner's centre and radius and the cutout's
     // safe left inset. Phones with a bigger corner radius than the Mi 14 Ultra's cut the counter off at the fixed 18 dp (issue #1, Poco F8 Ultra).
     private float cornerCx, cornerCy, cornerR, safeLeft;
@@ -867,7 +878,7 @@ public class D3PadView extends View implements FrontMenu.Pad {
         float dy = cornerCy - y; return dy >= cornerR ? cornerCx : cornerCx - (float) Math.sqrt(cornerR * cornerR - dy * dy);
     }
     private void drawFps(Canvas c) {
-        if (!showFps || fstats[0] <= 0) return;
+        if (!showFps || !legacyFps || fstats[0] <= 0) return;
         String t = String.format(Locale.ROOT, "%.0f fps  %.1f ms (max %.0f)%s", fstats[0], fstats[1], fstats[2],
             fstats[3] >= 0 ? String.format(Locale.ROOT, "  GPU %.1f", fstats[3]) : "");
         text.setTextSize(15 * dp); text.setColor(0xd0ffffff);
