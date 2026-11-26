@@ -9,13 +9,13 @@ import android.view.Display;
 import android.view.WindowManager;
 
 // [pace-vote] The window's display mode follows the frame cap (port-common/modules/pace-vote, KB PNH-C03). The native side decides the rate
-// (perf_android.c pace_vote_tick, pace_vote.h pv_vote_hz: the lowest display rate that is a multiple of the cap and >= 60 Hz, 30 -> 60) and
+// (perf_android.c pace_vote_tick, pace_vote.h pv_vote_hz: 60 Hz for a cap of 30 / 20 / 15, else the marker 120) and
 // votes it on the window (ANativeWindow_setFrameRate); this class gives the native side the display's refresh rates at the current
 // resolution and asks the window for the mode of that rate (WindowManager.LayoutParams.preferredDisplayModeId) twice a second while the
 // activity is in front. The content vote alone left a 120 Hz panel at 120 for a 30 fps cap, where frames came as 25 / 42 ms pairs; a
 // window-local 60 Hz mode of the same resolution made them even (630 of 630 intervals at 33.4 ms). Idea adapted from peanuts-native 85eeb7a
 // (igawa6) android/app/src/main/java/dev/peanuts/display/RunningDisplayMode.java + RunningDisplayPolicy.java, GPL-3.0-or-later.
-// - At the display's fastest rate (cap above 60, uncapped) nothing is asked: the request goes back to what the window had before (the
+// - At the display's fastest rate (every cap but 30 / 20 / 15, uncapped) nothing is asked: the request goes back to what the window had before (the
 //   port's own mode request, e.g. frontend-common GearDisplay.applyDisplayMode for a limit above 60, or none). A request someone else made
 //   after ours is left alone.
 // - Paused / in the background: released (the same rule). Global display settings are never touched.

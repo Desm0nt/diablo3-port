@@ -42,9 +42,9 @@
 //   - ADPF target = the period of the frame cap the player / the game chose (dm_pace_cap_hz, hle_nvn.c: 60 -> 16.67 ms, 30 -> 33.33), never
 //     shorter than one screen refresh (DM_ADPF_TARGET=game, default). The old rule min(present period, DM_ADPF_BUDGET_MS) let a game that
 //     dropped to 30 aim at 33.3 ms: the clocks were held right under 30 and it never stepped back to 60. DM_ADPF_TARGET=old: the old rule.
-//   - the window's frame-rate vote = the lowest display rate that is a whole multiple of the cap and at least max(cap, 60) Hz, not above
-//     the marker (pace_vote.h pv_vote_hz): cap 30 -> 60 Hz (a 30 fps cap on a 120 Hz panel came as 25 / 42 ms pairs at peanuts), 60 -> 60
-//     where the display has a 60 Hz mode, above 60 / uncapped -> the marker (120). Followed live (the gear, eco_fps), held at its highest
+//   - the window's frame-rate vote: 60 Hz for a cap of 30 (and 20 / 15 / 12 / 10: whole fractions of 60) where the display has a 60 Hz
+//     mode (a 30 fps cap on a 120 Hz panel came as 25 / 42 ms pairs at peanuts); every other cap (60, above, 40 / 45, uncapped) keeps the
+//     marker (120), the owner's rule of 26.11 (pace_vote.h pv_vote_hz). Followed live (the gear, eco_fps), held at its highest
 //     for DM_VOTE_HOLD_MS (5000) before it goes down, re-applied every 5 s (a new surface votes the marker in vulkan_present.cpp).
 //     PaceVote.java asks the window for the display mode of that rate (preferredDisplayModeId, same resolution) while the activity is in
 //     front: the content vote alone left peanuts' panel at 120 Hz. DM_VOTE_HZ=max: the marker vote, no mode request (old).
@@ -505,7 +505,7 @@ static int vote_cap_mode(void) {   // DM_VOTE_HZ=cap (default): the vote follows
     static _Atomic int v = -1; int r = atomic_load(&v); if (r >= 0) return r;
     const char *e = getenv("DM_VOTE_HZ"); r = !(e && (!strcmp(e, "max") || !strcmp(e, "0")));
     atomic_store(&v, r);
-    LOG("[perf] DM_VOTE_HZ=%s: %s", r ? "cap" : "max", r ? "the window votes the lowest display rate that is a multiple of the frame cap and >= 60 Hz" : "the marker vote (old)");
+    LOG("[perf] DM_VOTE_HZ=%s: %s", r ? "cap" : "max", r ? "the window votes 60 Hz for a cap of 30 / 20 / 15 (a 60 Hz mode), the marker for every other cap" : "the marker vote (old)");
     return r;
 }
 static int64_t vote_hold_ns(void) {

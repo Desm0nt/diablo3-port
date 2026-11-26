@@ -1,7 +1,7 @@
 // [pace-vote] The rules of the display-rate vote and of the ADPF target as plain functions (no Android, no I/O), so a host test can drive
 // them (port-common/modules/pace-vote/test/t_pace_vote.c). perf_android.c owns the window, the hint session and the clocks; PaceVote.java
 // owns the window's display mode request.
-// KB PNH-C03 (a 30 fps cap asks the panel for 60 Hz) and PNH-C05 (the ADPF target is the game's cap period, not the present period capped
+// KB PNH-C03 (a 30 fps cap asks the panel for 60 Hz; 20 / 15 too, every other cap keeps the maximum) and PNH-C05 (the ADPF target is the game's cap period, not the present period capped
 // at 33.3 ms). Rules adapted from peanuts-native 85eeb7a (igawa6), GPL-3.0-or-later: vka_present.c frame_rate (the window rate held at
 // its highest for a few seconds), android/.../display/RunningDisplayPolicy.java mode (a 60 Hz mode of the same resolution for a 30 cap),
 // vka_dev.c vka_floor_period_ns + vka_cap_period_clamp (the target is the game's shortest period, never shorter than its cap's).
@@ -10,24 +10,27 @@
 #include <stdint.h>
 
 // ---- the panel rate for a frame cap (DM_VOTE_HZ=cap)
-// The lowest display rate that is a whole multiple of the cap (within 1 Hz: 59.94 counts for 30 / 60) and at least max(cap, 60) Hz, and
-// not above the marker vote (gfx-frame-rate, default 120: the old fixed vote is the ceiling = "the maximum"). 120 Hz panel with 60 / 120:
-// cap 30 -> 60, cap 60 -> 60, cap 40 -> 120, cap 90 -> 120 (no 90 mode), cap 120 -> 120; a 60 / 90 / 120 panel: cap 90 -> 90.
-// modes = the refresh rates of the display's modes at the current resolution (any order; n <= 0: not known yet, taken as {60, marker}).
-// cap <= 0 (uncapped) or no such rate -> the marker. marker <= 0 (marker file says 0 = no vote) -> 0.
+// Owner's rule (26.11): the vote leaves the maximum (the marker, gfx-frame-rate, default 120) only for a cap that is a whole fraction of
+// 60 at or below 30 fps (30, 20, 15, 12, 10; 29.97 counts): those frames are held for 2, 3, 4 ... refreshes of a 60 Hz panel and for 4, 6,
+// 8 ... of a 120 Hz one, and the long holds on the fast panel are what peanuts measured as uneven (30 fps on 120 Hz came as 25.3 / 42.2 ms
+// pairs; a 60 Hz mode of the same resolution gave 630 of 630 intervals at 33.4 ms). Such a cap votes 60 Hz (the display's mode within 1 Hz
+// of 60, 59.94 included; never below 60). Every other cap keeps the maximum: 60 and above (no hold longer than 2 refreshes at 120 Hz;
+// dropping a 60 cap to a 60 Hz panel was tried and turned down: the owner keeps 120 there), 40 / 45 / 24 / 25 (60 is not a multiple of
+// them: a 60 Hz panel would judder them, 120 shows 40 / 24 evenly), uncapped.
+// modes = the refresh rates of the display's modes at the current resolution (any order; n <= 0: not known yet = a 60 Hz mode assumed).
+// No 60 Hz mode, or the marker below 60 -> the marker. marker <= 0 (marker file says 0 = no vote) -> 0.
 static inline float pv_vote_hz(double cap_hz, const float *modes, int n, float marker) {
     if (!(marker > 0)) return 0;
-    if (!(cap_hz > 0)) return marker;
-    const float guess[2] = {60.0f, marker};
-    if (!modes || n <= 0) { modes = guess; n = 2; }
-    const double low = cap_hz > 60 ? cap_hz : 60;
+    if (!(cap_hz >= 9.5) || cap_hz > 30.5) return marker;
+    const double k = floor(60.0 / cap_hz + 0.5);
+    if (k < 2 || fabs(60.0 - k * cap_hz) > 1.0) return marker;   // not a whole fraction of 60
+    if (marker + 1.0f < 60.0f) return marker;
+    if (!modes || n <= 0) return 60.0f;
     float best = 0;
     for (int i = 0; i < n; i++) {
-        const double r = modes[i];
-        if (!(r > 0) || r + 1.0 < low || r > marker + 1.0) continue;
-        const double k = floor(r / cap_hz + 0.5);
-        if (k < 1 || fabs(r - k * cap_hz) > 1.0) continue;
-        if (best == 0 || r < best) best = (float)r;
+        const float r = modes[i];
+        if (!(r > 0) || fabsf(r - 60.0f) > 1.0f || r > marker + 1.0f) continue;
+        if (best == 0 || fabsf(r - 60.0f) < fabsf(best - 60.0f)) best = r;
     }
     return best > 0 ? best : marker;
 }
