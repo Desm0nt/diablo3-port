@@ -121,6 +121,7 @@ extern "C" uint64_t mtl_addr_avail(uint64_t addr);
 extern "C" void mtl_addr_near(uint64_t addr,uint64_t *lo,uint64_t *size);
 extern "C" int mtl_addr(uint64_t addr,uint64_t len,void **buf,uint64_t *off);   // nvn_vk.c: live GPU pools
 #include "xbg_present_thread.inc"   // [present-thread] PERF-D07 DM_GFX_PRESENT_THREAD: the queue lock and the present hand-off (namespace ptq)
+#include "xbg_venc.inc"   // [vk-enc-thread] PNH-A-01 DM_GFX_VENC: the translation window around xbg_submit_now (VencWindow)
 #include <unwind.h>
 #include <dlfcn.h>
 #ifdef DM_GAME_ETERNAL   // [ETERNAL] safety net: textures without host storage (beyond a virtual pool's host range) get no content checks
@@ -7716,6 +7717,7 @@ void submit_chunk(uint64_t spent_ns){
     submit_slots(false);seen_submits=perf.submits;acc_ns=0;
 }
 static void xbg_submit_now(int n,const uint64_t *handles){std::lock_guard<std::recursive_mutex> lock(mutex);
+    VencWindow venc_window;   // [vk-enc-thread] DM_GFX_VENC: vkCmd* of this submission go to dm-venc; destroyed before the lock, it hands them all over
     if(deferred_live_profile && !timing.top){uint64_t current=stats.presents.load();timing=XbgCpuTiming(timing_clock);timing_first=current+2;timing_last=timing_first+deferred_live_profile-1;deferred_live_profile=0;}
    TimingRoot timing_root;CPU_SCOPE(Other);need(initialized && !failed,"Game Vulkan backend not initialized/healthy");uint64_t begin=timing_clock();zcubo::check();snapshot_reset();uint64_t budget=0;exec_handles=handles;exec_nhandles=n;for(int i=0;i<n;i++){exec_handle=i;execute(reinterpret_cast<const uint8_t*>(handles[i]),0,budget);}exec_handles=nullptr;exec_nhandles=0;exec_pc=nullptr;if(vt_fix_mask()&1)cpu_visible_flush();++stats.submissions;++submitted;if(sync_mode)complete_all();const uint64_t spent=timing_clock()-begin;perf.submit_cpu_ns+=spent;submit_chunk(spent);}
 extern "C" uint64_t xbg_legacy_last_fence(){return gfx_async?gfx_enqueued.load():[]{std::lock_guard<std::recursive_mutex> lock(mutex);return submitted;}();}
