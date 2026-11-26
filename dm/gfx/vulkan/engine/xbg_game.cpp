@@ -7464,7 +7464,8 @@ extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t b
           (own("DM_GFX_LAZY_TWIN_FLUSH")?XBG_STK_LAZY_TWIN_FLUSH:0u)|(own("DM_GFX_LAZY_KEEP")?XBG_STK_LAZY_KEEP:0u);
       char line[600];xbg_stock_tile_line(line,sizeof line,stock_tile_mode,stk,properties.vendorID,gpu_driver_id,gpu_driver_name,wanted,effective,own_set,stk && stk_none_lost);
       xbg_logf("NVN stock tile: %s (DM_GFX_STOCK_TILE)",line);
-      pc_note("stock-tile",stk?1:0,"%s",line);}   // [pc]
+      pc_note("stock-tile",stk?1:0,"%s",line);   // [pc]
+     }
      xbg_logf("NVN gpu policy: pipe_serial=%d pipe_guard=%d ubo_dynamic=%d noout_mask=%d zero-copy default=%d (DM_GFX_PIPE_SERIAL / PIPE_GUARD / UBO_DYNAMIC / NOOUT_MASK / ZEROCOPY)",
               int(gpguard::serial),int(gpguard::guard),int(ubo_dynamic_on),int(noout_mask_on),int(xbg_zero_copy_default(gpu_policy)));}
     {const auto &l=properties.limits;VkDeviceSize a=256;for(VkDeviceSize x:{l.minUniformBufferOffsetAlignment,l.minStorageBufferOffsetAlignment,l.minTexelBufferOffsetAlignment,l.optimalBufferCopyOffsetAlignment,l.nonCoherentAtomSize,VkDeviceSize(16)})while(a<x)a<<=1;arena_alignment=a;}
