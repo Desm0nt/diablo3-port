@@ -11,6 +11,7 @@ extern "C" void dm_aperf_present(ANativeWindow*,float);
 #include "../gfx/vulkan/nvn_vk.h"
 #include "../gfx/xtrace.h"
 #include "../gfx/vulkan/engine/xbg_device_fault.h"   // [device-fault] FN-64 (port-common device-fault)
+#include "../gfx/vulkan/engine/xbg_stock_tile.h"   // [stock-tile] PNH-B-01: load_store_op_none on Qualcomm's stock driver (port-common stock-tile)
 #include "../host/cpu_topo.h"   // [cpu-place] the translator's pin comes from the placement plan unless a marker sets it
 #include <android/log.h>
 #include <android/native_window.h>
@@ -864,11 +865,16 @@ extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t byte
     // from the DOOM 2016 port). Off on Adreno unless DM_GFX_STORE_NONE / DM_GFX_SIM_GPU ask, so the Adreno device is created exactly as before.
     {VkPhysicalDeviceProperties pp{};vkGetPhysicalDeviceProperties(physical,&pp);dm_vk_store_none=0;
      auto env_on=[](const char *n){const char *e=getenv(n);return e && *e && strcmp(e,"0")!=0;};
-     const bool other=pp.vendorID!=0x5143 || env_on("DM_GFX_SIM_GPU");
-     bool lsn_ext=false,lsn_khr=false;for(const auto &x:available){if(!strcmp(x.extensionName,VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME))lsn_ext=true;if(!strcmp(x.extensionName,"VK_KHR_load_store_op_none"))lsn_khr=true;}
+     // [stock-tile] on Qualcomm's stock driver STORE_NONE is one of the exact tile rules (xbg_stock_tile.h, DM_GFX_STOCK_TILE): the
+     // extension is enabled there too. Its older form VK_QCOM_render_pass_store_ops has the same value (STORE_OP_NONE_QCOM = STORE_OP_NONE)
+     // and is taken only when neither the EXT nor the KHR one is listed.
+     uint32_t drv_id=0;{VkPhysicalDeviceDriverProperties dp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};p2.pNext=&dp;vkGetPhysicalDeviceProperties2(physical,&p2);drv_id=uint32_t(dp.driverID);}
+     const bool stock=xbg_stock_tile_active(xbg_stock_tile_mode(getenv("DM_GFX_STOCK_TILE")),pp.vendorID,drv_id);
+     const bool other=pp.vendorID!=0x5143 || env_on("DM_GFX_SIM_GPU") || stock;
+     bool lsn_ext=false,lsn_khr=false,lsn_qcom=false;for(const auto &x:available){if(!strcmp(x.extensionName,VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME))lsn_ext=true;if(!strcmp(x.extensionName,"VK_KHR_load_store_op_none"))lsn_khr=true;if(!strcmp(x.extensionName,"VK_QCOM_render_pass_store_ops"))lsn_qcom=true;}
      const char *sn=getenv("DM_GFX_STORE_NONE");
-     if((lsn_ext || lsn_khr) && (sn && *sn?atoi(sn)!=0:other)){dext.push_back(lsn_khr?"VK_KHR_load_store_op_none":VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME);dm_vk_store_none=1;}
-     __android_log_print(ANDROID_LOG_INFO,"dm-vulkan","NVN store ops: load_store_op_none ext=%d khr=%d enabled=%d",int(lsn_ext),int(lsn_khr),dm_vk_store_none);}
+     if((lsn_ext || lsn_khr || lsn_qcom) && (sn && *sn?atoi(sn)!=0:other)){dext.push_back(lsn_khr?"VK_KHR_load_store_op_none":lsn_ext?VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME:"VK_QCOM_render_pass_store_ops");dm_vk_store_none=1;}
+     __android_log_print(ANDROID_LOG_INFO,"dm-vulkan","NVN store ops: load_store_op_none ext=%d khr=%d qcom=%d enabled=%d (driverID %u, stock tile %d)",int(lsn_ext),int(lsn_khr),int(lsn_qcom),dm_vk_store_none,drv_id,int(stock));}
     // Diagnostic (marker gfx-pipe-stats): the driver's per-pipeline statistics (VK_KHR_pipeline_executable_properties).
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pef{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
     if(FILE *ps=[&]{std::string dir=path;size_t cut=dir.find_last_of('/');return fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-pipe-stats").c_str(),"rb");}()){fclose(ps);dext.push_back(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);pef.pipelineExecutableInfo=VK_TRUE;pef.pNext=draw.pNext;draw.pNext=&pef;}
