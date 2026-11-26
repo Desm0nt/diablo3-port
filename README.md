@@ -246,11 +246,18 @@ included or distributed here; play it with a copy you own.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The d2r-mobile copyright notice is kept; third-party components keep their own licenses.
+GPL-3.0-or-later: see [LICENSE](LICENSE). The APK and the source tree are distributed under the GNU General Public License version 3
+or (at your option) any later version.
 
-Exception: `dm/host/hle_d3_mods.c` (the "Mods / cheats" page) contains code derived from
-[d3hack](https://github.com/god-jester/d3hack) and is GPL-2.0 ([its license text](dm/host/hle_d3_mods.LICENSE)). It is linked into
-`libdm.so`, so the APK as a whole is distributed under the GPL-2.0; all its source is in this repository.
+- Parts of the port come from MIT-licensed projects (d2r-mobile, nxnative, nx2android and others). Their notices are kept: the
+  d2r-mobile one in [LICENSE-MIT](LICENSE-MIT), the others in the files and in [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md). MIT code may be
+  used under the GPL.
+- Several speed-ups (the GPU clock floor, the frame-cap pacing, the command-recording thread, the frame counter) are adapted from
+  peanuts-native (GPL-3.0-or-later); each such file says so.
+- `dm/host/hle_d3_mods.c` (the "Mods / cheats" page) contains code derived from [d3hack](https://github.com/god-jester/d3hack), whose
+  repository carries the GPL-2 text without naming a version for the program; under section 9 of that license any version may be chosen,
+  so it is used here under GPL-3.0-or-later ([d3hack's license text](dm/host/hle_d3_mods.LICENSE)).
+- Third-party libraries keep their own licenses (Apache-2.0 astc-encoder and others), all compatible with GPL-3.
 
 ---
 

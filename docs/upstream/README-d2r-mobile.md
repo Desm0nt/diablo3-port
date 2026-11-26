@@ -27,4 +27,4 @@ This project stands on the open-source work below. Thank you to its authors and 
 
 ## License
 
-MIT, see [LICENSE](../../LICENSE). Third-party code keeps its own license in its own directory; see [docs/DEPENDENCIES.md](../DEPENDENCIES.md).
+MIT, see [LICENSE-MIT](../../LICENSE-MIT) (the port as a whole is GPL-3.0-or-later since 0.2.26). Third-party code keeps its own license in its own directory; see [docs/DEPENDENCIES.md](../DEPENDENCIES.md).

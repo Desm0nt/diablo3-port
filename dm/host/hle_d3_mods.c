@@ -1,14 +1,15 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 // [D3] Mods / cheats (gear "Mods / cheats", DmActivity.showD3Mods): offline seasons, season buffs and cheats.
 // This file contains code derived from d3hack (https://github.com/god-jester/d3hack, studied at c0f0dbd), Copyright (C) god-jester and the
-// d3hack contributors, licensed under the GNU General Public License version 2 (text: hle_d3_mods.LICENSE next to this file). d3hack is an
+// d3hack contributors, distributed with the GNU General Public License version 2 text and no version named for the program (text:
+// hle_d3_mods.LICENSE next to this file; GPL-2 section 9: any version may be chosen). d3hack is an
 // exlaunch module for the Switch game build 2.7.6.90885; its sources carry no per-file headers. Ported from it (C++ -> C, our hook
 // mechanism, 2.7.7 addresses): the hooks MoveSpeed / AttackSpeed / EquipAny (d3/hooks/util.hpp), ForceAncient + AugmentSpecifier
 // (util.hpp), the sInitializeWorld hook with EnableGod / FlagsAreFun (main.cpp, d3/_lobby.hpp), the offline-season / community-event
 // XVar setup (d3/patches.cpp PatchDynamicSeasonal / PatchDynamicEvents / PatchBase), the cheat patches (PortCheatCodes, PatchBase) and
 // the offline Challenge Rift (d3/hooks/debug.hpp StorageGetPubFile / ChallengeRiftCallback / the reward hooks, d3/util.cpp
 // PopulateChallengeRiftData; data: examples/config/d3hack-nx/rift_data -> hle_d3_rift_data.inc).
-// The rest of this tree is MIT; this file is GPL-2.0 (see README "License").
+// The port as a whole is GPL-3.0-or-later since 0.2.26 (see README "License").
 //
 // Everything is off by default; the front end passes the choices at start:
 //   DM_D3_SEASON=<n>     offline season n (1..99; unset / 0 = off): the game's season XVars Season.Num = n, Season.State = 1 (in progress),

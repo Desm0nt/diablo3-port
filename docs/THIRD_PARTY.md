@@ -1,10 +1,11 @@
 # Third-party code in the Diablo III port
 
-The tree in `dm/` is a fork of d2r-mobile (MIT, Copyright (c) 2026 jhaizhou, kept in the root `LICENSE`; its Java package is
+The tree in `dm/` is a fork of d2r-mobile (MIT, Copyright (c) 2026 jhaizhou, kept in `LICENSE-MIT`; its Java package is
 `com.xiaoboluo.d2r`), extended first for DOOM Mobile and then for DOOM Eternal, Xenoblade 2 and Diablo III; the third-party
 code d2r-mobile brought is listed in [DEPENDENCIES.md](DEPENDENCIES.md) and its contributors in
 [upstream/README-d2r-mobile.md](upstream/README-d2r-mobile.md). Code was also ported from other MIT-licensed projects.
-Each ported file says so in a comment and keeps the original copyright line.
+Each ported file says so in a comment and keeps the original copyright line. Since 0.2.26 the port as a whole is GPL-3.0-or-later
+(root `LICENSE`): it contains code adapted from peanuts-native (GPL-3.0-or-later) and from d3hack (see below).
 
 | Project | License / copyright | Source |
 |---|---|---|
@@ -12,7 +13,8 @@ Each ported file says so in a comment and keeps the original copyright line.
 | nxnative | MIT, Copyright (c) 2026 seedds | https://github.com/seedds/nxnative |
 | nx2android | MIT, Copyright (c) 2026 seedds (its embedded `nxnative/LICENSE`) | https://github.com/shirai91/nx2android (the source comments cite it as `seedds/nx2android`) |
 | nx2android gamepad themes | MIT, Copyright (c) 2026 seedds (`dm/android/front-assets/LICENSE-nx2android-themes.txt`) | https://github.com/shirai91/nx2android — the on-screen gamepad skins (`themes/`) and the default layout (`overlay_default.tsv`) in `dm/android/front-assets`, unmodified |
-| d3hack | GPL-2.0, Copyright (C) god-jester and contributors (`dm/host/hle_d3_mods.LICENSE`) | https://github.com/god-jester/d3hack (studied at c0f0dbd) — code ported into `dm/host/hle_d3_mods.c`, see below |
+| d3hack | GPL-2 text, no version named (used under GPL-3.0-or-later, see below), Copyright (C) god-jester and contributors (`dm/host/hle_d3_mods.LICENSE`) | https://github.com/god-jester/d3hack (studied at c0f0dbd) — code ported into `dm/host/hle_d3_mods.c`, see below |
+| peanuts-native | GPL-3.0-or-later, igawa6 | studied at 85eeb7a — adapted into `dm/android/gpu_floor.c`, `pace_vote.h`, `perf_android.c` (frame-cap pacing), `vk_enc.c` / `vk_enc.h`, `dm/gfx/nvn/longframe_diag.h`, Java `PaceVote`, `FpsOverlay`; each file names its source (port-common batch "peanuts", 26.11.2026) |
 | BOTWRecompAndroid | MIT, Copyright (c) 2026 Peiikai + notice mamcjr | https://github.com/mamcjr/BOTWRecompAndroid (studied at 5675618) — ideas only, see below |
 | D3CPKUnpack (`cpklib.py`) | MIT, Copyright (c) 2026 Krzysztof Janiszewski (RedMadKnight) — `tools/d3cpklib.LICENSE` | https://github.com/RedMadKnight/D3CPKUnpack at 9fa02146e33d3ef38b2ea6ec5dfdb3aebceba10e — vendored unmodified (below a two-line header) as `tools/d3cpklib.py`; `tools/d3_cpk.py` is our front-end |
 | libadrenotools | BSD-2-Clause, bylaws | https://github.com/bylaws/libadrenotools — `third_party/libadrenotools` (git submodule, with its own `lib/linkernsbypass`) |
@@ -95,15 +97,16 @@ the source in a comment.
 | `gfx/nvn/hle_nvn.c` `nvnSyncWait` (`DM_NVN_SYNC_LAG=1`, off by default) | BOTWRecompAndroid 82b71e2 "sync lag" | Wait for the fence of frame N-1 instead of N |
 | `gfx/nvn/nvn_obj.h` `FITS55` limits | BOTWRecompAndroid NVN object writes | Size limits of NVN 55 objects (DOOM Eternal) |
 
-## d3hack (GPL-2.0)
+## d3hack (GPL)
 
 d3hack by god-jester is an exlaunch module for the Switch game (build 2.7.6.90885): offline seasons, community events, cheats,
 challenge rifts, a resolution hack and an ImGui overlay. Studied on 13.11.2026 and 16.11.2026 at c0f0dbd. **`dm/host/hle_d3_mods.c` contains code
-derived from it and is therefore GPL-2.0** (`SPDX-License-Identifier: GPL-2.0-only` in the file, license text in
+derived from it and is therefore under the GPL** (`SPDX-License-Identifier: GPL-2.0-or-later` in the file: d3hack's repository has only the
+GPL-2 text and names no version, so section 9 lets any version be chosen; license text in
 `dm/host/hle_d3_mods.LICENSE`; d3hack's sources have no per-file copyright headers, so the file names d3hack, its author and the commit).
 Its C++ (exlaunch hooks, `config.toml`) was ported to C on our hook mechanism (the function's first instructions replaced by a jump to the
 host, the originals run from a trampoline) and its 2.7.6 offsets were moved to update 2.7.7 (build-id 2607a74f) by matching the game's code.
-The rest of the tree stays MIT; the APK, which links this file, is distributed under the GPL-2.0 (README "License").
+Since 0.2.26 the whole port is GPL-3.0-or-later (README "License"), which also covers the peanuts-native parts.
 
 | d3hack source | Taken into `hle_d3_mods.c` |
 |---|---|
