@@ -54,6 +54,9 @@ void xbg_game_event_read(const void *addr);
 void xbg_game_event_peek(const void *addr);
 int xbg_game_idle_poll(uint64_t idle_ns);
 int xbg_game_idle_retire_mode(void);
+/* [TL2 #4] DM_NVN_FENCE_FLUSH (hle_nvn.c nvnQueueFenceSync with FLUSH_FOR_CPU): hand the recording slot to the GPU now, as a Switch
+ * queue flush starts the submitted commands; no wait. */
+void xbg_game_flush(void);
 /* 宿主管SIGSEGV时先注册use_host_hooks；fault返回是否命中跟踪页，宿主写客体前调用prepare。
  * With host-owned SIGSEGV, register use_host_hooks first; fault reports tracked-page hits and prepare precedes host writes into guest memory. */
 void xbg_wtrack_use_host_hooks(void);

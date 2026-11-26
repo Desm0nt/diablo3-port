@@ -723,7 +723,30 @@ NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t
 NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; }
 // 围栏 = 「此前提交到队列的命令全部完成」：记下最近一次提交的栅栏值
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
-NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = x_fence(); }
+// [TL2 #4] DM_NVN_FENCE_FLUSH (overlap of translation and GPU): on the Switch nvnQueueFenceSync with NVN_SYNC_FLAG_FLUSH_FOR_CPU_BIT (1)
+// flushes the queue, so the commands submitted before it start on the GPU at once, behind whatever still runs. Here the translated
+// frame sat in the recording slot until the next nvnQueuePresentTexture, and TL2 presents frame N only after its SyncWait on frame N-1
+// (main 0x1993fe0: EndRecording, QueueSubmitCommands, FenceSync(flags 1), swap to the other frame context and SyncWait(UINT64_MAX)
+// on its fence = frame N-1 at 0x1995380, then QueuePresentTexture): the GPU finished N-1 and idled until the game woke up, retired the
+// slot and presented (Mali-G615, issue #4: frame = GPU + ~4.4 ms, submit_by present=1.00). Bit 1: such a FenceSync queues a flush job
+// right behind the submit (the translation thread hands the recording slot to the GPU, xbg_flush); bit 2: nvnQueueFlush does too.
+// The fence semantics do not change (a SyncWait still waits for translation and the GPU), only when the GPU starts. Default 1 for
+// TL2, 0 elsewhere; 0 = the old behaviour (kill switch).
+#ifdef DM_GAME_TL2   // [D3] not needed: D3 main calls no FenceSync / SyncWait / QueueFlush (fence-flush module review 26.11)
+#define DM_NVN_FENCE_FLUSH_DEFAULT 1
+#else
+#define DM_NVN_FENCE_FLUSH_DEFAULT 0
+#endif
+static int fence_flush_mode(void) {
+    static int m = -1;
+    if (m < 0) { const char *e = getenv("DM_NVN_FENCE_FLUSH"); m = e ? atoi(e) & 3 : DM_NVN_FENCE_FLUSH_DEFAULT;
+        LOG("[nvn] DM_NVN_FENCE_FLUSH=%d: %s%s", m, m & 1 ? "FenceSync(FLUSH_FOR_CPU) hands the translated work to the GPU at once" : "translated work waits for the next present",
+            m & 2 ? "; nvnQueueFlush too" : ""); }
+    return m;
+}
+static void x_flush_req(void);   // queues XJ_FLUSH (translation queue below)
+NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = x_fence();
+    if ((f & 1) && (fence_flush_mode() & 1)) x_flush_req(); }   // 1 = NVN_SYNC_FLAG_FLUSH_FOR_CPU_BIT
 // 没围栏过的同步对象按真机行为等到超时；已围栏的只在 GPU 真正完成到该栅栏值后放行
 // 诊断：游戏每帧在 SyncWait / 读事件上等了多久、等的是落后最新提交几次的栅栏（每 300 帧一行）
 // A sync object that was never fenced waits until the timeout, as on the device; a fenced one is released only once the GPU has really completed up to that fence value
@@ -763,6 +786,53 @@ static void gwa_report(void) {
         c[0] / n, nd[0] / n, sp[0] / n / 1e6, c[1] / n, nd[1] / n, sp[1] / n / 1e6, c[2] / n, nd[2] / n, sp[2] / n / 1e6, atomic_exchange(&g_gwa_lagged, 0) / n, g_sync_lag, g_poll_us);
 }
 #endif
+static int x_sub_translated(uint64_t sub);   // 1 = submit `sub` is translated (DM_NVN_SYNC_XWAIT)
+// [TL2 #12] The guest call chain of the calling thread, from its frame records (diagnostics only: the NVN entry shims sit between
+// us and the game, so __builtin_return_address names our own code). Reads through process_vm_readv: a bad record ends the walk
+// instead of faulting. Up to n return addresses that lie in a loaded module; returns how many.
+#ifdef __ANDROID__
+#include <sys/uio.h>
+#include <sys/syscall.h>
+static int nvn_guest_chain(uintptr_t *out, int n) {
+    int k = 0; uint64_t fp = (uint64_t)(uintptr_t)__builtin_frame_address(0);
+    for (int i = 0; i < 24 && k < n && fp && !(fp & 7); i++) {
+        uint64_t rec[2]; struct iovec l = {rec, sizeof rec}, r = {(void *)(uintptr_t)fp, sizeof rec};
+        if (syscall(SYS_process_vm_readv, getpid(), &l, 1UL, &r, 1UL, 0UL) != (long)sizeof rec) break;
+        if (module_of((const void *)(uintptr_t)rec[1])) out[k++] = (uintptr_t)rec[1];
+        if (rec[0] <= fp) break;
+        fp = rec[0];
+    }
+    return k;
+}
+#else
+static int nvn_guest_chain(uintptr_t *out, int n) { (void)out; (void)n; return 0; }
+#endif
+static void nvn_chain_str(char *b, size_t bn, const uintptr_t *ra, int n) {
+    size_t at = 0; b[0] = 0;
+    for (int i = 0; i < n && at + 40 < bn; i++) { module_t *m = module_of((const void *)ra[i]);
+        at += (size_t)snprintf(b + at, bn - at, "%s%s+%#llx", i ? " <- " : "", m ? m->name : "?", m ? (unsigned long long)(ra[i] - (uintptr_t)m->base) : (unsigned long long)ra[i]); }
+    if (!n) snprintf(b, bn, "(no guest frames)");
+}
+// [TL2 #12] DM_NVN_SYNC_XWAIT (DOOM Eternal cmp16 b654ecf / 5749b46, KB PERF-E01): xbg_legacy_wait answers a wait on a fence whose submit the
+// translation thread has not translated yet with "not done" at once (fence > submitted), even for an infinite timeout. TL2 waits on its
+// syncs with nvnSyncWait(UINT64_MAX) (boot log "SyncWait on never-fenced sync ... timeout 18446744073709551615", 2 calls a frame, no
+// retries seen) and, past the call, treats the GPU as done: it reuses that frame's command memory and rewrites its UI / uniform data. On the
+// Switch the call blocks. With 3 swapchain textures the game runs up to 3 frames ahead of the translator, so whenever translation falls
+// 2+ submits behind (Mali: slower GPU and translation; opening the pause menu = new UI work) the game rewrote command memory the translator
+// was still replaying: "NVN command size outside pool" / "NVN opcode 0xff980000 not implemented" in execute() (GitHub issue #12, Mali-G925).
+// 1 = a wait with a timeout on an untranslated fence first waits on the translation queue (as the HarmonyOS path does), then asks the GPU
+// with the rest of the timeout. Default 1 for TL2, 0 elsewhere (unchanged). DM_NVN_SYNC_XWAIT_MS: cap of the translation wait, default
+// for TL2 0 = the game's own timeout (the Switch blocks for real; a 100 ms cap as in Eternal would let a long Mali pipeline stall through),
+// elsewhere 100 as in Eternal. Diagnostics (always, cheap: only waits that find the target untranslated are counted): the first 4 such waits
+// and every 512th are logged with the game call chain ("[nvn] SyncWait on an untranslated fence").
+#ifdef DM_GAME_TL2
+#define DM_NVN_SYNC_XWAIT_DEFAULT 1
+#define DM_NVN_SYNC_XWAIT_MS_DEFAULT 0
+#else
+#define DM_NVN_SYNC_XWAIT_DEFAULT 0
+#define DM_NVN_SYNC_XWAIT_MS_DEFAULT 100
+#endif
+static _Atomic uint64_t g_sx_untr, g_sx_slow;
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s;
 #ifdef DM_GAME_DOOM
@@ -779,6 +849,26 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
 #else
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+#endif
+#ifndef __OHOS__
+    // [TL2 #12] DM_NVN_SYNC_XWAIT (see above): a timed wait on a fence not translated yet waits for its translation first
+    if (timeout && !x_sub_translated(o->fence)) {
+        static int sx = -1; static uint64_t sx_cap;
+        if (sx < 0) { const char *e = getenv("DM_NVN_SYNC_XWAIT"), *m = getenv("DM_NVN_SYNC_XWAIT_MS");
+            sx_cap = (uint64_t)(m ? atoi(m) : DM_NVN_SYNC_XWAIT_MS_DEFAULT) * 1000000ull; sx = e ? atoi(e) : DM_NVN_SYNC_XWAIT_DEFAULT;
+            LOG("[nvn] DM_NVN_SYNC_XWAIT=%d (cap %llu ms, 0 = the game's timeout): a timed SyncWait on an untranslated fence %s", sx, (unsigned long long)(sx_cap / 1000000),
+                sx ? "waits for its translation first" : "is answered at once (TIMEOUT_EXPIRED)"); }
+        const uint64_t n = atomic_fetch_add(&g_sx_untr, 1) + 1, ahead = x_fence() - o->fence;
+        if (n <= 4 || n % 512 == 0) { uintptr_t ra[6]; char cs[400]; nvn_chain_str(cs, sizeof cs, ra, nvn_guest_chain(ra, 6));
+            LOG("[nvn] SyncWait on an untranslated fence (#%llu): fence %llu, %llu submits enqueued after it, timeout %llu, %s; game %s", (unsigned long long)n,
+                (unsigned long long)o->fence, (unsigned long long)ahead, (unsigned long long)timeout, sx ? "waiting for translation" : "answered TIMEOUT at once (DM_NVN_SYNC_XWAIT=0)", cs); }
+        if (sx) { const uint64_t t0 = now_ns(), cap = sx_cap && sx_cap < timeout ? sx_cap : timeout;
+            const int ok = x_wait_sub(o->fence, cap); const uint64_t used = now_ns() - t0;
+            if (!ok || used > 250000000ull) { const uint64_t k = atomic_fetch_add(&g_sx_slow, 1) + 1;
+                if (k <= 4 || k % 256 == 0) LOG("[nvn] SyncWait translation wait %s after %.1f ms (fence %llu, #%llu)", ok ? "done" : "TIMED OUT", used / 1e6, (unsigned long long)o->fence, (unsigned long long)k); }
+            if (timeout < 3600000000000ull) timeout = used >= timeout ? 0 : timeout - used;
+            if (!timeout && !ok) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
+    }
 #endif
 #ifdef __OHOS__   // 鸿蒙：先在翻译队列上等目标提交译完再问 GPU，并记等待统计（其他平台保持原逻辑）| HarmonyOS: wait on the translation queue for the target submit first, then ask the GPU, with wait statistics (other platforms keep the original logic)
     atomic_fetch_add(&g_gw_sync_n, 1); atomic_fetch_add(&g_gw_sync_lag, x_fence() - o->fence); if ((const void *)s == g_acq_sync) atomic_fetch_add(&g_gw_acq_n, 1); gw_report();
@@ -825,6 +915,8 @@ __attribute__((weak)) void mtl_event_read(const volatile uint32_t *val) { (void)
 __attribute__((weak)) void mtl_event_peek(const volatile uint32_t *val) { mtl_event_read(val); }
 __attribute__((weak)) int mtl_idle_mode(void) { return 0; }
 __attribute__((weak)) int mtl_idle_poll(uint64_t idle_ns) { (void)idle_ns; return 0; }
+// [TL2 #4] DM_NVN_FENCE_FLUSH (strong in nvn_vk.c): hand the translated work to the GPU now. Weak: backends that start work at commit.
+__attribute__((weak)) void mtl_flush(void) {}
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
 NVN(nvnEventBuilderSetStorage, void, NVNeventBuilder *b, const NVNmemoryPool *p, int64_t off) { *(ev_builder_t *)b = (ev_builder_t){(const pool_t *)p, off}; }
 NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
@@ -878,7 +970,7 @@ NVN(nvnQueueFinalize, void, NVNqueue *q) { ((queue_t *)q)->magic = 0; }
 NVN(nvnQueueGetError, NVNqueueGetErrorResult, NVNqueue *q, NVNqueueErrorInfo *info) {
     (void)q; if (info) memset(info, 0, sizeof *info); return NVN_QUEUE_GET_ERROR_RESULT_GPU_NO_ERROR;
 }
-NVN(nvnQueueFlush, void, NVNqueue *q) { (void)q; }
+NVN(nvnQueueFlush, void, NVNqueue *q) { (void)q; if (fence_flush_mode() & 2) x_flush_req(); }   // [TL2 #4] DM_NVN_FENCE_FLUSH bit 2
 NVN(nvnQueueFinish, void, NVNqueue *q) { (void)q; x_drain(); mtl_finish(); }
 
 // ---------- 命令缓冲：录进游戏的命令内存，提交时执行 CPU 可见副作用 ----------
@@ -1259,8 +1351,41 @@ static void rt_comp_tick(rt_decl *d, uint64_t period_ns);
 // completes, so waiting for fence f means waiting until "f is translated and the GPU is done"; by the time the game reclaims command memory or rewrites objects by fence, the translation thread has long finished reading them.
 // Present tickets become this queue's job numbers: acquire first waits for that job to run, then waits on the present thread ticket it was swapped for. Setting the frame number is queued too: replay resets bloom sampling and other state by frame number,
 // which must not be changed by the game thread in the middle of translation. DM_NVN_SYNC=1: jobs run in place on the calling thread (the same execution function), as the control and measurement baseline.
-enum { XJ_SUBMIT, XJ_PRESENT, XJ_FRAME };
-typedef struct { int kind, n; uint64_t *h; const tex_t *tex; double period; int crop[4]; uint64_t frame, sub, host; } xjob;   // host：入队时锁存的宿主画法开关 | host: host drawing switches latched at enqueue
+enum { XJ_SUBMIT, XJ_PRESENT, XJ_FRAME, XJ_FLUSH };   // XJ_FLUSH: [TL2 #4] DM_NVN_FENCE_FLUSH, hand the translated work to the GPU (mtl_flush)
+typedef struct { int kind, n; uint64_t *h; const tex_t *tex; double period; int crop[4]; uint64_t frame, sub, host; void *guard; } xjob;   // host：入队时锁存的宿主画法开关 | host: host drawing switches latched at enqueue; guard: DM_NVN_CMDGUARD snapshot (cmdguard_t)
+// [TL2 #12] DM_NVN_CMDGUARD=1 (dev diagnostic, default off): at nvnQueueSubmitCommands hash the submit's top-level records (each handle's
+// stream, following JUMPs; CALLed handles not included) and remember the byte ranges; the translation thread hashes the same ranges again
+// right before and after translating the submit. A difference = the game (or anyone) rewrote command memory of a submit that was still
+// queued / being translated: "[nvn] command memory changed before translation" (or "during translation"), with the game call chain
+// of the submit and how far translation was behind. Off: one branch per submit. "during" is checked after the Vulkan commit: a game that
+// polls (timeout 0) may legitimately see that GPU work done and reuse the memory first, so only "before" is proof on its own.
+typedef struct { int n, nh; uint64_t hash, frame, bytes; int nra; uintptr_t ra[6]; struct { const uint8_t *p; size_t len; } r[64]; } cmdguard_t;
+static int cmdguard_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_CMDGUARD"); on = e && atoi(e) > 0; if (on) LOG("[nvn] DM_NVN_CMDGUARD=1: submits' command records are hashed at submit and re-checked by the translation thread"); } return on; }
+static uint64_t cmdguard_hash(const cmdguard_t *g) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (int i = 0; i < g->n; i++) { const uint8_t *p = g->r[i].p; for (size_t k = 0; k + 8 <= g->r[i].len; k += 8) { uint64_t w; memcpy(&w, p + k, 8); h = (h ^ w) * 0x100000001b3ull; h ^= h >> 29; } }
+    return h;
+}
+static void cmdguard_walk(cmdguard_t *g, const uint8_t *pc) {   // ranges of one handle's top-level stream, at submit (the game's recording is complete)
+    const uint8_t *seg = pc;
+    for (unsigned k = 0; pc && k < 4000000u && g->n < 63; k++) {
+        op_hdr h; memcpy(&h, pc, 8);
+        if (h.op == OP_END) { pc += 8; break; }
+        if (h.op == OP_JUMP) { uint64_t t; memcpy(&t, pc + 8, 8); g->r[g->n].p = seg; g->r[g->n++].len = (size_t)(pc + 16 - seg); g->bytes += (uint64_t)(pc + 16 - seg); pc = seg = (const uint8_t *)(uintptr_t)t; continue; }
+        if (h.size < 8 || (h.size & 7)) break;
+        pc += h.size;
+    }
+    if (pc && pc > seg && g->n < 64) { g->r[g->n].p = seg; g->r[g->n++].len = (size_t)(pc - seg); g->bytes += (uint64_t)(pc - seg); }
+}
+static void cmdguard_check(const cmdguard_t *g, uint64_t sub, const char *when) {
+    if (cmdguard_hash(g) == g->hash) return;
+    static _Atomic unsigned bad; const unsigned b = atomic_fetch_add(&bad, 1) + 1;
+    if (b > 8 && b % 256) return;
+    char cs[400]; nvn_chain_str(cs, sizeof cs, g->ra, g->nra);
+    LOG("【红】[nvn] command memory changed %s translation (#%u): submit %llu (%d handles, %d ranges, %llu bytes, game frame %llu at submit, now %llu), %llu submits enqueued after it; submitted by %s",
+        when, b, (unsigned long long)sub, g->nh, g->n, (unsigned long long)g->bytes, (unsigned long long)g->frame, (unsigned long long)dm_nvn_frame_count(),
+        (unsigned long long)(atomic_load(&g_x_subs) - sub), cs);
+}
 #define XQ 32
 #define XTK 1024
 static xjob g_xq[XQ]; static uint64_t g_xq_in, g_xq_done, g_xsub_done;   // g_xsub_done：已翻译完的提交号（栅栏值） | g_xsub_done: the last submit number translated (fence value)   // 入队任务数 / 已执行任务数（任务号从 1 计） | Jobs enqueued / jobs executed (job numbers start at 1)
@@ -1297,12 +1422,17 @@ static void x_submit(const uint64_t *h, int n, uint64_t sub, uint64_t host) {
 }
 static void x_run(const xjob *j, uint64_t job) {
     XTRACE_COUNT("dm-x-run-job", job); XTRACE_COUNT("dm-x-run-sub", j->sub); XTRACE_COUNT("dm-x-run-frame", j->frame);
-    if (j->kind == XJ_SUBMIT) { XTRACE_BEGIN("dm-x-submit"); x_submit(j->h, j->n, j->sub, j->host); free(j->h); XTRACE_END(); }
+    if (j->kind == XJ_SUBMIT) { XTRACE_BEGIN("dm-x-submit");
+        if (j->guard) cmdguard_check((const cmdguard_t *)j->guard, j->sub, "before");   // [TL2 #12] DM_NVN_CMDGUARD
+        x_submit(j->h, j->n, j->sub, j->host); free(j->h);
+        if (j->guard) { cmdguard_check((const cmdguard_t *)j->guard, j->sub, "during"); free(j->guard); }
+        XTRACE_END(); }
     else if (j->kind == XJ_PRESENT) {
 #ifdef __OHOS__
         { void front_gtx_frame(void); front_gtx_frame(); }
 #endif
         XTRACE_BEGIN("dm-x-present"); uint64_t tk = mtl_present(j->tex, j->period, j->crop); XTRACE_END(); pthread_mutex_lock(&g_xmu); g_xtk[job % XTK].job = job; g_xtk[job % XTK].tk = tk; pthread_mutex_unlock(&g_xmu); }
+    else if (j->kind == XJ_FLUSH) { XTRACE_BEGIN("dm-x-flush"); mtl_flush(); XTRACE_END(); }   // [TL2 #4] DM_NVN_FENCE_FLUSH
     else {
         XTRACE_BEGIN("dm-x-frame");
         // 按同一线程的累计CPU差统计整个翻译帧（回放、出图均含）；不把GPU/交换链等待当CPU负载。
@@ -1391,6 +1521,8 @@ static uint64_t x_push(xjob *j) {   // 返回任务号 | Returns the job number
 static void x_wait(uint64_t job) { pthread_mutex_lock(&g_xmu); while (g_xq_done < job) pthread_cond_wait(&g_xcv, &g_xmu); pthread_mutex_unlock(&g_xmu); }
 static void x_drain(void) { pthread_mutex_lock(&g_xmu); uint64_t job = g_xq_in; pthread_mutex_unlock(&g_xmu); x_wait(job); }
 static uint64_t x_fence(void) { return atomic_load(&g_x_subs); }
+static void x_flush_req(void) { xjob j = {XJ_FLUSH}; x_push(&j); }   // [TL2 #4] DM_NVN_FENCE_FLUSH: runs right after the submits enqueued before it
+static int x_sub_translated(uint64_t sub) { if (g_x_sync) return 1; pthread_mutex_lock(&g_xmu); const int ok = g_xsub_done >= sub; pthread_mutex_unlock(&g_xmu); return ok; }   // [TL2 #12] from ETR cmp16
 // 等翻译线程把第 sub 次提交翻完（栅栏值 ≤ 已翻译数才去问引擎）；timeout 纳秒，超时返回 0。同步翻译模式提交当场执行，不用等
 // Wait until the translation thread has translated submit number `sub` (the engine is asked about a fence only once it has been translated); timeout in ns, returns 0 on timeout.
 // In synchronous translation mode submits execute in place, so there is nothing to wait for
@@ -1422,6 +1554,11 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     ((queue_t *)q)->submits++;
     xjob j = {XJ_SUBMIT, n, n > 0 ? malloc((size_t)n * sizeof *h) : NULL};   // 句柄数组是游戏的，入队时拷一份 | The handle array belongs to the game; copy it when enqueuing
     if (n > 0) memcpy(j.h, h, (size_t)n * sizeof *h);
+    if (n > 0 && cmdguard_on()) {   // [TL2 #12] DM_NVN_CMDGUARD: snapshot hash of the records this submit will replay
+        cmdguard_t *g = calloc(1, sizeof *g);
+        if (g) { g->nh = n; g->frame = dm_nvn_frame_count(); for (int i = 0; i < n; i++) cmdguard_walk(g, (const uint8_t *)(uintptr_t)h[i]);
+                 g->hash = cmdguard_hash(g); g->nra = nvn_guest_chain(g->ra, 6); j.guard = g; }
+    }
     j.host = mtl_host_latch();
     x_push(&j);
 #ifdef DM_GAME_DOOM
@@ -1896,6 +2033,7 @@ void (*g_nvn_present_crop)(int crop[4]);
 int (*g_nvn_loadscreen_up)(void);   // 宿主登记：读取画面此刻是否开着（diag.c 订阅界面消息时填；图形单测里为空 = 不设闸） | host registration: whether the loading screen is up right now (filled in when diag.c subscribes to UI messages; null in graphics unit tests = no gate)
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
+    { extern void dm_cpu_place_self(void) __attribute__((weak)); if (dm_cpu_place_self) dm_cpu_place_self(); }   // [NR-CPU] DM_CPU_SELF: the main thread re-asserts its own mask
 #ifdef DM_GAME_DOOM
     if (o->presents == 1 || o->presents % 300 == 0) LOG("[nvn] present #%llu (texture %d)", (unsigned long long)o->presents, idx);   // bring-up heartbeat
     // [DOOM] (from the DOOM 2016 port, 3a0d4a7) On-demand dump while the game runs (e.g. stuck behind a loading screen): creating

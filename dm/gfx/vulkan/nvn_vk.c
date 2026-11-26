@@ -93,6 +93,8 @@ void mtl_event_peek(const volatile uint32_t *val){if(!g_null)xbg_game_event_peek
 // [D3] the idle translation thread publishes what the GPU has finished (xbg_game_idle_poll, DM_GFX_IDLE_RETIRE >= 1)
 int mtl_idle_mode(void){return g_null?0:xbg_game_idle_retire_mode();}
 int mtl_idle_poll(uint64_t idle_ns){return g_null?0:xbg_game_idle_poll(idle_ns);}
+// [TL2 #4] DM_NVN_FENCE_FLUSH: a FenceSync(FLUSH_FOR_CPU) hands the translated work to the GPU (xbg_game_flush)
+void mtl_flush(void){if(!g_null)xbg_game_flush();}
 void mtl_sub_event(volatile uint32_t *val,uint32_t mode,uint32_t v){struct{uint64_t a;uint32_t m,v;}p={(uintptr_t)val,mode,v};direct(OP_SIGNAL_EVENT,&p,sizeof(p));}
 void mtl_sub_counter(uint64_t addr,uint32_t type){uint64_t p[]={type,addr};direct(OP_REPORT_COUNTER,p,sizeof(p));g_cnt_report[type&31]++;}
 uint64_t mtl_sub_commit(void){if(!g_in_sub)die("NVN commit without begin");uint64_t f;if(g_null){for(size_t i=0;i<g_nhandles;i++)null_exec((const uint8_t*)(uintptr_t)g_handles[i],0);f=++g_null_fence;}else{xbg_submit((int)g_nhandles,g_handles);f=xbg_legacy_last_fence();}while(g_direct){direct_record *r=g_direct;g_direct=r->next;if(!g_null)xbg_legacy_pool_del(r->data);free(r);}g_in_sub=0;g_nhandles=0;return f;}

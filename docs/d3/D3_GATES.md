@@ -36,6 +36,7 @@ Monolith-specific stay XC2-only; DOOM (2016) main-offset hacks exclude D3.
 | xbg_game.cpp D2R / DOOM Adreno shader keys in pipeguard | !XC2 | off | foreign keys |
 | xbg_game.cpp DM_XC2_WIDE UI shift | XC2 | off | XC2 only |
 | xbg_game.cpp bindless, virtual pools, desc_abandon, VAMM-unmapped UBO zeros, gpu_merge_pending | Eternal | off | id Tech 7 bindless / sparse. Candidates if D3 shows "vkCmd* before vkBeginCommandBuffer" (desc_abandon) or a SIGSEGV reading a uniform block in unmapped VAMM memory (uniform snapshot zeros) |
+| xbg_game.cpp `DM_GFX_POOLRESET_SPLIT` (from TL2 ffefa79, KB PERF-X16) | TL2 | **on** (26.11.2026) | the retire waits only for the reset thread's fence wait, not its vkResetCommandPool (Mali 4-5 ms). `DM_NVN_FENCE_FLUSH` / `DM_GFX_PRESENT_SIDE` stay TL2-only: D3 main calls no FenceSync / SyncWait / QueueFlush (static review of main, port-common fence-flush 26.11); its frame is SignalEvent -> 1 submit -> Present, so present follows the submit at once. The 13 submits / 14 FenceSync of the 11-02 call table are load frames 1-3 |
 | vulkan_present.cpp Vulkan 1.2 + descriptor indexing | Eternal | off | bindless only |
 | vulkan_present.cpp device caps line, custom border colour | XC2 | on | generic |
 
