@@ -139,6 +139,7 @@ set(ANDROID_SRCS
   ${CMAKE_CURRENT_SOURCE_DIR}/gpu_floor.c   # [gpu-floor] PNH-C01 (port-common gpu-floor)
   ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_present.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/vk_driver.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/vk_enc.c   # [vk-enc-thread] DM_GFX_VENC: dm-venc records the translation thread's vkCmd*
   ${CMAKE_CURRENT_SOURCE_DIR}/vk_tramp.S
   ${CMAKE_CURRENT_SOURCE_DIR}/compat/clonefile.c
   ${CMAKE_CURRENT_SOURCE_DIR}/compat/digest.c

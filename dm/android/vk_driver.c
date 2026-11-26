@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include "vk_tramp_names.h"
 #include "vk_ubwc_hint.h"   // [turnip-ubwc-hint] PNH-B-11 (port-common turnip-ubwc-hint)
+#include "vk_enc.h"   // [vk-enc-thread] DM_GFX_VENC: dm_venc_wrap
 #ifdef DM_ADRENOTOOLS
 #include <adrenotools/driver.h>
 #endif
@@ -551,6 +552,7 @@ __attribute__((visibility("hidden"))) void *dm_vk_resolve(unsigned i) {
         else if (!strcmp(n, "vkCreateInstance")) p = (void *)create_instance;
         else p = (void *)g_gipa(g_instance, n);
         if (!p) { LOG("[vk] %s: the driver has no such function (instance %p)", n, (void *)g_instance); abort(); }
+        p = dm_venc_wrap(i, n, p);   // [vk-enc-thread] DM_GFX_VENC: the encoder's wrapper for the calls it handles (=0: the driver's pointer)
         dm_vk_table[i] = p;
     }
     pthread_mutex_unlock(&g_lock);
