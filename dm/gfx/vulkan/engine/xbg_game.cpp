@@ -131,6 +131,9 @@ extern "C" int mtl_addr(uint64_t addr,uint64_t len,void **buf,uint64_t *off);   
 #include <algorithm>
 
 #include "xbg_vendor_policy.h"
+#include "xbg_stock_tile.h"   // [stock-tile] PNH-B-01: the exact tile rules on Qualcomm's stock driver (port-common stock-tile)
+// [stock-tile] the device's VkDriverId / driverName (0 / "" when it reports none) and the module's decision (initialize)
+static uint32_t gpu_driver_id=0;static char gpu_driver_name[64]="";static int stock_tile_mode=1;static bool stock_tile_on=false;
 // [nonadreno] (from the DOOM 2016 port, 7c0da0e) DM_GFX_SIM_GPU (xbg_vendor_policy.h): every format-feature query of this file goes through here, so a simulated
 // Mali / PowerVR / Xclipse profile also narrows format features (BC, linear filtering of 16-bit / depth formats, D24). Without
 // the switch sim_gpu is 0 and this is the driver's answer unchanged.
@@ -7536,18 +7539,36 @@ extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t b
     
      gpguard::careful=false;gpguard::loaded=false;gpguard::skip.clear();gpguard::told.clear();gpguard::proven.clear();gpguard::any=false;gpguard::load();
      ubo_dynamic_on=xbg_env_or(getenv("DM_GFX_UBO_DYNAMIC"),xbg_ubo_dynamic_default(gpu_policy));noout_mask_on=xbg_env_or(getenv("DM_GFX_NOOUT_MASK"),xbg_noout_mask_default(gpu_policy));
+     // [stock-tile] Qualcomm's stock driver bins every pass through GMEM: the exact tile rules below default on there too (xbg_stock_tile.h,
+     // DM_GFX_STOCK_TILE; PNH-B-01). Turnip and every other driver keep their family defaults; NOLOAD stays family-only.
+     {VkPhysicalDeviceDriverProperties dp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};p2.pNext=&dp;vkGetPhysicalDeviceProperties2(cfg.physical,&p2);
+      gpu_driver_id=uint32_t(dp.driverID);snprintf(gpu_driver_name,sizeof gpu_driver_name,"%s",dp.driverName);
+      stock_tile_mode=xbg_stock_tile_mode(getenv("DM_GFX_STOCK_TILE"));stock_tile_on=xbg_stock_tile_active(stock_tile_mode,properties.vendorID,gpu_driver_id);}
+     const bool stk=stock_tile_on;
      // [nonadreno][tile] tile-based GPU paths (xbg_vendor_policy.h; from the DOOM 2016 port); DM_GFX_NOLOAD is read with its marker below.
-     tile_barrier_on=xbg_env_or(getenv("DM_GFX_TILE_BARRIER"),xbg_tile_barrier_default(gpu_policy));tile_poison=xbg_env_or(getenv("DM_GFX_TILE_POISON"),false);
+     tile_barrier_on=xbg_env_or(getenv("DM_GFX_TILE_BARRIER"),xbg_stock_tile_default(xbg_tile_barrier_default(gpu_policy),stk));tile_poison=xbg_env_or(getenv("DM_GFX_TILE_POISON"),false);
      frag_seq=passes_since_full=0;read_frag_only=false;tile_frag_barriers=tile_war_barriers=tile_poisoned=0;
-     {const char *e=getenv("DM_GFX_STORE_NONE");store_none_on=e && *e?atoi(e):(xbg_store_none_default(gpu_policy)?1:0);if(store_none_on<0 || store_none_on>2)store_none_on=1;}
+     {const char *e=getenv("DM_GFX_STORE_NONE");store_none_on=e && *e?atoi(e):(xbg_stock_tile_default(xbg_store_none_default(gpu_policy),stk)?1:0);if(store_none_on<0 || store_none_on>2)store_none_on=1;}
      const bool lsn=&dm_vk_store_none && dm_vk_store_none;
      store_none_op=!store_none_on?VK_ATTACHMENT_STORE_OP_STORE:lsn?VK_ATTACHMENT_STORE_OP_NONE:store_none_on==2?VK_ATTACHMENT_STORE_OP_DONT_CARE:VK_ATTACHMENT_STORE_OP_STORE;
+     const bool stk_none_lost=store_none_on && store_none_op==VK_ATTACHMENT_STORE_OP_STORE;   // [stock-tile] for the report
      if(store_none_op==VK_ATTACHMENT_STORE_OP_STORE)store_none_on=0;   // no extension: STORE_OP_NONE does not exist; =2 takes DONT_CARE instead
-     store_dead_on=xbg_env_or(getenv("DM_GFX_STORE_DEAD"),xbg_store_dead_default(gpu_policy));dead_pending.clear();
+     store_dead_on=xbg_env_or(getenv("DM_GFX_STORE_DEAD"),xbg_stock_tile_default(xbg_store_dead_default(gpu_policy),stk));dead_pending.clear();
      store_none_passes=store_none_aspects=store_none_splits=store_dead_passes=store_dead_aspects=store_scan_ops=store_dead_violations=store_dead_poisoned=0;
-     lazy_twin_flush_on=xbg_env_or(getenv("DM_GFX_LAZY_TWIN_FLUSH"),xbg_lazy_tile_default(gpu_policy));lazy_keep_on=xbg_env_or(getenv("DM_GFX_LAZY_KEEP"),xbg_lazy_tile_default(gpu_policy));lazy_twin_flushes=lazy_kept=0;
+     lazy_twin_flush_on=xbg_env_or(getenv("DM_GFX_LAZY_TWIN_FLUSH"),xbg_stock_tile_default(xbg_lazy_tile_default(gpu_policy),stk));lazy_keep_on=xbg_env_or(getenv("DM_GFX_LAZY_KEEP"),xbg_stock_tile_default(xbg_lazy_tile_default(gpu_policy),stk));lazy_twin_flushes=lazy_kept=0;
      xbg_logf("NVN tile policy: tile_barrier=%d store_none=%d op=%s (load_store_op_none %s) store_dead=%d poison=%d noload default=%d lazy_twin_flush=%d lazy_keep=%d (DM_GFX_TILE_BARRIER / STORE_NONE / STORE_DEAD / TILE_POISON / NOLOAD / LAZY_TWIN_FLUSH / LAZY_KEEP)",
               int(tile_barrier_on),store_none_on,store_none_op==VK_ATTACHMENT_STORE_OP_NONE?"none":store_none_op==VK_ATTACHMENT_STORE_OP_DONT_CARE?"dont_care":"-",lsn?"enabled":"absent",int(store_dead_on),int(tile_poison),int(xbg_noload_default(gpu_policy)),int(lazy_twin_flush_on),int(lazy_keep_on));
+     {auto own=[](const char *n){const char *e=getenv(n);return e && *e;};   // [stock-tile] one line: which exact rules are on and why
+      const uint32_t wanted=stk?((xbg_tile_barrier_default(gpu_policy)?0u:XBG_STK_TILE_BARRIER)|(xbg_store_none_default(gpu_policy)?0u:XBG_STK_STORE_NONE)|
+          (xbg_store_dead_default(gpu_policy)?0u:XBG_STK_STORE_DEAD)|(xbg_lazy_tile_default(gpu_policy)?0u:XBG_STK_LAZY_TWIN_FLUSH|XBG_STK_LAZY_KEEP)):0u;
+      const uint32_t effective=(tile_barrier_on?XBG_STK_TILE_BARRIER:0u)|(store_none_on?XBG_STK_STORE_NONE:0u)|(store_dead_on?XBG_STK_STORE_DEAD:0u)|
+          (lazy_twin_flush_on?XBG_STK_LAZY_TWIN_FLUSH:0u)|(lazy_keep_on?XBG_STK_LAZY_KEEP:0u);
+      const uint32_t own_set=(own("DM_GFX_TILE_BARRIER")?XBG_STK_TILE_BARRIER:0u)|(own("DM_GFX_STORE_NONE")?XBG_STK_STORE_NONE:0u)|(own("DM_GFX_STORE_DEAD")?XBG_STK_STORE_DEAD:0u)|
+          (own("DM_GFX_LAZY_TWIN_FLUSH")?XBG_STK_LAZY_TWIN_FLUSH:0u)|(own("DM_GFX_LAZY_KEEP")?XBG_STK_LAZY_KEEP:0u);
+      char line[600];xbg_stock_tile_line(line,sizeof line,stock_tile_mode,stk,properties.vendorID,gpu_driver_id,gpu_driver_name,wanted,effective,own_set,stk && stk_none_lost);
+      xbg_logf("NVN stock tile: %s (DM_GFX_STOCK_TILE)",line);
+      pc_note("stock-tile",stk?1:0,"%s",line);   // [pc]
+     }
      xbg_logf("NVN gpu policy: pipe_serial=%d pipe_guard=%d ubo_dynamic=%d noout_mask=%d zero-copy default=%d (DM_GFX_PIPE_SERIAL / PIPE_GUARD / UBO_DYNAMIC / NOOUT_MASK / ZEROCOPY)",
               int(gpguard::serial),int(gpguard::guard),int(ubo_dynamic_on),int(noout_mask_on),int(xbg_zero_copy_default(gpu_policy)));}
     {const auto &l=properties.limits;VkDeviceSize a=256;for(VkDeviceSize x:{l.minUniformBufferOffsetAlignment,l.minStorageBufferOffsetAlignment,l.minTexelBufferOffsetAlignment,l.optimalBufferCopyOffsetAlignment,l.nonCoherentAtomSize,VkDeviceSize(16)})while(a<x)a<<=1;arena_alignment=a;}

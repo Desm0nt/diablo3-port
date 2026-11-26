@@ -31,6 +31,7 @@
 #include <vulkan/vulkan.h>
 #include <unistd.h>
 #include "vk_tramp_names.h"
+#include "vk_ubwc_hint.h"   // [turnip-ubwc-hint] PNH-B-11 (port-common turnip-ubwc-hint)
 #ifdef DM_ADRENOTOOLS
 #include <adrenotools/driver.h>
 #endif
@@ -266,6 +267,30 @@ static PFN_vkGetInstanceProcAddr direct_icd(const char *lib, const char **why) {
 }
 #endif
 
+// [turnip-ubwc-hint] (vk_ubwc_hint.h; port-common turnip-ubwc-hint, KB PNH-B-11) Turnip on an Adreno 740 gets the system driver's texture-unit
+// UBWC flag hint in FD_DEV_FEATURES (appended to a value dm/env set; a value that names the feature is kept). DM_VK_TU_UBWC_HINT=0 leaves
+// FD_DEV_FEATURES alone. One log line, and the [pc] report where port-common's pc-core is linked (weak: absent elsewhere).
+#ifdef DM_ADRENOTOOLS
+extern void pc_note(const char *id, int applied, const char *fmt, ...) __attribute__((weak));
+static void ubwc_hint(void) {
+    char why[400], model[96]; int applied = 0; const char *sw = getenv("DM_VK_TU_UBWC_HINT"), *have = getenv("FD_DEV_FEATURES");
+    dm_ubwc_model(model, sizeof model);
+    if (sw && *sw == '0') snprintf(why, sizeof why, "DM_VK_TU_UBWC_HINT=0: FD_DEV_FEATURES left as it is (%s)", have ? have : "unset");
+    else if (!dm_ubwc_model_740(model)) snprintf(why, sizeof why, "gpu_model \"%s\" is not an Adreno 740: Mesa's default matches its system driver", model);
+    else {
+        const int v = dm_ubwc_system_version("/vendor/lib64/libGLESv2_adreno.so");
+        char val[512]; const int r = v ? dm_ubwc_compose(val, sizeof val, have, v >= 700) : -2;
+        if (r == 1) { setenv("FD_DEV_FEATURES", val, 1); applied = 1;
+                      snprintf(why, sizeof why, "Adreno 740 \"%s\", system driver V@%04d (%s): FD_DEV_FEATURES=%s", model, v, v >= 700 ? "v7xx sets the hint" : "v6xx leaves it off", val); }
+        else if (r == 0) snprintf(why, sizeof why, "FD_DEV_FEATURES=%s already names " DM_UBWC_FEATURE ": kept", have);
+        else if (r == -1) snprintf(why, sizeof why, "FD_DEV_FEATURES too long to append to: kept");
+        else snprintf(why, sizeof why, "Adreno 740 \"%s\": the system driver's version (V@ in /vendor/lib64/libGLESv2_adreno.so) not found: FD_DEV_FEATURES left alone", model);
+    }
+    LOG("[vk] turnip-ubwc-hint: %s (%s); PNH-B-11", applied ? "applied" : "skipped", why);
+    if (pc_note) pc_note("turnip-ubwc-hint", applied, "%s; PNH-B-11", why);
+}
+#endif
+
 static void load_driver(void) {
     void *lib = NULL; const char *reason = "ok", *req = getenv("DM_VK_DRIVER"), *force = getenv("DM_VK_DRIVER_FORCE");
     const int kgsl = kgsl_present(), mali = mali_present(), pvr = pvr_present(); char model[96]; gpu_model(model, sizeof model);
@@ -323,6 +348,7 @@ static void load_driver(void) {
         // twice); on Adreno 750 both modes were equal. TU_DEBUG= (empty) lets Turnip choose.
         if (fam == FAM_ADRENO || fam == FAM_ANY) {
             if (!getenv("TU_DEBUG")) setenv("TU_DEBUG", "sysmem", 0);
+            ubwc_hint();   // [turnip-ubwc-hint] PNH-B-11: before the driver reads FD_DEV_FEATURES at its first device
             LOG("[vk] TU_DEBUG=%s (Turnip reads it when the driver loads)", getenv("TU_DEBUG") ? getenv("TU_DEBUG") : "(unset)");
         }
         // [DOOM] PanVK (the JimVulkan kbase build) and the window's buffers (BUGS_AND_FIXES 2.58, issue #33: Mali-G57 MT6789, the whole
