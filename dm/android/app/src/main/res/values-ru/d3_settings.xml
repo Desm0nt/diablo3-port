@@ -63,6 +63,8 @@
     <string name="d3_mp_lan">Локальная беспроводная игра по Wi-Fi</string>
     <string name="d3_mp_lan_note">«Локальная беспроводная» игра работает между телефонами в одной сети Wi-Fi или на одной точке доступа. Пока не создана или не ищется локальная игра, ничего не открывается.</string>
     <string name="d3_fps_counter">Счётчик FPS и времени кадра</string>
+    <string name="d3_fps_dot">Точка нагрева рядом со счётчиком</string>
+    <string name="d3_fps_dot_note">Зелёная — полная скорость, жёлтая — телефон греется, красная — горячий и замедляется. Долгое нажатие на счётчик — подробности.</string>
     <string name="d3_logs">Записывать логи</string>
     <string name="d3_logs_note">Логи пишутся в Download/Diablo3Mobile/logs (boot.log, logcat.txt, по несколько МБ). Выкл: туда ничего не пишется; если игра вылетит, отчёт о сбое (crash.txt) всё равно сохранится.</string>
     <string name="d3_deadzone">Экранные стики: компенсация мёртвой зоны игры</string>
