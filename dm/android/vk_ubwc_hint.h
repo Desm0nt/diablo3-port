@@ -16,6 +16,12 @@
 
 #define DM_UBWC_FEATURE "enable_tp_ubwc_flag_hint"
 
+// The kgsl gpu_model node ("Adreno740v2"), "" when there is none (not an Adreno, or unreadable).
+static inline void dm_ubwc_model(char *out, size_t n) {
+    if (!out || !n) return;
+    out[0] = 0; FILE *f = fopen("/sys/class/kgsl/kgsl-3d0/gpu_model", "r");
+    if (f) { if (fgets(out, (int)n, f)) out[strcspn(out, "\r\n")] = 0; fclose(f); }
+}
 // "Adreno740v2" / "Adreno740" (the kgsl gpu_model node): 1, anything else 0.
 static inline int dm_ubwc_model_740(const char *model) { return model && !strncmp(model, "Adreno740", 9) && !isdigit((unsigned char)model[9]); }
 

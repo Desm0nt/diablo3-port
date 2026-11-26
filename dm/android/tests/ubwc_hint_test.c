@@ -23,6 +23,7 @@ int main(int argc, char **argv) {
     CHECK(dm_ubwc_model_740("Adreno740v2")); CHECK(dm_ubwc_model_740("Adreno740"));
     CHECK(!dm_ubwc_model_740("Adreno750v2")); CHECK(!dm_ubwc_model_740("Adreno7400")); CHECK(!dm_ubwc_model_740("Adreno74"));
     CHECK(!dm_ubwc_model_740("(unreadable)")); CHECK(!dm_ubwc_model_740(NULL)); CHECK(!dm_ubwc_model_740(""));
+    { char m[32] = "junk"; dm_ubwc_model(m, sizeof m); CHECK(strlen(m) < sizeof m); dm_ubwc_model(NULL, 4); dm_ubwc_model(m, 0); }   // a host has no kgsl node: ""
 
     CHECK(scan_with(dir, "u1.bin", 100, "OpenGL ES V@0863.0 (GIT@abc)") == 863);
     CHECK(scan_with(dir, "u2.bin", 100, "V@0615.65") == 615);

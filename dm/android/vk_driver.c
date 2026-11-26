@@ -77,8 +77,9 @@ static void gpu_model(char *out, size_t n) {
 // FD_DEV_FEATURES alone. One log line, and the [pc] report where port-common's pc-core is linked (weak: absent elsewhere).
 #ifdef DM_ADRENOTOOLS
 extern void pc_note(const char *id, int applied, const char *fmt, ...) __attribute__((weak));
-static void ubwc_hint(const char *model) {
-    char why[400]; int applied = 0; const char *sw = getenv("DM_VK_TU_UBWC_HINT"), *have = getenv("FD_DEV_FEATURES");
+static void ubwc_hint(void) {
+    char why[400], model[96]; int applied = 0; const char *sw = getenv("DM_VK_TU_UBWC_HINT"), *have = getenv("FD_DEV_FEATURES");
+    dm_ubwc_model(model, sizeof model);
     if (sw && *sw == '0') snprintf(why, sizeof why, "DM_VK_TU_UBWC_HINT=0: FD_DEV_FEATURES left as it is (%s)", have ? have : "unset");
     else if (!dm_ubwc_model_740(model)) snprintf(why, sizeof why, "gpu_model \"%s\" is not an Adreno 740: Mesa's default matches its system driver", model);
     else {
@@ -347,7 +348,7 @@ static void load_driver(void) {
         if (fam == FAM_ADRENO || fam == FAM_ANY) {
             if (!getenv("TU_DEBUG")) setenv("TU_DEBUG", "sysmem", 0);
             LOG("[vk] TU_DEBUG=%s (Turnip reads it when the driver loads)", getenv("TU_DEBUG") ? getenv("TU_DEBUG") : "(unset)");
-            ubwc_hint(model);   // [turnip-ubwc-hint] PNH-B-11: before the driver reads FD_DEV_FEATURES at its first device
+            ubwc_hint();   // [turnip-ubwc-hint] PNH-B-11: before the driver reads FD_DEV_FEATURES at its first device
         }
         // [DOOM] PanVK (the JimVulkan kbase build) and the window's buffers (BUGS_AND_FIXES 2.58, issue #33: Mali-G57 MT6789, the whole
         // picture turned into grey stripes and dots a minute or two into the game). The buffers of a swapchain come from the phone's
