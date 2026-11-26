@@ -1009,10 +1009,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 public void onStopTrackingTouch(android.widget.SeekBar sb) {}
             });
             note(box, ui.getString(R.string.d3_zoom_note));
-            heading(box, when(ui, R.string.d3_fps_limit, false));
+            heading(box, when(ui, R.string.d3_fps_limit, true));   // [pace-vote] live: PaceVote.setCap in save
             String[] limLabels = new String[D3_FPS_LIMITS.length]; int limAt = 0;
             for (int i = 0; i < limLabels.length; i++) { limLabels[i] = String.valueOf(D3_FPS_LIMITS[i]); if (D3_FPS_LIMITS[i] == d3FpsLimit()) limAt = i; }
             RadioGroup fpsLim = radios(box, limLabels, 8500, limAt, true);
+            final int fpsWas = d3FpsLimit();
             note(box, ui.getString(R.string.d3_fps_note));
             // [cpu-place] Which cores the game's threads may use (issue #23: some phones are faster with one, some with another); live
             heading(box, when(ui, R.string.d3_cpu_cores, true));
@@ -1111,6 +1112,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                     .putBoolean("d3_native_res", nativeC.isChecked()).putInt("d3_upscale", picked(upG, 9600, 2)).putBoolean("d3_aniso", anisoC.isChecked())
                     .putBoolean("d3_drs", drsC.isChecked()).putInt("d3_present", picked(presentG, 9700, 3)).putInt("d3_pad_layout", picked(padLayG, 9800, 2)).apply();
                 PauseMenu.byLetter = picked(padLayG, 9800, 2) == 1;
+                // [pace-vote] the limit applies at once (hle_nvn.c nvn_present_cap_set; the window's vote and display mode follow); only a real
+                // change, so a dm/env DM_PRESENT_MAX_HZ stays until the player picks another limit
+                if (libraryLoaded && started && d3FpsLimit() != fpsWas) PaceVote.setCap(d3FpsLimit());
                 if (libraryLoaded && started) try { nativeSetPadLayout(PauseMenu.byLetter); } catch (UnsatisfiedLinkError e) { /* an older library */ }
                 if (libraryLoaded && started) try { nativeCpuCores(d3CpuCores()); } catch (UnsatisfiedLinkError e) { /* a library without the module */ }
                 if (libraryLoaded && started) try { nativeSetAniso(anisoC.isChecked() ? 4 : 0); nativeSetUpscale(picked(upG, 9600, 2)); } catch (UnsatisfiedLinkError e) { /* an older library */ }
@@ -1437,6 +1441,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         }
         started = true;
         GameStateHint.install(this, resumed);   // [game-state] GameManager.setGameState from the native loading / scene state (API 33)
+        PaceVote.install(this, resumed);        // [pace-vote] the window's display mode follows the frame cap (30 -> 60 Hz)
         if (touchOverlay != null) touchOverlay.setInputEnabled(true);
         // [D3] VkDrivers.gameStarted (DOOM 2016): the notice from choose(), the crash guard cleared at the first frames, the fallback dialog
         // (DRV-09), the in-process fallback after a failed Vulkan start (DRV-07); then the "a new version is out" check (once per start)
